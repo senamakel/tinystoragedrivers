@@ -22,5 +22,8 @@ Native storage still owns schema, generations, leases, validation and atomicity.
 The adapter does not open stores, declare schemas, infer authority, or implement
 module business logic.
 
+The production adapter and compiled callback proof pin canonical TinyBus
+v0.1.7 at immutable revision `ed1ee4f5ee561c0320fa715eef114e0f1b888e41`.
+
 This foundation is not TinyMemes persistence, legacy import authority, or proof
 of lifecycle draining beyond the pinned canonical TinyBus contract.
