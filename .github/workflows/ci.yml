@@ -140,6 +140,9 @@ jobs:
           # the token in git config.
           persist-credentials: false
 
+      - name: Test document callback proof target-directory handling
+        run: python3 .github/scripts/test_document_callback_runner.py
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -172,9 +175,6 @@ jobs:
 
       - name: Prove data-only storage contract has no transport dependencies
         run: bash scripts/test-storage-needs-consumer.sh
-
-      - name: Test document callback proof target-directory handling
-        run: python3 .github/scripts/test_document_callback_runner.py
 
       - name: Verify confidential document callbacks through a real module
         run: bash scripts/test-document-callback.sh
