@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "storage-needs-consumer-proof"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tinystoragedrivers-bus = { path = "../../crates/tinystoragedrivers-bus", default-features = false }

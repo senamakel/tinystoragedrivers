@@ -11,7 +11,14 @@ publish = false
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-tinybus.workspace = true
+# The compatibility client uses TinyBus; data-only consumers disable `client`.
+tinybus = { workspace = true, optional = true }
+
+[features]
+# Keep the original client API available to existing default-feature consumers.
+default = ["client"]
+# The legacy confidential CRUD client; data-only consumers can omit TinyBus.
+client = ["dep:tinybus"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

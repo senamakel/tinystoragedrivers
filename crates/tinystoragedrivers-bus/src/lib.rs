@@ -1,7 +1,8 @@
 //! Confidential document data and CAS requests for compiled modules.
 //!
 //! Scope and collection authority remain captured by the host, outside the wire.
-//! This contract links no native storage ports or implementations.
+//! The data types are available without `TinyBus` by disabling default features;
+//! the default-on `client` feature retains the legacy `DocumentClient` API.
 //!
 //! ```
 //! use tinystoragedrivers_bus::{Precondition, PutRequest};
@@ -16,6 +17,7 @@
 //! # Ok::<(), serde_json::Error>(())
 //! ```
 mod blobs;
+#[cfg(feature = "client")]
 mod client;
 mod documents;
 mod inline_json;
@@ -28,6 +30,7 @@ pub use blobs::{
     BlobStreamHead, GetRangeRequest, ListBlobsRequest, PresignRequest, PresignedUrl,
     PutBlobRequest, PutBlobStreamRequest, is_blobs_selector,
 };
+#[cfg(feature = "client")]
 pub use client::DocumentClient;
 pub use documents::{
     BatchRequest, BatchResponse, CapabilitiesReply, ClaimRequest, CollectionRequest,
