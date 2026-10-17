@@ -28,7 +28,8 @@ env:
 jobs:
   prepare:
     name: Prepare release
-    if: ${{ github.ref == 'refs/heads/main' }}
+    # Temporary release admission for this epic; remove it before the main rollup.
+    if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/epic/8056-modules-wiring' }}
     runs-on: ubuntu-latest
     env:
       # The MongoDB driver's `live_*` tests run against this server, and the

@@ -53,11 +53,13 @@
 //! * Watch signals are unicast with `Connection::emit_to` to the subscribing
 //!   caller, so a peer that matches the same path or interface never sees them.
 mod chunks;
+pub mod grant;
 mod host;
 mod names;
 mod per_caller;
 mod transport;
 
+pub use grant::{Denied, GrantError, GrantPolicy, Plan, ReplyFilter, StorageGrant};
 pub use host::{HostFailure, ServedStorage, StorageCall, StorageEndpoint, serve};
 pub use names::{
     ERROR_DENIED, ERROR_STORAGE, HOST_NAME, OBJECT_ROOT, WATCH_MEMBER, object_path, watch_path,
