@@ -25,10 +25,6 @@ The `tinystoragedrivers-bus` package supports Rust 1.85 in either feature
 profile. The storage workspace and implementation packages remain at Rust
 1.88; see the [bus contract MSRV spec](bus-contract-msrv.md).
 
-The `tinystoragedrivers-bus` package supports Rust 1.85 in either feature
-profile. The storage workspace and implementation packages remain at Rust
-1.88; see the [bus contract MSRV spec](bus-contract-msrv.md).
-
 Goals are full Documents, Streams, Blobs and Secrets parity; one host-captured
 caller authority; mechanically adapted clients and servers; and shared
 conformance proving same-port behavior. The existing `tinystoragedrivers`

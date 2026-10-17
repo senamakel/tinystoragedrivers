@@ -44,5 +44,3 @@ must keep passing, demonstrating that existing client users remain compatible.
 The `bus-msrv` CI job runs the default and no-default bus tests and independent
 consumer proof on Rust 1.85; the compiled callback proof also runs in the
 workspace's Rust 1.88 lane.
-The `bus-msrv` CI job runs the bus tests and independent consumer proof on Rust
-1.85; the compiled callback proof also runs in the Rust 1.88 workspace lane.

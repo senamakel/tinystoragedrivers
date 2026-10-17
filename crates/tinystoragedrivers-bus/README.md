@@ -37,11 +37,3 @@ client and with default features disabled. The storage-driver workspace remains
 at Rust 1.88; only this portable contract package advertises the lower MSRV.
 The `bus-msrv` CI job checks both profiles and the independent consumer proof
 on Rust 1.85.
-
-## Rust version
-
-This package supports Rust 1.85 with both the default TinyBus compatibility
-client and with default features disabled. The storage-driver workspace remains
-at Rust 1.88; only this portable contract package advertises the lower MSRV.
-The `bus-msrv` CI job checks both profiles and the independent consumer proof
-on Rust 1.85.
