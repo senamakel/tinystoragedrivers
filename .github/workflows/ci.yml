@@ -312,9 +312,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # `rust-version` is inherited from `[workspace.package]`, so every member
-      # reports the same value. Read it off the package the module ships as
-      # rather than off `packages[0]`, whose order cargo does not promise.
+      # The implementation package inherits the workspace Rust 1.88 MSRV;
+      # `tinystoragedrivers-bus` intentionally overrides it to Rust 1.85. Read
+      # the implementation package directly rather than `packages[0]`, whose
+      # order cargo does not promise.
       - name: Read rust-version from Cargo.toml
         id: msrv
         run: |
