@@ -17,6 +17,10 @@ for compatibility; moving transport adapters out of the wire crate is part of
 the staged implementation, not a property claimed for the current dependency
 graph.
 
+The proxy is behind a default-on `client` Cargo feature, so a data-only
+consumer can disable defaults and link the wire declarations without TinyBus;
+see the [client feature spec](bus-client-feature.md).
+
 Goals are full Documents, Streams, Blobs and Secrets parity; one host-captured
 caller authority; mechanically adapted clients and servers; and shared
 conformance proving same-port behavior. The existing `tinystoragedrivers`
@@ -269,10 +273,11 @@ the same path or interface never receives them.
 
 ## Acceptance
 
-- The new wire types use serde-only data dependencies, with no core, transport,
-  async-trait or runtime dependency. The crate currently retains its legacy
-  TinyBus proxy dependency for compatibility; it is not represented as a
-  serde-only crate dependency graph.
+- With default features disabled, the wire types and storage-needs declarations
+  use serde-only data dependencies, with no core, transport, async-trait or
+  runtime. The default-on legacy client adds TinyBus only for consumers that
+  retain `DocumentClient`; the independent consumer proof checks the
+  no-default normal/build dependency graph.
 - Every selector and message shape is pinned by wire roundtrip and unknown
   selector/field rejection tests; no message accepts scope selectors.
 - Native and module callers run the same Documents/Streams/Blobs/Secrets

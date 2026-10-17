@@ -170,6 +170,9 @@ jobs:
       - name: Test default features
         run: cargo test
 
+      - name: Prove data-only storage contract has no transport dependencies
+        run: bash scripts/test-storage-needs-consumer.sh
+
       - name: Verify confidential document callbacks through a real module
         run: bash scripts/test-document-callback.sh
 

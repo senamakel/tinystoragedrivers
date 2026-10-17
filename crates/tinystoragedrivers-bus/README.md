@@ -20,3 +20,12 @@ TinyBus stream references. No privacy check or stream API is bypassed.
 The crate also pins the Streams, Blobs and Secrets wire shapes, finite
 selector sets, size limits and `CONTRACT_VERSION`; see
 [the storage bus spec](../../docs/specs/storage-bus.md).
+
+## Dependency profiles
+
+The default `client` feature preserves the legacy `DocumentClient` API and
+enables TinyBus. A consumer that only needs portable wire or storage-needs
+types can set `default-features = false`; this retains those data types without
+including TinyBus in its normal/build dependency graph. The independent
+[storage-needs consumer proof](../../proof-workspaces/storage-needs/README.md)
+checks that dependency profile.

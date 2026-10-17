@@ -166,11 +166,13 @@ jobs:
           # version bump changes. `-p <name> --precise` cannot express "and the
           # other member moved too".
           cargo update --workspace
-          # The callback proof is an excluded workspace with its own lockfile.
-          # Keep its path-dependency versions current and verify its locked
-          # build before creating the release commit and tag.
+          # These proofs are excluded workspaces with their own lockfiles.
+          # Keep their path-dependency versions current and verify their locked
+          # builds before creating the release commit and tag.
           cargo update --manifest-path proof-workspaces/document-callback/Cargo.toml --workspace
+          cargo update --manifest-path proof-workspaces/storage-needs/Cargo.toml --workspace
           bash scripts/test-document-callback.sh
+          bash scripts/test-storage-needs-consumer.sh
           released="$(cargo metadata --format-version 1 --no-deps \
             | jq -r --arg name "$CRATE_NAME" \
               '.packages[] | select(.name == $name) | .version')"
@@ -187,7 +189,8 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock proof-workspaces/document-callback/Cargo.lock
+          git add Cargo.toml Cargo.lock proof-workspaces/document-callback/Cargo.lock \
+            proof-workspaces/storage-needs/Cargo.lock
           git commit -m "Release ${RELEASE_TAG}"
           git tag -a "${RELEASE_TAG}" -m "Release ${RELEASE_TAG}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
