@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 use tinystoragedrivers_bus::{
-    CollectionSpec, StorageNeeds, is_blobs_selector, is_documents_selector, is_secrets_selector,
-    is_streams_selector,
+    CollectionSpec, StorageNeeds, StorageNeedsWithExactSecrets, is_blobs_selector,
+    is_documents_selector, is_secrets_selector, is_streams_selector,
 };
 use tinystoragedrivers_client::Object;
 use tinystoragedrivers_core::{
@@ -35,7 +35,34 @@ impl StorageGrant {
         needs: StorageNeeds<'_>,
         policy: &GrantPolicy<'_>,
     ) -> Result<Self, GrantError> {
-        if !needs.secret_prefixes.is_empty() && !policy.allow_secrets {
+        Self::from_declaration(needs, &[], policy)
+    }
+
+    /// Validate and own host-approved needs that include exact secret names.
+    ///
+    /// Exact names authorize individual Get, Set, and Delete calls. They do
+    /// not authorize list operations; listing remains bounded by declared
+    /// secret prefixes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a content-free [`GrantError`] when the declaration is malformed
+    /// or host policy refuses secret access.
+    pub fn from_needs_with_exact_secrets(
+        needs: StorageNeedsWithExactSecrets<'_>,
+        policy: &GrantPolicy<'_>,
+    ) -> Result<Self, GrantError> {
+        Self::from_declaration(needs.needs, needs.exact_secret_names, policy)
+    }
+
+    fn from_declaration(
+        needs: StorageNeeds<'_>,
+        exact_secret_names: &[&str],
+        policy: &GrantPolicy<'_>,
+    ) -> Result<Self, GrantError> {
+        if (!needs.secret_prefixes.is_empty() || !exact_secret_names.is_empty())
+            && !policy.allow_secrets
+        {
             return Err(GrantError::SecretsDenied);
         }
 
@@ -57,12 +84,14 @@ impl StorageGrant {
         let stream_prefixes = own_prefixes(needs.stream_prefixes, MAX_ID_LEN)?;
         let blob_prefixes = own_blob_prefixes(needs.blob_prefixes)?;
         let secret_prefixes = own_secret_prefixes(needs.secret_prefixes)?;
+        let exact_secret_names = own_exact_secret_names(exact_secret_names)?;
 
         Ok(Self {
             collections,
             stream_prefixes,
             blob_prefixes,
             secret_prefixes,
+            exact_secret_names,
             writable: policy.writable,
         })
     }
@@ -163,7 +192,9 @@ impl StorageGrant {
             Object::Documents => !self.collections.is_empty(),
             Object::Streams => !self.stream_prefixes.is_empty(),
             Object::Blobs => !self.blob_prefixes.is_empty(),
-            Object::Secrets => !self.secret_prefixes.is_empty(),
+            Object::Secrets => {
+                !self.secret_prefixes.is_empty() || !self.exact_secret_names.is_empty()
+            }
         }
     }
 
@@ -286,7 +317,9 @@ impl StorageGrant {
         match selector {
             "Get" | "Set" | "Delete" => {
                 let name = text(request, "name")?;
-                Self::prefix(&self.secret_prefixes, name)?;
+                if !self.exact_secret_names.iter().any(|exact| exact == name) {
+                    Self::prefix(&self.secret_prefixes, name)?;
+                }
                 Ok(forward("[REDACTED]"))
             }
             "List" => {
@@ -365,6 +398,18 @@ fn own_secret_prefixes(prefixes: &[&str]) -> Result<Vec<String>, GrantError> {
             return Err(GrantError::Prefix);
         }
         owned.push((*prefix).to_owned());
+    }
+    Ok(owned)
+}
+
+fn own_exact_secret_names(names: &[&str]) -> Result<Vec<String>, GrantError> {
+    let mut seen = BTreeSet::new();
+    let mut owned = Vec::with_capacity(names.len());
+    for name in names {
+        if tinystoragedrivers_core::validate_secret_name(name).is_err() || !seen.insert(*name) {
+            return Err(GrantError::Prefix);
+        }
+        owned.push((*name).to_owned());
     }
     Ok(owned)
 }
@@ -504,3 +549,7 @@ fn forward(target: impl Into<String>) -> Plan {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "exact_secret_tests.rs"]
+mod exact_secret_tests;

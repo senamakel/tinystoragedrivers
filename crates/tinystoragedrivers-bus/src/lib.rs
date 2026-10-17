@@ -38,9 +38,9 @@ pub use documents::{
     DeleteDocumentRequest, DeleteWhereRequest, Direction, EnsureCollectionRequest,
     ExpectedDocument, Filter, GetDocumentRequest, IndexSpec, PutDocumentRequest, Query,
     QueryRequest, QueryResponse, ReadCheck, STORAGE_INTERFACE, SearchHit, SearchRequest,
-    SearchSpec, Sort, StorageNeeds, ValidateCollectionSpecRequest, WatchChanged, WatchCloseRequest,
-    WatchNotice, WatchOpenRequest, WatchOpenResponse, WatchReset, WriteOp, WriteResult,
-    is_documents_selector,
+    SearchSpec, Sort, StorageNeeds, StorageNeedsWithExactSecrets, ValidateCollectionSpecRequest,
+    WatchChanged, WatchCloseRequest, WatchNotice, WatchOpenRequest, WatchOpenResponse, WatchReset,
+    WriteOp, WriteResult, is_documents_selector,
 };
 pub use limits::{
     BLOB_STREAM_CHUNK_BYTES, CONTRACT_VERSION, MAX_BATCH_OPS, MAX_FRAME_BYTES,

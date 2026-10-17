@@ -56,6 +56,23 @@ fn document_requests_route_only_within_an_explicit_host_grant() {
     assert!(wire.get("document").is_none());
 }
 
+#[test]
+fn exact_secret_needs_wrap_the_unchanged_prefix_declaration_without_leaking_names() {
+    let secret_prefixes = ["mcp_client_env/"];
+    let exact_secret_names = ["mcp_cache_fingerprint_key"];
+    let needs: StorageNeedsWithExactSecrets<'_> = StorageNeeds {
+        secret_prefixes: &secret_prefixes,
+        ..StorageNeeds::default()
+    }
+    .with_exact_secret_names(&exact_secret_names);
+
+    assert_eq!(needs.needs.secret_prefixes, ["mcp_client_env/"]);
+    assert_eq!(needs.exact_secret_names, ["mcp_cache_fingerprint_key"]);
+    let debug = format!("{needs:?}");
+    assert!(!debug.contains("mcp_client_env/"));
+    assert!(!debug.contains("mcp_cache_fingerprint_key"));
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn roundtrip<T>(value: T)
 where
