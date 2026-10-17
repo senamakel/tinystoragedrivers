@@ -26,6 +26,8 @@ retains all storage request, response, schema, and needs types.
 - The feature controls the compatibility client only; the separate
   `tinystoragedrivers-client` and `tinystoragedrivers-busproxy` crates retain
   their existing responsibilities.
+- The bus package supports Rust 1.85 in both feature profiles. The storage
+  workspace and implementation packages continue to require Rust 1.88.
 
 ## Acceptance
 
@@ -39,3 +41,8 @@ unification from other workspace members cannot hide a dependency leak.
 
 The ordinary default-feature bus tests and the compiled document-callback proof
 must keep passing, demonstrating that existing client users remain compatible.
+The `bus-msrv` CI job runs the default and no-default bus tests and independent
+consumer proof on Rust 1.85; the compiled callback proof also runs in the
+workspace's Rust 1.88 lane.
+The `bus-msrv` CI job runs the bus tests and independent consumer proof on Rust
+1.85; the compiled callback proof also runs in the Rust 1.88 workspace lane.

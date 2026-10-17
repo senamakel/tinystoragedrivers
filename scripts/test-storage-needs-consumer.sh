@@ -3,10 +3,19 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="${STORAGE_NEEDS_CONSUMER_MANIFEST:-$repo_root/proof-workspaces/storage-needs/Cargo.toml}"
+toolchain="${TSD_CARGO_TOOLCHAIN:-}"
 
-cargo run --locked --target-dir "$repo_root/target/storage-needs-proof" --manifest-path "$manifest"
+run_cargo() {
+    if [[ -n "$toolchain" ]]; then
+        cargo "+$toolchain" "$@"
+    else
+        cargo "$@"
+    fi
+}
 
-dependency_tree="$(cargo tree --locked --manifest-path "$manifest" --prefix none -e normal,build)"
+run_cargo run --locked --target-dir "$repo_root/target/storage-needs-proof" --manifest-path "$manifest"
+
+dependency_tree="$(run_cargo tree --locked --manifest-path "$manifest" --prefix none -e normal,build)"
 if [[ "$dependency_tree" != *"tinystoragedrivers-bus v"* ]]; then
     printf 'storage-needs consumer dependency graph omitted its contract crate:\n%s\n' \
         "$dependency_tree" >&2
