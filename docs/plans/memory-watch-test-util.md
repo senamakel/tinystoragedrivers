@@ -19,10 +19,12 @@ red phase.
 ## Tasks
 
 1. Add `test-util = ["tokio/sync"]` in
-   `crates/tinystoragedrivers-core/Cargo.toml`. Add the documented
-   `MemoryStorage::with_native_watch(self) -> Self` builder behind that
-   feature, carrying opt-in state through scoped, existing-schema, and fenced
-   handles. Keep default backend and document capabilities unchanged.
+   `crates/tinystoragedrivers-core/Cargo.toml`. Add the documented zero-argument
+   `MemoryStorage::with_native_watch() -> Self` constructor behind that
+   feature. Also add a clearly distinct `enable_native_watch(self) -> Self`
+   opt-in for tests that start with an injected clock. Carry the opt-in state
+   through scoped, existing-schema, and fenced handles. Keep default backend
+   and document capabilities unchanged.
 2. Add a feature-gated memory watch notifier and `DocumentWatch` implementation
    under `crates/tinystoragedrivers-core/src/memory/`. Register subscriptions
    under the database serialization boundary, key invalidations by scope and

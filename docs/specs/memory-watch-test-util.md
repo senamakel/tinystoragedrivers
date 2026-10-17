@@ -23,9 +23,12 @@ filter-specific event stream, or substitute for a driver's native watch tests.
 ## Proposed behavior
 
 With `tinystoragedrivers-core/test-util` enabled,
-`MemoryStorage::with_native_watch()` returns an opted-in memory backend. Its
-backend and scoped document capabilities include `Watch`. A subscription is
-available through the existing `DocumentStore::watch` API.
+`MemoryStorage::with_native_watch()` constructs an opted-in memory backend using
+the system clock. Its backend and scoped document capabilities include
+`Watch`. A subscription is available through the existing
+`DocumentStore::watch` API. Tests that need an injected clock can call
+`MemoryStorage::with_clock(clock).enable_native_watch()`; ordinary
+`new`, `with_clock`, and `Default` remain watch-free.
 
 The watch binds to its memory database, scope, and collection. Successful
 document mutations in that scope and collection produce coalesced,
