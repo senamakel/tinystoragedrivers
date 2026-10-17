@@ -19,6 +19,8 @@ use crate::error::{Result, StorageError};
 use crate::filter::{Filter, Sort, sort_documents_with_meta};
 use crate::scope::Scope;
 use crate::value;
+#[cfg(feature = "test-util")]
+use crate::{DocumentWatch, WatchOptions};
 
 /// In-memory documents bound to one scope.
 #[derive(Clone)]
@@ -30,6 +32,8 @@ pub struct MemoryDocuments {
     /// Checked under the lock before every write, when set.
     fence: Option<Arc<MemoryFence>>,
     existing: bool,
+    #[cfg(feature = "test-util")]
+    native_watch: bool,
 }
 
 impl std::fmt::Debug for MemoryDocuments {
@@ -56,6 +60,8 @@ impl MemoryDocuments {
             clock,
             fence,
             existing,
+            #[cfg(feature = "test-util")]
+            native_watch: false,
         }
     }
 
@@ -76,6 +82,19 @@ impl MemoryDocuments {
     pub(super) fn with_generation(mut self, generation: crate::ScopeGeneration) -> Self {
         self.generation = generation;
         self
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(super) fn with_native_watch(mut self, enabled: bool) -> Self {
+        self.native_watch = enabled;
+        self
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(super) fn validate_watch(&self) -> Result<()> {
+        let state = self.db.lock()?;
+        state.check_generation(self.scope.as_str(), self.generation)?;
+        MemoryDb::guard(&state, self.fence.as_deref(), self.now())
     }
 
     /// Refuse a write unless this handle's fence (if any) holds.
@@ -134,7 +153,7 @@ fn parse_cursor(collection: &str, scope: &Scope, query: &Query) -> Result<Option
 #[async_trait]
 impl DocumentStore for MemoryDocuments {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none()
+        let capabilities = Capabilities::none()
             .with(Capability::FullText)
             .with(Capability::Transactions)
             .with(Capability::ValidatedBatch)
@@ -145,7 +164,47 @@ impl DocumentStore for MemoryDocuments {
             .with(Capability::CollectionEnumeration)
             .with(Capability::ExistingSchema)
             .with(Capability::CollectionValidation)
-            .with(Capability::RecordMetadata)
+            .with(Capability::RecordMetadata);
+        #[cfg(feature = "test-util")]
+        let capabilities = if self.native_watch {
+            capabilities.with(Capability::Watch)
+        } else {
+            capabilities
+        };
+        capabilities
+    }
+
+    #[cfg(feature = "test-util")]
+    async fn watch(
+        &self,
+        collection: &str,
+        filter: &Filter,
+        options: &WatchOptions,
+    ) -> Result<Box<dyn DocumentWatch>> {
+        if !self.native_watch {
+            return Err(StorageError::unsupported(
+                Capability::Watch,
+                "this memory backend has native watch disabled",
+            ));
+        }
+        validate_collection(collection)?;
+        filter.validate()?;
+        options.validate()?;
+        if options.after.is_some() {
+            return Err(StorageError::invalid_input(
+                "memory watch does not support resume cursors",
+            ));
+        }
+        self.check_schema(collection)?;
+        let state = self.db.lock()?;
+        state.check_generation(self.scope.as_str(), self.generation)?;
+        MemoryDb::guard(&state, self.fence.as_deref(), self.now())?;
+        let watch = self.db.subscribe_watch(
+            (self.scope.as_str().to_owned(), collection.to_owned()),
+            self.clone(),
+            options.interval,
+        )?;
+        Ok(Box::new(watch))
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
@@ -225,7 +284,10 @@ impl DocumentStore for MemoryDocuments {
             precondition,
             options,
         };
-        state.put(self.scope.as_str(), collection, id, write, now)
+        let version = state.put(self.scope.as_str(), collection, id, write, now)?;
+        #[cfg(feature = "test-util")]
+        self.db.invalidate_watch(self.scope.as_str(), collection);
+        Ok(version)
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
@@ -237,7 +299,12 @@ impl DocumentStore for MemoryDocuments {
         let mut state = self.db.lock()?;
         let now = self.now();
         self.guard(&state, now)?;
-        state.delete(self.scope.as_str(), collection, id, precondition, now)
+        let removed = state.delete(self.scope.as_str(), collection, id, precondition, now)?;
+        #[cfg(feature = "test-util")]
+        if removed {
+            self.db.invalidate_watch(self.scope.as_str(), collection);
+        }
+        Ok(removed)
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
@@ -292,7 +359,12 @@ impl DocumentStore for MemoryDocuments {
         let mut state = self.db.lock()?;
         let now = self.now();
         self.guard(&state, now)?;
-        Ok(state.delete_where(self.scope.as_str(), collection, filter, now))
+        let removed = state.delete_where(self.scope.as_str(), collection, filter, now);
+        #[cfg(feature = "test-util")]
+        if removed > 0 {
+            self.db.invalidate_watch(self.scope.as_str(), collection);
+        }
+        Ok(removed)
     }
 
     async fn claim(
@@ -336,6 +408,8 @@ impl DocumentStore for MemoryDocuments {
             },
         };
         let version = state.put(self.scope.as_str(), collection, &first.id, write, now)?;
+        #[cfg(feature = "test-util")]
+        self.db.invalidate_watch(self.scope.as_str(), collection);
         let meta = state
             .get(self.scope.as_str(), collection, &first.id, now)
             .map_or(first.meta, |found| found.meta);
@@ -396,6 +470,15 @@ impl DocumentStore for MemoryDocuments {
                     .map(|found| found.version),
             )?;
         }
+        #[cfg(feature = "test-util")]
+        let changed_collections: BTreeSet<String> = ops
+            .iter()
+            .map(|op| match op {
+                WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. } => {
+                    collection.clone()
+                }
+            })
+            .collect();
         // A batch only writes documents; copying the rest would cost time
         // proportional to every stored stream and blob.
         let mut draft = DbState {
@@ -434,6 +517,10 @@ impl DocumentStore for MemoryDocuments {
         }
         state.docs = draft.docs;
         state.tombstones = draft.tombstones;
+        #[cfg(feature = "test-util")]
+        for collection in changed_collections {
+            self.db.invalidate_watch(scope, &collection);
+        }
         Ok(results)
     }
 
@@ -496,6 +583,8 @@ impl DocumentStore for MemoryDocuments {
         for id in ids {
             state.remove(self.scope.as_str(), collection, &id);
         }
+        #[cfg(feature = "test-util")]
+        self.db.invalidate_watch(self.scope.as_str(), collection);
         Ok(())
     }
 

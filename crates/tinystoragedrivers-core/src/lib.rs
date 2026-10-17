@@ -50,6 +50,8 @@
 //! - `testkit`: the [`conformance`] suite drivers run in their tests.
 //! - `polling-watch`: explicit conservative `PollingWatch` invalidations;
 //!   never adds native [`Capability::Watch`] support.
+//! - `test-util`: opt-in native watches on [`MemoryStorage`] for tests that
+//!   require [`Capability::Watch`].
 
 mod backend;
 mod blob;

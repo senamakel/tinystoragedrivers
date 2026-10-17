@@ -65,6 +65,8 @@ impl ScopePurge for MemoryPurge {
             (generation, request.operation_id.clone()),
         );
         state.purge_receipts.insert(receipt_key, generation);
+        #[cfg(feature = "test-util")]
+        self.db.invalidate_scope_watches(self.scope.as_str());
         Ok(PurgeReceipt {
             operation_id: request.operation_id.clone(),
             generation,

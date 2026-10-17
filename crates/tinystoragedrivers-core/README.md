@@ -16,3 +16,8 @@ Native document invalidation is optional through `DocumentStore::watch` and
 are conservative, payload-free reread hints. Select the `polling-watch` feature
 explicitly for `PollingWatch` over an admitted handle; it does not promise native
 history or add Watch support to a backend. See [the watch module](src/watch/README.md).
+
+Tests that need a native watch can enable `tinystoragedrivers-core/test-util`
+and construct `MemoryStorage::with_native_watch()`. Default memory storage
+continues to report Watch as unsupported. See the [test-only memory watch
+specification](../../docs/specs/memory-watch-test-util.md).

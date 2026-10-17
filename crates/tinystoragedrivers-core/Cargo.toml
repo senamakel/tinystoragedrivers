@@ -42,6 +42,8 @@ blocking = ["tokio/rt-multi-thread"]
 # `conformance`: the behavioral suite every driver must pass. Drivers enable it
 # from their dev-dependencies.
 testkit = []
+# Opt-in native memory watches for tests that require the Watch capability.
+test-util = ["tokio/sync"]
 
 [lints]
 workspace = true
