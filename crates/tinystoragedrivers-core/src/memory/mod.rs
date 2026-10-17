@@ -1,20 +1,20 @@
 //! The in-memory driver: the reference implementation of every port.
 //!
-//! It provides every [`Capability`](crate::Capability), including
-//! [`Maintenance`](crate::Capability::Maintenance) (it has nothing to reclaim,
-//! so `maintain` and `checkpoint` succeed and report zero),
-//! [`Fencing`](crate::Capability::Fencing) on every write (the fence is
-//! checked under the same lock as the write), keeps nothing across process
-//! restarts, and is what tests and stateless embedders run on. Because
-//! its semantics are the simplest correct reading of the port docs, the
-//! conformance suite is written against it first and every other driver must
-//! agree with it.
+//! It is the reference implementation for the storage ports, keeps nothing
+//! across process restarts, and is what tests and stateless embedders run on.
+//! [`Maintenance`](crate::Capability::Maintenance) succeeds and reports zero
+//! because there is nothing to reclaim. [`Fencing`](crate::Capability::Fencing)
+//! is checked under the same lock as each write. Native `Watch` stays disabled
+//! by default; the `test-util` feature provides an explicit opt-in for tests
+//! that need that capability.
 
 mod blobs;
 mod documents;
 mod purge;
 mod state;
 mod streams;
+#[cfg(feature = "test-util")]
+mod watch;
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -50,6 +50,8 @@ pub(crate) fn system_clock() -> u64 {
 #[derive(Debug, Default)]
 pub(crate) struct MemoryDb {
     state: Mutex<DbState>,
+    #[cfg(feature = "test-util")]
+    watchers: Arc<watch::MemoryWatchRegistry>,
 }
 
 impl MemoryDb {
@@ -63,6 +65,26 @@ impl MemoryDb {
             None => Ok(()),
             Some(binding) => state.guard(Some(&binding.fence), now),
         }
+    }
+
+    #[cfg(feature = "test-util")]
+    fn subscribe_watch(
+        &self,
+        key: (String, String),
+        documents: MemoryDocuments,
+        interval: std::time::Duration,
+    ) -> Result<watch::MemoryWatch> {
+        self.watchers.subscribe(key, documents, interval)
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(super) fn invalidate_watch(&self, scope: &str, collection: &str) {
+        self.watchers.invalidate(scope, collection);
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(super) fn invalidate_scope_watches(&self, scope: &str) {
+        self.watchers.invalidate_scope(scope);
     }
 }
 
@@ -86,6 +108,8 @@ pub struct MemoryStorage {
     db: Arc<MemoryDb>,
     clock: Clock,
     existing: bool,
+    #[cfg(feature = "test-util")]
+    native_watch: bool,
 }
 
 impl MemoryStorage {
@@ -102,7 +126,31 @@ impl MemoryStorage {
             db: Arc::new(MemoryDb::default()),
             clock,
             existing: false,
+            #[cfg(feature = "test-util")]
+            native_watch: false,
         }
+    }
+
+    /// Opt in to native document invalidations for tests that require `Watch`.
+    ///
+    /// Ordinary memory storage stays watch-free. The test watch coalesces
+    /// payload-free invalidations for writes in the same scope and collection,
+    /// and periodically invalidates at the watch interval for logical expiry.
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn with_native_watch() -> Self {
+        Self::new().enable_native_watch()
+    }
+
+    /// Enable native document invalidations on an existing test backend.
+    ///
+    /// Use this when a test starts with `with_clock`; `new`, `with_clock`, and
+    /// `Default` otherwise leave native Watch disabled.
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn enable_native_watch(mut self) -> Self {
+        self.native_watch = true;
+        self
     }
 
     fn handles(&self, scope: &Scope, fence: Option<&Arc<MemoryFence>>) -> ScopedStorage {
@@ -114,19 +162,19 @@ impl MemoryStorage {
         fence: Option<&Arc<MemoryFence>>,
         generation: crate::ScopeGeneration,
     ) -> ScopedStorage {
+        let documents = MemoryDocuments::new(
+            Arc::clone(&self.db),
+            scope.clone(),
+            Arc::clone(&self.clock),
+            fence.cloned(),
+            self.existing,
+        );
+        #[cfg(feature = "test-util")]
+        let documents = documents.with_native_watch(self.native_watch);
         ScopedStorage::new(
             scope.clone(),
             self.driver(),
-            Arc::new(
-                MemoryDocuments::new(
-                    Arc::clone(&self.db),
-                    scope.clone(),
-                    Arc::clone(&self.clock),
-                    fence.cloned(),
-                    self.existing,
-                )
-                .with_generation(generation),
-            ),
+            Arc::new(documents.with_generation(generation)),
             Arc::new(
                 MemoryStreams::new(
                     Arc::clone(&self.db),
@@ -175,10 +223,17 @@ impl StorageBackend for MemoryStorage {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::all()
+        let capabilities = Capabilities::all()
             .without(crate::Capability::Watch)
             .without(crate::Capability::PresignedUrls)
-            .without(crate::Capability::StreamingBlobs)
+            .without(crate::Capability::StreamingBlobs);
+        #[cfg(feature = "test-util")]
+        let capabilities = if self.native_watch {
+            capabilities.with(crate::Capability::Watch)
+        } else {
+            capabilities
+        };
+        capabilities
     }
 
     async fn prepare_schema(&self) -> Result<()> {
