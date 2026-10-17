@@ -46,14 +46,14 @@ names, including an encrypted-secrets collection, are host policy rather than
 global storage-driver policy.
 
 Grant construction validates and copies the complete declaration. It rejects
-duplicate collections or prefixes, malformed collection specs, empty names
-and prefixes, NUL bytes, overlong resources, the reserved `tsd.*` namespace,
-`_tsd` collection names, host-reserved collections, and blob prefixes that
-overlap `_tsd/sealed/` in either direction. Blob prefixes may end in `/` and
-are not treated as full blob keys. Actual blob keys are checked with the core
-user-key validator. Prefix matching is literal `starts_with`: callers must
-declare delimiters themselves; the library does not normalize names or infer
-filesystem path semantics.
+duplicate collections, prefixes, or exact secret names, malformed collection
+specs, empty names and prefixes, NUL bytes, overlong resources, the reserved
+`tsd.*` namespace, `_tsd` collection names, host-reserved collections, and blob
+prefixes that overlap `_tsd/sealed/` in either direction. Blob prefixes may end
+in `/` and are not treated as full blob keys. Actual blob keys are checked
+with the core user-key validator. Prefix matching is literal `starts_with`:
+callers must declare delimiters themselves; the library does not normalize
+names or infer filesystem path semantics.
 
 Secret names and prefixes use the shared core secret-name contract: at most
 256 UTF-8 bytes and no Unicode control characters. Exact secret names and

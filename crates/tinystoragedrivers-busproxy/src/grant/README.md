@@ -9,6 +9,8 @@ selection, backend choice, or fence management.
 
 - `StorageGrant::from_needs` owns and validates selected `StorageNeeds` using
   `GrantPolicy`.
+- `StorageGrant::from_needs_with_exact_secrets` accepts the additive exact-name
+  wrapper while preserving the legacy `StorageNeeds` prefix behavior.
 - `StorageGrant::authorize` checks the object, current selector, typed request,
   schema operation, target, and write permission. It returns a `Plan` to
   forward the call or answer a host-only operation locally.
@@ -36,3 +38,9 @@ only when the host endpoint binds subscriptions to that same caller.
 Resource prefixes use literal `starts_with` matching. Hosts must include any
 delimiter they require in a prefix. The module does not normalize resource
 names or infer filesystem path rules for streams and secrets.
+
+Exact secret names authorize only Get, Set, and Delete for those names. They do
+not grant `Secrets.List`, even when a list prefix equals an exact name; listing
+continues to require a declared prefix so backend results cannot reveal
+undeclared suffix names. In mixed grants, list calls remain bounded by one
+declared secret prefix.

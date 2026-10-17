@@ -16,6 +16,7 @@ fn main() {
     let blob_prefixes = ["imports/"];
     let stream_prefixes = ["events/"];
     let secret_prefixes = ["provider/"];
+    let exact_secret_names = ["mcp_cache_fingerprint_key"];
     let needs = StorageNeeds {
         collections: &collections,
         blob_prefixes: &blob_prefixes,
@@ -36,4 +37,11 @@ fn main() {
     assert_eq!(needs.blob_prefixes, ["imports/"]);
     assert_eq!(needs.stream_prefixes, ["events/"]);
     assert_eq!(needs.secret_prefixes, ["provider/"]);
+
+    let exact_needs = needs.with_exact_secret_names(&exact_secret_names);
+    assert_eq!(exact_needs.needs, needs);
+    assert_eq!(exact_needs.exact_secret_names, ["mcp_cache_fingerprint_key"]);
+    let debug = format!("{exact_needs:?}");
+    assert!(!debug.contains("provider/"));
+    assert!(!debug.contains("mcp_cache_fingerprint_key"));
 }

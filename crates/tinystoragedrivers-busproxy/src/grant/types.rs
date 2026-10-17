@@ -33,6 +33,7 @@ pub struct StorageGrant {
     pub(super) stream_prefixes: Vec<String>,
     pub(super) blob_prefixes: Vec<String>,
     pub(super) secret_prefixes: Vec<String>,
+    pub(super) exact_secret_names: Vec<String>,
     pub(super) writable: bool,
 }
 
@@ -43,6 +44,7 @@ impl fmt::Debug for StorageGrant {
             .field("stream_prefixes", &self.stream_prefixes.len())
             .field("blob_prefixes", &self.blob_prefixes.len())
             .field("secret_prefixes", &"[REDACTED]")
+            .field("exact_secret_names", &"[REDACTED]")
             .field("writable", &self.writable)
             .finish()
     }
@@ -53,7 +55,7 @@ impl fmt::Debug for StorageGrant {
 pub enum GrantError {
     /// A collection declaration is malformed, reserved, or duplicated.
     Collection,
-    /// A resource prefix is malformed, reserved, or duplicated.
+    /// A resource prefix or exact secret name is malformed or duplicated.
     Prefix,
     /// Secret resources were requested without host permission.
     SecretsDenied,

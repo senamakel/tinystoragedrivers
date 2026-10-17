@@ -66,6 +66,43 @@ impl std::fmt::Debug for StorageNeeds<'_> {
     }
 }
 
+impl<'a> StorageNeeds<'a> {
+    /// Add exact secret names while preserving this declaration's existing
+    /// secret-prefix semantics.
+    #[must_use]
+    pub const fn with_exact_secret_names(
+        self,
+        exact_secret_names: &'a [&'a str],
+    ) -> StorageNeedsWithExactSecrets<'a> {
+        StorageNeedsWithExactSecrets {
+            needs: self,
+            exact_secret_names,
+        }
+    }
+}
+
+/// A storage declaration with additional exact secret-name needs.
+///
+/// This wrapper keeps [`StorageNeeds`] struct literals and their prefix
+/// semantics unchanged. Exact names are separate declarations: they can
+/// authorize individual CRUD operations but do not authorize secret listing.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageNeedsWithExactSecrets<'a> {
+    /// The complete existing collection, blob, stream, and secret-prefix needs.
+    pub needs: StorageNeeds<'a>,
+    /// Secret names requested individually. These are not prefixes.
+    pub exact_secret_names: &'a [&'a str],
+}
+
+impl std::fmt::Debug for StorageNeedsWithExactSecrets<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageNeedsWithExactSecrets")
+            .field("needs", &self.needs)
+            .field("exact_secret_names", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// A collection schema grant requested from the host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
