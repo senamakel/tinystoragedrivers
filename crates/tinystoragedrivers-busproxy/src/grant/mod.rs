@@ -43,6 +43,11 @@ impl StorageGrant {
     /// Exact names authorize individual Get, Set, and Delete calls. They do
     /// not authorize list operations; listing remains bounded by declared
     /// secret prefixes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a content-free [`GrantError`] when the declaration is malformed
+    /// or host policy refuses secret access.
     pub fn from_needs_with_exact_secrets(
         needs: StorageNeedsWithExactSecrets<'_>,
         policy: &GrantPolicy<'_>,
