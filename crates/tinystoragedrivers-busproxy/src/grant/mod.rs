@@ -11,7 +11,8 @@ use tinystoragedrivers_bus::{
 };
 use tinystoragedrivers_client::Object;
 use tinystoragedrivers_core::{
-    MAX_BLOB_KEY_LEN, MAX_ID_LEN, SEALED_BLOB_PREFIX, validate_user_blob_key,
+    MAX_BLOB_KEY_LEN, MAX_ID_LEN, SEALED_BLOB_PREFIX, validate_secret_prefix,
+    validate_user_blob_key,
 };
 
 mod types;
@@ -55,7 +56,7 @@ impl StorageGrant {
 
         let stream_prefixes = own_prefixes(needs.stream_prefixes, MAX_ID_LEN)?;
         let blob_prefixes = own_blob_prefixes(needs.blob_prefixes)?;
-        let secret_prefixes = own_prefixes(needs.secret_prefixes, MAX_ID_LEN)?;
+        let secret_prefixes = own_secret_prefixes(needs.secret_prefixes)?;
 
         Ok(Self {
             collections,
@@ -349,6 +350,18 @@ fn own_blob_prefixes(prefixes: &[&str]) -> Result<Vec<String>, GrantError> {
             || SEALED_BLOB_PREFIX.starts_with(prefix)
             || !seen.insert(*prefix)
         {
+            return Err(GrantError::Prefix);
+        }
+        owned.push((*prefix).to_owned());
+    }
+    Ok(owned)
+}
+
+fn own_secret_prefixes(prefixes: &[&str]) -> Result<Vec<String>, GrantError> {
+    let mut seen = BTreeSet::new();
+    let mut owned = Vec::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        if prefix.is_empty() || validate_secret_prefix(prefix).is_err() || !seen.insert(*prefix) {
             return Err(GrantError::Prefix);
         }
         owned.push((*prefix).to_owned());

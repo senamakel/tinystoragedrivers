@@ -214,6 +214,52 @@ fn rejects_reserved_names_duplicate_specs_and_malformed_prefixes() {
 }
 
 #[test]
+fn secret_prefixes_follow_the_secret_store_name_contract() {
+    use tinystoragedrivers_secrets::MAX_SECRET_NAME_LEN;
+
+    let policy = GrantPolicy {
+        allow_secrets: true,
+        ..GrantPolicy::default()
+    };
+    let too_long = "s".repeat(300);
+    for prefix in [too_long.as_str(), "provider/\n", "provider/\u{0007}"] {
+        let secret_prefixes = [prefix];
+        assert_eq!(
+            StorageGrant::from_needs(
+                StorageNeeds {
+                    secret_prefixes: &secret_prefixes,
+                    ..StorageNeeds::default()
+                },
+                &policy,
+            )
+            .unwrap_err(),
+            GrantError::Prefix
+        );
+    }
+
+    let max_name = "x".repeat(MAX_SECRET_NAME_LEN);
+    let secret_prefixes = [max_name.as_str(), "provider/"];
+    let grant = StorageGrant::from_needs(
+        StorageNeeds {
+            secret_prefixes: &secret_prefixes,
+            ..StorageNeeds::default()
+        },
+        &policy,
+    )
+    .unwrap();
+    assert!(
+        grant
+            .authorize(Object::Secrets, "Get", &json!({"name":max_name}))
+            .is_ok()
+    );
+    assert!(
+        grant
+            .authorize(Object::Secrets, "Get", &json!({"name":"provider/api-key"}))
+            .is_ok()
+    );
+}
+
+#[test]
 fn rejects_any_blob_prefix_overlapping_reserved_sealed_keys() {
     for prefix in ["_tsd/sealed/", "_tsd/", "_tsd/sealed/x"] {
         let prefixes = [prefix];

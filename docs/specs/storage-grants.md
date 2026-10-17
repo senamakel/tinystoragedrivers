@@ -42,6 +42,14 @@ user-key validator. Prefix matching is literal `starts_with`: callers must
 declare delimiters themselves; the library does not normalize names or infer
 filesystem path semantics.
 
+Secret names and prefixes use the shared core secret-name contract: at most
+256 UTF-8 bytes and no Unicode control characters. Secret grant prefixes must
+also be nonempty; the SecretStore's empty list prefix is intentionally not a
+whole-store grant. This rule does not treat `/` as a path separator or alter
+literal prefix matching. `tinystoragedrivers-secrets` preserves its existing
+`MAX_SECRET_NAME_LEN`, `validate_name`, and `validate_prefix` exports and error
+messages by re-exporting the core validators under those names.
+
 Grant and needs debug output, validation errors, and denial errors must not
 expose secret prefixes, request contents, names, or source errors. Errors use
 stable content-free labels. Grant fields stay private and have no mutation API.
