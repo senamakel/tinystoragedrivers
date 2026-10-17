@@ -38,6 +38,34 @@ pub fn is_documents_selector(selector: &str) -> bool {
     DOCUMENTS_SELECTORS.contains(&selector)
 }
 
+/// A loadable module's requested storage resources.
+///
+/// These borrowed declarations are input to host policy; they do not grant
+/// authority. Hosts must bind the resulting grant to the authenticated caller.
+/// Secret prefixes are deliberately omitted from debug output.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageNeeds<'a> {
+    /// Collection schemas the module requests.
+    pub collections: &'a [CollectionSpec],
+    /// Blob key prefixes the module requests.
+    pub blob_prefixes: &'a [&'a str],
+    /// Stream name prefixes the module requests.
+    pub stream_prefixes: &'a [&'a str],
+    /// Secret name prefixes the module requests.
+    pub secret_prefixes: &'a [&'a str],
+}
+
+impl std::fmt::Debug for StorageNeeds<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageNeeds")
+            .field("collections", &self.collections.len())
+            .field("blob_prefixes", &self.blob_prefixes.len())
+            .field("stream_prefixes", &self.stream_prefixes.len())
+            .field("secret_prefixes", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// A collection schema grant requested from the host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

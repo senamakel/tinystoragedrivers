@@ -63,6 +63,7 @@ mod memory;
 pub mod primitives;
 pub mod schema;
 mod scope;
+mod secret;
 mod stream;
 pub mod value;
 mod watch;
@@ -107,6 +108,7 @@ pub use scope::{
     AGENT_INFIX, CLUSTER, MAX_SCOPE_LEN, MAX_SEGMENT_LEN, MODULE_INFIX, ParsedScope, Principal,
     Scope, Tenant, USER_PREFIX,
 };
+pub use secret::{MAX_SECRET_NAME_LEN, validate_secret_name, validate_secret_prefix};
 pub use stream::{
     SEALED_BLOB_PREFIX, SealOutcome, SealPolicy, SealWhen, SealedLog, StreamEntry, StreamInfo,
     StreamStore, is_reserved_blob_key, sealed_blob_key, validate_stream,

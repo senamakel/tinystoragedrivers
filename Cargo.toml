@@ -22,7 +22,7 @@ repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
 # Minimal document wire clients and confined host callbacks; never linked by core.
-tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "d5b949be8ea56eb5a17289a09aa28e8c09bd88b7", default-features = false }
+tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "c52f5f822d5c934c849e98fea88eb9ea7f692b2d", default-features = false }
 tinystoragedrivers-bus = { path = "crates/tinystoragedrivers-bus" }
 # Bus client implementing the storage ports, plus the reference server adapter.
 tinystoragedrivers-client = { path = "crates/tinystoragedrivers-client" }

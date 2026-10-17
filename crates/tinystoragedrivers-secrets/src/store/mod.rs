@@ -6,8 +6,10 @@ use async_trait::async_trait;
 use tinystoragedrivers_core::{Result, StorageError};
 use zeroize::Zeroizing;
 
-/// The longest secret name, in bytes.
-pub const MAX_SECRET_NAME_LEN: usize = 256;
+pub use tinystoragedrivers_core::{
+    MAX_SECRET_NAME_LEN, validate_secret_name as validate_name,
+    validate_secret_prefix as validate_prefix,
+};
 
 /// Secret bytes by name.
 ///
@@ -68,47 +70,6 @@ pub trait SecretStore: Send + Sync + Debug {
     /// A short, stable name for logs: `memory`, `encrypted_file`, `document`,
     /// `keyring`.
     fn backend_name(&self) -> &'static str;
-}
-
-/// Check a secret name: 1 to [`MAX_SECRET_NAME_LEN`] bytes, no control
-/// characters (NUL included).
-///
-/// The message never repeats the name: a misplaced secret value passed as a
-/// name must not reach a log.
-///
-/// # Errors
-///
-/// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput).
-pub fn validate_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.len() > MAX_SECRET_NAME_LEN {
-        return Err(StorageError::invalid_input(format!(
-            "secret name must be 1 to {MAX_SECRET_NAME_LEN} bytes"
-        )));
-    }
-    validate_printable(name)
-}
-
-/// Check a [`SecretStore::list`] prefix: empty, or a prefix of some valid name.
-///
-/// # Errors
-///
-/// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput).
-pub fn validate_prefix(prefix: &str) -> Result<()> {
-    if prefix.len() > MAX_SECRET_NAME_LEN {
-        return Err(StorageError::invalid_input(format!(
-            "secret name prefix must be at most {MAX_SECRET_NAME_LEN} bytes"
-        )));
-    }
-    validate_printable(prefix)
-}
-
-fn validate_printable(text: &str) -> Result<()> {
-    if text.chars().any(char::is_control) {
-        return Err(StorageError::invalid_input(
-            "secret names must not contain control characters",
-        ));
-    }
-    Ok(())
 }
 
 /// Require `value` to be UTF-8, for the drivers whose formats hold text.
