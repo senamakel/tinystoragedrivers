@@ -14,7 +14,7 @@ exclude = ["worktrees", "proof-workspaces/document-callback", "proof-workspaces/
 # true`, so the version the release workflow bumps is written in exactly one
 # place and every crate moves together.
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-only"
