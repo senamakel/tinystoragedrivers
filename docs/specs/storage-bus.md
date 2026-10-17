@@ -21,6 +21,10 @@ The proxy is behind a default-on `client` Cargo feature, so a data-only
 consumer can disable defaults and link the wire declarations without TinyBus;
 see the [client feature spec](bus-client-feature.md).
 
+The `tinystoragedrivers-bus` package supports Rust 1.85 in either feature
+profile. The storage workspace and implementation packages remain at Rust
+1.88; see the [bus contract MSRV spec](bus-contract-msrv.md).
+
 Goals are full Documents, Streams, Blobs and Secrets parity; one host-captured
 caller authority; mechanically adapted clients and servers; and shared
 conformance proving same-port behavior. The existing `tinystoragedrivers`

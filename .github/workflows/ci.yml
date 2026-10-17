@@ -140,6 +140,9 @@ jobs:
           # the token in git config.
           persist-credentials: false
 
+      - name: Test document callback proof target-directory handling
+        run: python3 .github/scripts/test_document_callback_runner.py
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -312,9 +315,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # `rust-version` is inherited from `[workspace.package]`, so every member
-      # reports the same value. Read it off the package the module ships as
-      # rather than off `packages[0]`, whose order cargo does not promise.
+      # The implementation package inherits the workspace Rust 1.88 MSRV;
+      # `tinystoragedrivers-bus` intentionally overrides it to Rust 1.85. Read
+      # the implementation package directly rather than `packages[0]`, whose
+      # order cargo does not promise.
       - name: Read rust-version from Cargo.toml
         id: msrv
         run: |
@@ -338,6 +342,32 @@ jobs:
 
       - name: Build with the declared MSRV
         run: cargo build --all-targets --all-features
+
+      - name: Verify the default client through a compiled module
+        run: bash scripts/test-document-callback.sh --target-dir target/document-callback-proof
+
+  bus-msrv:
+    name: Storage bus Rust 1.85
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test the default compatibility client at Rust 1.85
+        run: cargo test --locked -p tinystoragedrivers-bus
+
+      - name: Test data-only bus consumers at Rust 1.85
+        run: cargo test --locked -p tinystoragedrivers-bus --no-default-features
+
+      - name: Compile the isolated storage-needs consumer at Rust 1.85
+        run: TSD_CARGO_TOOLCHAIN=1.85.0 bash scripts/test-storage-needs-consumer.sh
 
   supply-chain:
     name: Supply chain

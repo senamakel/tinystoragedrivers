@@ -63,6 +63,11 @@ automatically. Inherit `version`, `edition`, `rust-version`, `license`, and
 workspace = true
 ```
 
+`tinystoragedrivers-bus` is the deliberate MSRV exception: it declares Rust
+1.85 because its wire types and default compatibility client compile there. The
+workspace and implementation crates remain at Rust 1.88; CI checks the bus and
+its isolated consumer separately at 1.85.
+
 Each feature area belongs in a focused module directory under a crate's `src/`.
 A module root explains the module, wires its pieces together, and exposes the
 smallest useful API. Move substantial type definitions into `types.rs`, and put
