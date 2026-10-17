@@ -7,7 +7,11 @@ target_args=()
 proof_target=""
 if [[ "${1:-}" == "--target-dir" && -n "${2:-}" && -z "${3:-}" ]]; then
     target_args=(--target-dir "$2")
-    proof_target="$PWD/$2"
+    if [[ "$2" == /* ]]; then
+        proof_target="$2"
+    else
+        proof_target="$PWD/$2"
+    fi
 elif [[ $# -ne 0 ]]; then
     echo "usage: $0 [--target-dir PATH]" >&2
     exit 2
