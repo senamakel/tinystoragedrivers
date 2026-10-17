@@ -171,7 +171,7 @@ jobs:
           # builds before creating the release commit and tag.
           cargo update --manifest-path proof-workspaces/document-callback/Cargo.toml --workspace
           cargo update --manifest-path proof-workspaces/storage-needs/Cargo.toml --workspace
-          bash scripts/test-document-callback.sh
+          bash scripts/test-document-callback.sh --target-dir target/document-callback-proof
           bash scripts/test-storage-needs-consumer.sh
           released="$(cargo metadata --format-version 1 --no-deps \
             | jq -r --arg name "$CRATE_NAME" \
