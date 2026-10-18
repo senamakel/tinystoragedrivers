@@ -8,12 +8,15 @@ use tinystoragedrivers_core::BlobReader;
 use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
 
-struct MarkerEndpoint(&'static str);
+struct MarkerEndpoint {
+    service: &'static str,
+    blob_payload: &'static [u8],
+}
 
 #[async_trait]
 impl StorageEndpoint for MarkerEndpoint {
     async fn call(&self, _call: StorageCall<'_>) -> Result<Value, HostFailure> {
-        Ok(json!({"service": self.0}))
+        Ok(json!({"service": self.service}))
     }
 
     async fn put_blob_stream(
@@ -22,7 +25,7 @@ impl StorageEndpoint for MarkerEndpoint {
         _head: PutBlobStreamRequest,
         _body: BlobReader,
     ) -> Result<Value, HostFailure> {
-        Ok(json!({"service": self.0}))
+        Ok(json!({"service": self.service}))
     }
 
     async fn get_blob_stream(
@@ -33,12 +36,12 @@ impl StorageEndpoint for MarkerEndpoint {
         Ok(Some((
             BlobStreamHead {
                 meta: BlobInfo {
-                    key: self.0.to_owned(),
-                    len: 0,
+                    key: self.service.to_owned(),
+                    len: u64::try_from(self.blob_payload.len()).unwrap(),
                     content_type: None,
                 },
             },
-            Box::pin(std::io::Cursor::new(Vec::new())),
+            Box::pin(std::io::Cursor::new(self.blob_payload.to_vec())),
         )))
     }
 
@@ -334,6 +337,10 @@ async fn a_transport_without_a_host_cannot_be_built_and_debug_hides_the_wire() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This integration verifies bound calls and streamed bytes across a live alias handover."
+)]
 async fn bound_calls_stay_on_the_issuing_peer_after_public_alias_handover() {
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());
@@ -351,7 +358,10 @@ async fn bound_calls_stay_on_the_issuing_peer_after_public_alias_handover() {
     let served_a = serve_lease(
         &service_a,
         "/ai/tinyhumans/tinystorage/Leases/19",
-        Arc::new(MarkerEndpoint("A")),
+        Arc::new(MarkerEndpoint {
+            service: "A",
+            blob_payload: b"blob-from-A",
+        }),
     )
     .await
     .unwrap();
@@ -359,9 +369,15 @@ async fn bound_calls_stay_on_the_issuing_peer_after_public_alias_handover() {
     // The public alias is handed to B while A's unique peer and lease objects
     // remain alive. Bound routing must keep addressing A directly.
     service_a.release_name(HOST_NAME).await.unwrap();
-    let _served_b = serve(&service_b, Arc::new(MarkerEndpoint("B")))
-        .await
-        .unwrap();
+    let _served_b = serve(
+        &service_b,
+        Arc::new(MarkerEndpoint {
+            service: "B",
+            blob_payload: b"blob-from-B",
+        }),
+    )
+    .await
+    .unwrap();
     let descriptor = StorageDescriptor {
         service_peer: peer_a.as_str().to_owned(),
         registration_id: 19,
@@ -408,7 +424,22 @@ async fn bound_calls_stay_on_the_issuing_peer_after_public_alias_handover() {
     assert_eq!(head.meta.key, "A");
     let mut downloaded = Vec::new();
     body.read_to_end(&mut downloaded).await.unwrap();
-    assert_eq!(downloaded.len(), 0);
+    assert_eq!(downloaded, b"blob-from-A");
+
+    let (legacy_head, mut legacy_body) = legacy
+        .get_blob_stream(BlobKeyRequest {
+            key: "handover/payload".to_owned(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy_head.meta.key, "B");
+    let mut legacy_downloaded = Vec::new();
+    legacy_body
+        .read_to_end(&mut legacy_downloaded)
+        .await
+        .unwrap();
+    assert_eq!(legacy_downloaded, b"blob-from-B");
 
     service_a.close().await.unwrap();
     assert!(
@@ -425,4 +456,77 @@ async fn bound_calls_stay_on_the_issuing_peer_after_public_alias_handover() {
         json!({"service":"B"})
     );
     drop(served_a);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_length_bound_download_has_clean_eof() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let service = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let service_peer = service.unique_name().unwrap();
+    service.request_name(HOST_NAME).await.unwrap();
+    let _served = serve_lease(
+        &service,
+        "/ai/tinyhumans/tinystorage/Leases/23",
+        Arc::new(MarkerEndpoint {
+            service: "empty",
+            blob_payload: b"",
+        }),
+    )
+    .await
+    .unwrap();
+    let transport = BusTransport::connect_bound(
+        client,
+        StorageDescriptor {
+            service_peer: service_peer.as_str().to_owned(),
+            registration_id: 23,
+            object_root: format!("{OBJECT_ROOT}/Leases/23"),
+        },
+    )
+    .await
+    .unwrap();
+    let (head, mut body) = transport
+        .get_blob_stream(BlobKeyRequest {
+            key: "empty".to_owned(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.meta.len, 0);
+    let mut bytes = Vec::new();
+    body.read_to_end(&mut bytes)
+        .await
+        .expect("the empty response stream must terminate cleanly");
+    assert_eq!(bytes.len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_length_stream_closed_before_accept_is_clean_eof() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let sender = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let receiver = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let sender_peer = sender.unique_name().unwrap();
+    let receiver_peer = receiver.unique_name().unwrap();
+    let writer = sender
+        .open_stream(&receiver_peer, StreamDescriptor::with_len(0))
+        .await
+        .unwrap();
+    let reference = writer.stream_ref();
+
+    // Force Close to reach the receiver before it claims the stream handle.
+    writer.finish().await.unwrap();
+    let mut reader = receiver
+        .accept_stream_from(&reference, &sender_peer)
+        .unwrap();
+    assert_eq!(reader.next_chunk().await.unwrap(), None);
 }
