@@ -3,18 +3,7 @@ use tinybus::{Connection, StreamDescriptor, broker::Broker, transport::memory::M
 use tokio::io::AsyncReadExt;
 
 pub(super) fn stream_error_category(error: &tinybus::Error) -> &'static str {
-    match error {
-        tinybus::Error::StreamAborted { .. } => "StreamAborted",
-        tinybus::Error::ConnectionClosed => "ConnectionClosed",
-        tinybus::Error::Timeout { .. } => "Timeout",
-        tinybus::Error::UnknownStream { .. } => "UnknownStream",
-        tinybus::Error::StreamTooLarge { .. } => "StreamTooLarge",
-        tinybus::Error::TooManyStreams { .. } => "TooManyStreams",
-        tinybus::Error::Transport(_) => "Transport",
-        tinybus::Error::Protocol(_) => "Protocol",
-        tinybus::Error::MethodFailed { .. } => "MethodFailed",
-        _ => "Other",
-    }
+    crate::test_support::sdk_error_category(error)
 }
 
 #[test]
@@ -74,6 +63,11 @@ async fn an_aborted_stream_is_an_error_on_the_reader_not_a_clean_end() {
     let mut out = Vec::new();
     let error = reader.read_to_end(&mut out).await.unwrap_err();
     assert_eq!(error.to_string(), "storage blob stream failed");
+    #[cfg(feature = "test-stream-diagnostics")]
+    assert_eq!(
+        crate::test_support::stream_error_category(&error),
+        Some("StreamAborted")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

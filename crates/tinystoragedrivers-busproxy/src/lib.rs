@@ -58,6 +58,9 @@ pub mod grant;
 mod host;
 mod names;
 mod per_caller;
+#[cfg(any(test, feature = "test-stream-diagnostics"))]
+#[doc(hidden)]
+pub mod test_support;
 mod transport;
 
 pub use governed::{

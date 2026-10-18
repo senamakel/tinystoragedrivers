@@ -21,6 +21,7 @@ tokio = { workspace = true, features = ["sync", "rt", "time"] }
 
 [dev-dependencies]
 tinybus = { workspace = true, features = ["modules", "macros"] }
+tinystoragedrivers-busproxy = { workspace = true, features = ["test-stream-diagnostics"] }
 tinystoragedrivers-core = { workspace = true, features = ["test-util"] }
 tinystoragedrivers-client.workspace = true
 tinystoragedrivers-secrets = { path = "../tinystoragedrivers-secrets" }

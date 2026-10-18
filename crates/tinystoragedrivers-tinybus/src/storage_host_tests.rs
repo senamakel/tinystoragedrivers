@@ -19,6 +19,22 @@ use tinystoragedrivers_secrets::{DerivedKeys, DocumentSecrets};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tokio::sync::mpsc;
 
+#[test]
+fn stream_error_test_diagnostic_is_content_free_across_crate_boundary() {
+    let sdk_error = tinybus::Error::StreamAborted {
+        reason: "private stream reason".to_owned(),
+    };
+    let error = tinystoragedrivers_busproxy::test_support::diagnostic_io_error(&sdk_error);
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert_eq!(error.to_string(), "storage blob stream failed");
+    assert_eq!(
+        tinystoragedrivers_busproxy::test_support::stream_error_category(&error),
+        Some("StreamAborted")
+    );
+    assert!(!format!("{error:?}").contains("private stream reason"));
+}
+
 mod caller_export {
     async fn setup(_: tinybus::Connection) -> tinybus::Result<()> {
         Ok(())
@@ -3694,7 +3710,11 @@ async fn one_authenticated_peer_can_hold_two_isolated_context_leases() {
             .unwrap();
         assert_eq!(head.meta.len, u64::try_from(expected.len()).unwrap());
         let mut received = Vec::new();
-        body.read_to_end(&mut received).await.unwrap();
+        if let Err(error) = body.read_to_end(&mut received).await {
+            let category = tinystoragedrivers_busproxy::test_support::stream_error_category(&error)
+                .unwrap_or("unavailable");
+            panic!("blob stream read failed (SDK error category: {category})");
+        }
         assert_eq!(received, expected);
     }
 
