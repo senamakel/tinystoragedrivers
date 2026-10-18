@@ -967,6 +967,10 @@ async fn a_lagged_service_peer_detach_with_live_callers_withdraws_the_registrati
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This integration test exercises the admission, rotation, and refusal matrix end to end."
+)]
 async fn governed_admission_and_grant_rotation_refuse_mutations_before_backend_effects() {
     let bus = MemoryBus::new();
     let broker = Broker::new();
@@ -1191,6 +1195,10 @@ async fn governed_admission_and_grant_rotation_refuse_mutations_before_backend_e
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The test gates a real admitted write immediately before native fenced commit."
+)]
 async fn governed_native_fence_refuses_after_admission_before_document_commit() {
     let bus = MemoryBus::new();
     let broker = Broker::new();
@@ -1339,6 +1347,10 @@ async fn governed_native_fence_refuses_after_admission_before_document_commit() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This integration test orders async resolve cancellation and resource recovery."
+)]
 async fn governed_binding_slot_recovers_after_cancelled_caller_resolve_settles() {
     let bus = MemoryBus::new();
     let broker = Broker::new();
@@ -1622,6 +1634,10 @@ async fn more_than_256_live_bus_peers_release_bounded_governed_lease_resources()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The upload test covers ceiling, framing, cancellation, and destination ownership."
+)]
 async fn governed_upload_checks_declared_body_length_and_exact_ceiling() {
     let bus = MemoryBus::new();
     let broker = Broker::new();
@@ -2192,6 +2208,10 @@ async fn revoking_a_lease_closes_its_watch_on_a_retained_server() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The detach test verifies shared-server watch isolation and a positive survivor canary."
+)]
 async fn caller_detach_closes_only_that_callers_watch_on_a_shared_server() {
     let bus = MemoryBus::new();
     let broker = Broker::new();
@@ -2369,6 +2389,10 @@ async fn caller_detach_closes_only_that_callers_watch_on_a_shared_server() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The handover test preserves a stale close request across two real bindings."
+)]
 async fn stale_watch_close_cannot_close_equal_id_on_new_backend() {
     let bus = MemoryBus::new();
     let broker = Broker::new();
@@ -2458,7 +2482,10 @@ async fn stale_watch_close_cannot_close_equal_id_on_new_backend() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert_eq!(watch_a, watch_b, "backend watch handles may collide");
+    assert_ne!(
+        watch_a, watch_b,
+        "separate caller leases need distinct outward watch handles"
+    );
     let target_server = environment.server_for("profile-close-target");
     assert_eq!(target_server.open_watches(), 1);
     environment.scope_overrides.lock().unwrap().insert(
@@ -2534,6 +2561,10 @@ fn stage_allowlisted_cdylib(source: &std::path::Path) -> (tempfile::TempDir, std
 
 #[cfg(not(windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This loaded-cdylib proof exercises the complete native consumer route matrix."
+)]
 #[ignore = "requires TSD_GOVERNED_TEST_MODULE to point at the built consumer cdylib"]
 async fn a_loaded_cdylib_uses_the_governed_descriptor_and_never_falls_back_to_host_name() {
     let source = std::path::PathBuf::from(
@@ -3166,9 +3197,9 @@ async fn one_authenticated_peer_can_hold_two_isolated_context_leases() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert_eq!(
+    assert_ne!(
         close_watch_a, close_watch_b,
-        "backend watch IDs can collide"
+        "rebound and surviving leases need distinct outward watch handles"
     );
     let target_server = environment.server_for("profile-close-target");
     assert_eq!(target_server.open_watches(), 1);

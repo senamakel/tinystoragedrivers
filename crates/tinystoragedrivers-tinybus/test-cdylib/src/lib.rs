@@ -43,6 +43,12 @@ impl Consumer {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "The loaded consumer proof exercises the complete admitted storage surface."
+    )]
     async fn exercise(&self) -> Result<Value> {
         let transport = self.transport().await?;
         transport
@@ -178,6 +184,11 @@ impl Consumer {
         Ok(result.is_err())
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "The oversized-body fixture uses fixed representable test constants."
+    )]
     async fn reject_oversized_upload(&self) -> Result<bool> {
         let len = u64::try_from(MAX_FRAME_BYTES + 1024 * 1024 + 18)
             .expect("test upload ceiling fits u64");
@@ -251,6 +262,10 @@ impl Consumer {
         Ok(())
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "The route fixture uses a fixed representable byte pattern."
+    )]
     async fn verify_routes(&self) -> Result<Value> {
         let transport = self.transport().await?;
         let document = transport

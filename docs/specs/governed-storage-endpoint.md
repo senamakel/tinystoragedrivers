@@ -297,8 +297,8 @@ atomic write admission.
 
 ## Integration prerequisites
 
-- TinyBus U5 is published and pinned at v0.3.1, source commit
-  `ab6f3fa6f082a9c15947b33c5f58d69d37b50698`. The public APIs are
+- TinyBus U5 is published and pinned at v0.3.2, source commit
+  `cba2de0e573f99fe4c7e45ba14e2d6b5a2a7757f`. The public APIs are
   `ModuleHost::attach_linked_with_setup(...) -> ModuleInfo`,
   `ModuleHost::sender_lookup() -> ModuleSenderLookup`, and
   `RuntimeSetup(Connection, &ModuleHost)`. `ModuleSenderLookup` is a cloneable

@@ -1198,9 +1198,15 @@ where
         let Ok(mut watches) = self.watch_ids.lock() else {
             return None;
         };
+        let sequence = self
+            .next_watch_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |next| {
+                next.checked_add(1)
+            })
+            .ok()?;
         let watch_id = format!(
-            "host-watch-{:016x}",
-            self.next_watch_id.fetch_add(1, Ordering::AcqRel)
+            "host-watch-{:016x}-{:016x}",
+            self.lease.registration_id, sequence
         );
         watches.insert(
             watch_id.clone(),

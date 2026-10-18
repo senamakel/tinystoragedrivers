@@ -1,6 +1,6 @@
 # Governed storage endpoint implementation plan
 
-**Status:** Accepted; TinyBus U5 v0.3.1 is pinned; implementation in progress.
+**Status:** Accepted; TinyBus U5 v0.3.2 is pinned; final-cohort verification in progress.
 **Spec:**
 [`../specs/governed-storage-endpoint.md`](../specs/governed-storage-endpoint.md).
 **Issue:**

@@ -500,7 +500,8 @@ pub struct WatchOpenRequest {
     /// Maximum quiet wait in milliseconds, between 1 and 60,000 inclusive.
     pub interval_ms: u64,
 }
-/// Reply to `WatchOpen`: the handle that later `WatchChanged` signals carry.
+/// Reply to `WatchOpen`: the opaque host-issued handle that later `WatchChanged`
+/// signals carry. Drivers may use a separate private identifier internally.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WatchOpenResponse {
