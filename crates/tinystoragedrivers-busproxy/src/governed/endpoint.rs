@@ -728,6 +728,12 @@ pub(super) struct RelayInstallTestGate {
 }
 
 #[cfg(test)]
+pub(super) struct RelayRecvTestGate {
+    pub(super) reached: tokio::sync::mpsc::UnboundedSender<()>,
+    pub(super) release: Arc<Semaphore>,
+}
+
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum RelayTestEvent {
     Installed(u64),
@@ -773,6 +779,8 @@ pub struct GovernedEndpoint<E, A, C> {
     relay_install_test_gate: Mutex<Option<RelayInstallTestGate>>,
     #[cfg(test)]
     relay_test_events: Mutex<Option<tokio::sync::mpsc::UnboundedSender<RelayTestEvent>>>,
+    #[cfg(test)]
+    relay_recv_test_gate: Arc<Mutex<Option<RelayRecvTestGate>>>,
 }
 
 struct LeaseEndpointConfig<E, A, C> {
@@ -845,6 +853,8 @@ where
             relay_install_test_gate: Mutex::new(None),
             #[cfg(test)]
             relay_test_events: Mutex::new(None),
+            #[cfg(test)]
+            relay_recv_test_gate: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1087,6 +1097,8 @@ where
         let output = self.signals.clone();
         let watch_ids = Arc::clone(&self.watch_ids);
         #[cfg(test)]
+        let recv_test_gate = Arc::clone(&self.relay_recv_test_gate);
+        #[cfg(test)]
         let test_events = self
             .relay_test_events
             .lock()
@@ -1094,6 +1106,16 @@ where
             .and_then(|events| events.clone());
         *current = Some(self.runtime.spawn(async move {
             loop {
+                #[cfg(test)]
+                {
+                    let gate = recv_test_gate.lock().ok().and_then(|mut gate| gate.take());
+                    if let Some(gate) = gate {
+                        let _ = gate.reached.send(());
+                        if let Ok(permit) = gate.release.acquire().await {
+                            permit.forget();
+                        }
+                    }
+                }
                 match input.recv().await {
                     Ok(signal) => {
                         let outward_id = watch_ids.lock().ok().and_then(|ids| {

@@ -133,3 +133,7 @@ impl fmt::Debug for StorageLease {
         f.write_str("StorageLease(..)")
     }
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod tests;

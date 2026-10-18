@@ -109,6 +109,7 @@ fn remote_failures_keep_their_category_and_other_errors_become_transport() {
 
 #[test]
 fn watch_signals_must_be_a_single_well_formed_notice() {
+    assert!(watch_path_at(OBJECT_ROOT, &BusName::new(HOST_NAME).unwrap()).is_err());
     let expected_path = tinybus::ObjectPath::new("/a").unwrap();
     let expected_sender = BusName::new(":1.1").unwrap();
     let signal = |body: Value| {
@@ -167,6 +168,68 @@ fn watch_signals_must_be_a_single_well_formed_notice() {
             &other_sender
         )
         .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bound_transport_rejects_alias_malformed_and_stale_service_routes() {
+    let bus = MemoryBus::new();
+    let _broker_task = Broker::new().spawn(bus.clone());
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let service = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let live_peer = service.unique_name().unwrap().as_str().to_owned();
+    let root = format!("{OBJECT_ROOT}/Leases/11");
+
+    let alias = StorageDescriptor {
+        service_peer: HOST_NAME.to_owned(),
+        registration_id: 11,
+        object_root: root.clone(),
+    };
+    assert!(
+        BusTransport::connect_bound(caller.clone(), alias)
+            .await
+            .is_err(),
+        "well-known aliases cannot be used as bound service identities"
+    );
+
+    let malformed_root = StorageDescriptor {
+        service_peer: live_peer.clone(),
+        registration_id: 11,
+        object_root: format!("{OBJECT_ROOT}/Leases/not-a-number"),
+    };
+    assert!(
+        BusTransport::connect_bound(caller.clone(), malformed_root)
+            .await
+            .is_err(),
+        "a descriptor root must be one exact numeric lease path"
+    );
+
+    let mismatched_root = StorageDescriptor {
+        service_peer: live_peer,
+        registration_id: 11,
+        object_root: format!("{OBJECT_ROOT}/Leases/12"),
+    };
+    assert!(
+        BusTransport::connect_bound(caller.clone(), mismatched_root)
+            .await
+            .is_err(),
+        "the registration id must agree with the serialized root"
+    );
+
+    let disconnected = StorageDescriptor {
+        service_peer: ":123.456".to_owned(),
+        registration_id: 11,
+        object_root: root,
+    };
+    assert!(
+        BusTransport::connect_bound(caller, disconnected)
+            .await
+            .is_err(),
+        "a unique but disconnected service peer cannot be resolved again by alias"
     );
 }
 

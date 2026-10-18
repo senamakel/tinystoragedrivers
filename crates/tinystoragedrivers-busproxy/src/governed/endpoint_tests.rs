@@ -1,5 +1,5 @@
 use super::*;
-use crate::GrantPolicy;
+use crate::{BusTransport, GrantPolicy};
 use serde_json::json;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -7,7 +7,7 @@ use tinybus::{broker::Broker, module::ModuleHost, transport::memory::MemoryBus};
 use tinystoragedrivers_bus::{
     CollectionSpec as WireCollectionSpec, Filter, Precondition, StorageNeeds,
 };
-use tinystoragedrivers_client::{Admission, Object};
+use tinystoragedrivers_client::{Admission, Object, StorageTransport};
 use tinystoragedrivers_core::{CollectionSpec, MemoryStorage, Scope, StorageBackend};
 use tokio::sync::{Semaphore, mpsc};
 
@@ -97,6 +97,51 @@ impl AuditSink for RelayAudit {
     fn record(&self, _event: AuditEvent) {}
 }
 
+struct DropCountingLegacyEndpoint(Arc<AtomicU64>);
+
+impl Drop for DropCountingLegacyEndpoint {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageEndpoint for DropCountingLegacyEndpoint {
+    async fn call(&self, _call: StorageCall<'_>) -> Result<serde_json::Value, HostFailure> {
+        Ok(json!({"legacy":true}))
+    }
+
+    async fn put_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _head: tinystoragedrivers_bus::PutBlobStreamRequest,
+        _body: tinystoragedrivers_core::BlobReader,
+    ) -> Result<serde_json::Value, HostFailure> {
+        Ok(serde_json::Value::Null)
+    }
+
+    async fn get_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _request: tinystoragedrivers_bus::BlobKeyRequest,
+    ) -> Result<
+        Option<(
+            tinystoragedrivers_bus::BlobStreamHead,
+            tinystoragedrivers_core::BlobReader,
+        )>,
+        HostFailure,
+    > {
+        Ok(None)
+    }
+
+    fn watch_signals(
+        &self,
+        _sender: &BusName,
+    ) -> Option<tokio::sync::broadcast::Receiver<WatchChanged>> {
+        None
+    }
+}
+
 fn document_get<'a>(sender: &'a BusName, document_id: &str) -> StorageCall<'a> {
     StorageCall {
         object: Object::Documents,
@@ -115,6 +160,299 @@ fn assert_watch_invalidation(signal: WatchChanged, expected_watch: &str) -> Opti
             panic!("expected a fresh invalidation canary, got reset {reason:?}")
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This fixture gates the relay and proves lag recovery with real backend watch traffic."
+)]
+async fn a_lagged_backend_signal_relay_resets_only_its_live_watch() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let (caller_tx, caller_rx) = tokio::sync::oneshot::channel();
+    host.attach_linked_with_setup(
+        relay_test_caller::linked_module().unwrap(),
+        json!({}),
+        move |connection| async move {
+            caller_tx
+                .send(connection.clone())
+                .map_err(|_| tinybus::Error::failed("lagged relay caller receiver closed"))
+        },
+    )
+    .await
+    .unwrap();
+    let caller = tokio::time::timeout(Duration::from_secs(2), caller_rx)
+        .await
+        .expect("linked caller setup did not finish")
+        .unwrap();
+    let peer = caller.unique_name().unwrap();
+    let module = host.sender_lookup().module_for_sender(&peer).unwrap();
+    let collection = WireCollectionSpec {
+        name: "records".to_owned(),
+        indexes: vec![],
+        ttl_field: None,
+        search: None,
+    };
+    let storage = MemoryStorage::new().enable_native_watch();
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    scoped
+        .documents()
+        .ensure_collection(&CollectionSpec::new("records"))
+        .await
+        .unwrap();
+    let server = Arc::new(StorageServer::new(scoped));
+    let environment = Arc::new(RelayEnvironment {
+        epoch: AtomicU64::new(1),
+        collection,
+        servers: [(1, Arc::clone(&server))].into_iter().collect(),
+    });
+    let resolved = environment.resolve(&RelayContext, &module).await.unwrap();
+    let rendered_resolved = format!("{resolved:?}");
+    assert!(!rendered_resolved.contains("relay-profile-1"));
+    assert!(rendered_resolved.contains("[REDACTED]"));
+    let policy = GovernedStorage::new(
+        Arc::clone(&environment),
+        Arc::new(RelayAudit),
+        GovernedEndpointLimits::default(),
+    );
+    assert!(format!("{policy:?}").contains("GovernedStorage"));
+    assert!(format!("{:?}", policy.clone()).contains("GovernedStorage"));
+    let endpoint = Arc::new(GovernedEndpoint::for_lease(LeaseEndpointConfig {
+        environment,
+        audit: Arc::new(RelayAudit),
+        callers: Arc::new(RelayCallerDirectory {
+            peer: peer.clone(),
+            module: module.clone(),
+        }),
+        context: HostStorageContext::new(RelayContext),
+        lease: LeaseClaims {
+            registration_id: 1,
+            epoch: 1,
+            caller_peer: peer.clone(),
+            module,
+            revoked: Arc::new(AtomicBool::new(false)),
+            published: Arc::new(AtomicBool::new(true)),
+        },
+        limits: GovernedEndpointLimits::default(),
+        binding_slots: Arc::new(Semaphore::new(2)),
+        runtime: tokio::runtime::Handle::current(),
+    }));
+    let (paused_tx, mut paused_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    *endpoint.relay_recv_test_gate.lock().unwrap() = Some(RelayRecvTestGate {
+        reached: paused_tx,
+        release: Arc::clone(&release),
+    });
+    let mut signals = endpoint.watch_signals(&peer).unwrap();
+    let mut backend_signals = server.signals();
+    endpoint
+        .call(document_get(&peer, "bind-before-open"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), paused_rx.recv())
+        .await
+        .expect("signal relay did not stop at its receive gate")
+        .unwrap();
+    let opened = endpoint
+        .call(StorageCall {
+            object: Object::Documents,
+            selector: "WatchOpen",
+            request: json!({
+                "collection":"records",
+                "filter":serde_json::to_value(Filter::All).unwrap(),
+                "interval_ms":1000
+            }),
+            sender: Some(&peer),
+            admission: Admission::Private,
+        })
+        .await
+        .unwrap();
+    let watch_id = opened["watch_id"].as_str().unwrap().to_owned();
+
+    for index in 0..300 {
+        endpoint
+            .call(StorageCall {
+                object: Object::Documents,
+                selector: "Put",
+                request: serde_json::to_value(tinystoragedrivers_bus::PutDocumentRequest {
+                    collection: "records".to_owned(),
+                    id: format!("lag-canary-{index}"),
+                    doc: json!({"index":index}),
+                    precondition: Precondition::Absent,
+                    schema: 0,
+                    expires_ms: None,
+                })
+                .unwrap(),
+                sender: Some(&peer),
+                admission: Admission::Private,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), backend_signals.recv())
+            .await
+            .expect("backend did not publish each native watch invalidation")
+            .unwrap();
+    }
+    assert_eq!(server.open_watches(), 1);
+    release.add_permits(1);
+    let reset = tokio::time::timeout(Duration::from_secs(2), signals.recv())
+        .await
+        .expect("lagged relay did not recover")
+        .unwrap();
+    assert_eq!(reset.watch_id, watch_id);
+    assert_eq!(
+        reset.notice,
+        WatchNotice::ResetRequired {
+            reason: WatchReset::Backend
+        }
+    );
+    endpoint
+        .call(StorageCall {
+            object: Object::Documents,
+            selector: "WatchClose",
+            request: json!({"watch_id":watch_id}),
+            sender: Some(&peer),
+            admission: Admission::Private,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This test observes lease, legacy-route, native-watch, and observer cleanup together."
+)]
+async fn dropping_a_live_registration_cleans_leases_and_legacy_route_on_retained_server() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let (caller_tx, caller_rx) = tokio::sync::oneshot::channel();
+    host.attach_linked_with_setup(
+        relay_test_caller::linked_module().unwrap(),
+        json!({}),
+        move |connection| async move {
+            caller_tx
+                .send(connection.clone())
+                .map_err(|_| tinybus::Error::failed("drop cleanup caller receiver closed"))
+        },
+    )
+    .await
+    .unwrap();
+    let caller = tokio::time::timeout(Duration::from_secs(2), caller_rx)
+        .await
+        .expect("linked caller setup did not finish")
+        .unwrap();
+    let peer = caller.unique_name().unwrap();
+    let module = host.sender_lookup().module_for_sender(&peer).unwrap();
+    let service = tinybus::Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let collection = WireCollectionSpec {
+        name: "records".to_owned(),
+        indexes: vec![],
+        ttl_field: None,
+        search: None,
+    };
+    let storage = MemoryStorage::new().enable_native_watch();
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    scoped
+        .documents()
+        .ensure_collection(&CollectionSpec::new("records"))
+        .await
+        .unwrap();
+    let server = Arc::new(StorageServer::new(scoped));
+    let environment = Arc::new(RelayEnvironment {
+        epoch: AtomicU64::new(1),
+        collection,
+        servers: [(1, Arc::clone(&server))].into_iter().collect(),
+    });
+    let cleanup_count = Arc::new(AtomicU64::new(0));
+    let policy = GovernedStorage::new(
+        Arc::clone(&environment),
+        Arc::new(RelayAudit),
+        GovernedEndpointLimits::default(),
+    )
+    .with_legacy_endpoint(Arc::new(DropCountingLegacyEndpoint(Arc::clone(
+        &cleanup_count,
+    ))));
+    let registration = policy.register(
+        service,
+        Arc::new(RelayCallerDirectory {
+            peer: peer.clone(),
+            module,
+        }),
+        tokio::runtime::Handle::current(),
+    );
+    registration.install_legacy().await.unwrap();
+    let (lease, descriptor) = registration
+        .register_lease(HostStorageContext::new(RelayContext), peer.clone())
+        .await
+        .unwrap();
+    let bound = BusTransport::connect_bound(caller.clone(), descriptor)
+        .await
+        .unwrap();
+    let legacy = BusTransport::connect(caller.clone()).await.unwrap();
+    assert_eq!(
+        legacy
+            .call(Object::Documents, "Capabilities", serde_json::Value::Null)
+            .await
+            .unwrap(),
+        json!({"legacy":true})
+    );
+    bound
+        .call(
+            Object::Documents,
+            "WatchOpen",
+            json!({
+                "collection":"records",
+                "filter":serde_json::to_value(Filter::All).unwrap(),
+                "interval_ms":1000
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(server.open_watches(), 1);
+
+    drop(policy);
+    drop(registration);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if server.open_watches() == 0 && cleanup_count.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping registration must clean its watch and legacy endpoint");
+    assert!(
+        bound
+            .call(
+                Object::Documents,
+                "Get",
+                json!({"collection":"records","document_id":"after-drop"}),
+            )
+            .await
+            .is_err(),
+        "dropping the owner must withdraw the lease route"
+    );
+    assert!(
+        legacy
+            .call(Object::Documents, "Capabilities", serde_json::Value::Null)
+            .await
+            .is_err(),
+        "dropping the owner must withdraw the legacy alias route"
+    );
+    assert_eq!(server.open_watches(), 0);
+    assert_eq!(cleanup_count.load(Ordering::Acquire), 1);
+    drop(lease);
+    assert!(caller.name_owner(tinybus::BUS_NAME).await.is_ok());
+    host.shutdown(Duration::from_secs(1)).await;
 }
 
 #[test]

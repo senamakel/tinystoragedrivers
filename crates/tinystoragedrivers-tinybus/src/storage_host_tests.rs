@@ -739,18 +739,36 @@ async fn a_lease_handle_from_another_registration_cannot_revoke_equal_id() {
         Arc::clone(&callers),
         tokio::runtime::Handle::current(),
     ));
+    let context_c =
+        tinystoragedrivers_busproxy::HostStorageContext::new(Profile("profile-dropped"));
+    assert_eq!(format!("{context_c:?}"), "HostStorageContext(..)");
     let (lease_c, descriptor_c) = owner_c
-        .register_lease(
-            tinystoragedrivers_busproxy::HostStorageContext::new(Profile("profile-dropped")),
-            caller.unique_name().unwrap(),
-        )
+        .register_lease(context_c, caller.unique_name().unwrap())
         .await
         .unwrap();
+    let rendered_lease = format!("{lease_c:?}");
+    assert_eq!(rendered_lease, "StorageLease(..)");
+    assert!(!rendered_lease.contains("profile-dropped"));
+    let rendered_owner = format!("{owner_c:?}");
+    assert!(!rendered_owner.contains("profile-dropped"));
     let transport_c =
         tinystoragedrivers_busproxy::BusTransport::connect_bound(caller.clone(), descriptor_c)
             .await
             .unwrap();
+    let retained_lease = lease_c.clone();
     drop(lease_c);
+    assert!(
+        transport_c
+            .call(
+                tinystoragedrivers_client::Object::Documents,
+                "Get",
+                json!({"collection":"shared.records","document_id":"same-id"}),
+            )
+            .await
+            .is_ok(),
+        "dropping one clone must not revoke a lease retained by another clone"
+    );
+    drop(retained_lease);
     assert!(
         transport_c
             .call(
@@ -964,6 +982,374 @@ async fn a_lagged_service_peer_detach_with_live_callers_withdraws_the_registrati
     monitor.abort();
     host.shutdown(Duration::from_secs(1)).await;
     let _ = registration;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_rolls_back_legacy_name_collisions_and_observer_refusal() {
+    let collection = CollectionSpec {
+        name: "shared.records".to_owned(),
+        indexes: vec![],
+        ttl_field: None,
+        search: None,
+    };
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let blocker = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    blocker
+        .request_name(tinystoragedrivers_busproxy::HOST_NAME)
+        .await
+        .unwrap();
+    let blocked_endpoint = GovernedStorage::new(
+        test_environment(collection.clone()),
+        Arc::new(TestAudit::default()),
+        GovernedEndpointLimits::default(),
+    );
+    assert!(
+        attach_storage(
+            &host,
+            &observer,
+            blocked_endpoint,
+            tokio::runtime::Handle::current(),
+        )
+        .await
+        .is_err(),
+        "the linked registration must roll back if its compatibility name is occupied"
+    );
+    assert_eq!(
+        observer
+            .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
+            .await
+            .unwrap(),
+        blocker.unique_name(),
+        "rollback must preserve the existing owner of the occupied alias"
+    );
+    blocker.close().await.unwrap();
+    host.shutdown(Duration::from_secs(1)).await;
+
+    let observer_bus = MemoryBus::new();
+    let observer_broker = Broker::new();
+    let _observer_broker_task = observer_broker.clone().spawn(observer_bus.clone());
+    let observer_host = ModuleHost::new(observer_broker);
+    let rejected_observer = Connection::connect(observer_bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    rejected_observer.close().await.unwrap();
+    let observer_endpoint = GovernedStorage::new(
+        test_environment(collection),
+        Arc::new(TestAudit::default()),
+        GovernedEndpointLimits::default(),
+    );
+    assert!(
+        attach_storage(
+            &observer_host,
+            &rejected_observer,
+            observer_endpoint,
+            tokio::runtime::Handle::current(),
+        )
+        .await
+        .is_err(),
+        "failure to subscribe to owner changes must roll back the registration"
+    );
+    let probe = Connection::connect(observer_bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        probe
+            .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
+            .await
+            .unwrap(),
+        None,
+        "failed setup must not leave the storage well-known name claimed"
+    );
+    assert!(probe.name_owner(tinybus::BUS_NAME).await.is_ok());
+    observer_host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This test orders malformed notifications, a caller sentinel, and service detach."
+)]
+async fn owner_monitor_ignores_malformed_and_non_detach_messages() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let service = attach_named_test_module(
+        &host,
+        "governed-monitor-service",
+        "ai.tinyhumans.test.monitorservice",
+        "/ai/tinyhumans/test/monitor_service",
+    )
+    .await;
+    let caller_a = attach_named_test_module(
+        &host,
+        "governed-monitor-caller-a",
+        "ai.tinyhumans.test.monitorcallera",
+        "/ai/tinyhumans/test/monitor_caller_a",
+    )
+    .await;
+    let caller_b = attach_named_test_module(
+        &host,
+        "governed-monitor-caller-b",
+        "ai.tinyhumans.test.monitorcallerb",
+        "/ai/tinyhumans/test/monitor_caller_b",
+    )
+    .await;
+    let service_peer = service.unique_name().unwrap();
+    let first_caller_peer = caller_a.unique_name().unwrap();
+    let second_caller_peer = caller_b.unique_name().unwrap();
+    let callers: Arc<dyn tinystoragedrivers_busproxy::CallerDirectory> = Arc::new(
+        tinystoragedrivers_busproxy::TinyBusCallerDirectory(host.sender_lookup()),
+    );
+    let environment = test_environment(CollectionSpec {
+        name: "shared.records".to_owned(),
+        indexes: vec![],
+        ttl_field: None,
+        search: None,
+    });
+    let registration = Arc::new(
+        GovernedStorage::new(
+            Arc::clone(&environment),
+            Arc::new(TestAudit::default()),
+            GovernedEndpointLimits::default(),
+        )
+        .register(
+            service,
+            Arc::clone(&callers),
+            tokio::runtime::Handle::current(),
+        ),
+    );
+    let (_lease_a, descriptor_a) = registration
+        .register_lease(
+            tinystoragedrivers_busproxy::HostStorageContext::new(Profile("monitor-a")),
+            first_caller_peer.clone(),
+        )
+        .await
+        .unwrap();
+    let (_lease_b, descriptor_b) = registration
+        .register_lease(
+            tinystoragedrivers_busproxy::HostStorageContext::new(Profile("monitor-b")),
+            second_caller_peer.clone(),
+        )
+        .await
+        .unwrap();
+    let transport_a =
+        tinystoragedrivers_busproxy::BusTransport::connect_bound(caller_a, descriptor_a)
+            .await
+            .unwrap();
+    let transport_b =
+        tinystoragedrivers_busproxy::BusTransport::connect_bound(caller_b, descriptor_b)
+            .await
+            .unwrap();
+    for transport in [&transport_a, &transport_b] {
+        transport
+            .call(
+                tinystoragedrivers_client::Object::Documents,
+                "Get",
+                json!({"collection":"shared.records","document_id":"before-events"}),
+            )
+            .await
+            .unwrap();
+    }
+
+    let (events, received) = tokio::sync::broadcast::channel(8);
+    let event = |body| {
+        tinybus::Message::signal(
+            tinybus::ObjectPath::new("/org/freedesktop/DBus").unwrap(),
+            tinybus::InterfaceName::new(tinybus::BUS_INTERFACE).unwrap(),
+            tinybus::MemberName::new("NameOwnerChanged").unwrap(),
+            body,
+        )
+    };
+    events.send(event(Value::Null)).unwrap();
+    events
+        .send(event(Value::Array(vec![Value::String(
+            service_peer.to_string(),
+        )])))
+        .unwrap();
+    events
+        .send(event(Value::Array(vec![
+            Value::String("not a valid bus name".to_owned()),
+            Value::String("old-owner".to_owned()),
+            Value::Null,
+        ])))
+        .unwrap();
+    events
+        .send(event(Value::Array(vec![
+            Value::String("ai.tinyhumans.test.alias".to_owned()),
+            Value::String("old-owner".to_owned()),
+            Value::Null,
+        ])))
+        .unwrap();
+    events
+        .send(event(Value::Array(vec![
+            Value::String(service_peer.to_string()),
+            Value::String("old-owner".to_owned()),
+            Value::String(":1.900".to_owned()),
+        ])))
+        .unwrap();
+    events
+        .send(event(Value::Array(vec![
+            Value::String(first_caller_peer.to_string()),
+            Value::String("old-owner".to_owned()),
+            Value::Null,
+        ])))
+        .unwrap();
+
+    let monitor = tokio::spawn(crate::storage_host::monitor_owner_changes(
+        received,
+        service_peer.clone(),
+        Arc::clone(&registration),
+        None,
+    ));
+    let caller_a_withdrawn = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if transport_a
+                .call(
+                    tinystoragedrivers_client::Object::Documents,
+                    "Get",
+                    json!({
+                        "collection":"shared.records",
+                        "document_id":"after-malformed-events"
+                    }),
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        caller_a_withdrawn,
+        "the valid caller detach sentinel was not processed"
+    );
+    assert!(
+        transport_b
+            .call(
+                tinystoragedrivers_client::Object::Documents,
+                "Get",
+                json!({"collection":"shared.records","document_id":"malformed-events-kept-registration-live"}),
+            )
+            .await
+            .is_ok(),
+        "malformed or non-detach notifications must not close the whole registration"
+    );
+    events
+        .send(event(Value::Array(vec![
+            Value::String(service_peer.to_string()),
+            Value::String("old-owner".to_owned()),
+            Value::Null,
+        ])))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), monitor)
+        .await
+        .expect("service detach was not processed")
+        .unwrap();
+    assert!(matches!(
+        registration
+            .register_lease(
+                tinystoragedrivers_busproxy::HostStorageContext::new(Profile("after-shutdown")),
+                second_caller_peer,
+            )
+            .await,
+        Err(HostFailure::Denied("registration-shutdown"))
+    ));
+    assert!(observer.name_owner(tinybus::BUS_NAME).await.is_ok());
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_syntactically_valid_forged_descriptor_never_reaches_storage_resolution() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = attach_named_test_module(
+        &host,
+        "governed-forged-route-caller",
+        "ai.tinyhumans.test.governedforgedroutecaller",
+        "/ai/tinyhumans/test/governed_forged_route_caller",
+    )
+    .await;
+    let environment = test_environment(CollectionSpec {
+        name: "shared.records".to_owned(),
+        indexes: vec![],
+        ttl_field: None,
+        search: None,
+    });
+    let registration = attach_storage(
+        &host,
+        &observer,
+        GovernedStorage::new(
+            Arc::clone(&environment),
+            Arc::new(TestAudit::default()),
+            GovernedEndpointLimits::default(),
+        ),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    let (lease, descriptor) = registration
+        .register_lease(
+            tinystoragedrivers_busproxy::HostStorageContext::new(Profile("forged-route")),
+            caller.unique_name().unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let forged_id = 9_001_u64;
+    let mut forged_wire = serde_json::to_value(&descriptor).unwrap();
+    forged_wire["registration_id"] = json!(forged_id);
+    forged_wire["object_root"] = json!(format!(
+        "{}/Leases/{forged_id}",
+        tinystoragedrivers_busproxy::OBJECT_ROOT
+    ));
+    let forged_descriptor: tinystoragedrivers_busproxy::StorageDescriptor =
+        serde_json::from_value(forged_wire).unwrap();
+    let forged_route =
+        tinystoragedrivers_busproxy::BusTransport::connect_bound(caller, forged_descriptor)
+            .await
+            .unwrap();
+    let before_forged_call = environment.resolve_calls.load(Ordering::Acquire);
+    assert!(
+        forged_route
+            .call(
+                tinystoragedrivers_client::Object::Documents,
+                "Get",
+                json!({"collection":"shared.records","document_id":"forged-route"}),
+            )
+            .await
+            .is_err(),
+        "a parseable descriptor has no authority unless its exact route is served"
+    );
+    assert_eq!(
+        environment.resolve_calls.load(Ordering::Acquire),
+        before_forged_call,
+        "a forged route must be rejected before backend selection or reads"
+    );
+    registration.shutdown().await.unwrap();
+    drop(lease);
+    assert!(observer.name_owner(tinybus::BUS_NAME).await.is_ok());
+    host.shutdown(Duration::from_secs(1)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2187,6 +2573,25 @@ async fn revoking_a_lease_closes_its_watch_on_a_retained_server() {
         .unwrap();
     let server = environment.server_for("profile-watch-cleanup");
     assert_eq!(server.open_watches(), 1);
+
+    let empty_owner = crate::storage_host::tests::empty_registration_for_test::<
+        TestEnvironment,
+        TestAudit,
+        Profile,
+    >(tokio::runtime::Handle::current());
+    assert!(!empty_owner.revoke(&lease).await);
+    assert!(
+        transport
+            .call(
+                tinystoragedrivers_client::Object::Documents,
+                "Get",
+                json!({"collection":"shared.records","document_id":"after-empty-owner-revoke"}),
+            )
+            .await
+            .is_ok(),
+        "an already-empty registration wrapper cannot revoke another live owner's lease"
+    );
+    empty_owner.shutdown().await.unwrap();
 
     assert!(registration.revoke(&lease).await);
     tokio::time::timeout(Duration::from_secs(1), async {

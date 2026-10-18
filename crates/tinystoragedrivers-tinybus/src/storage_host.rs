@@ -308,3 +308,7 @@ mod storage_module {
         lazy = false,
     }
 }
+
+#[cfg(test)]
+#[path = "storage_host_unit_tests.rs"]
+pub(crate) mod tests;
