@@ -1455,13 +1455,14 @@ async fn governed_admission_and_grant_rotation_refuse_mutations_before_backend_e
             .unwrap()
             .is_none()
     );
-    assert!(
+    assert_eq!(
         backend
             .streams()
             .read_window("events/admission-marker", 0, 10)
             .await
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     assert!(
         backend

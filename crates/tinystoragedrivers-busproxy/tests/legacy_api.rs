@@ -51,7 +51,7 @@ async fn released_struct_literals_and_object_safe_endpoint_remain_usable() {
         stream_prefixes: &[],
         secret_prefixes: &[],
     };
-    assert!(needs.collections.is_empty());
+    assert_eq!(needs.collections.len(), 0);
 
     let sender = BusName::new(":1.41").unwrap();
     let call = StorageCall {
