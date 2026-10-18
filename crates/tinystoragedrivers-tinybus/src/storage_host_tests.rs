@@ -30,7 +30,7 @@ fn stream_error_test_diagnostic_is_content_free_across_crate_boundary() {
     assert_eq!(error.to_string(), "storage blob stream failed");
     assert_eq!(
         tinystoragedrivers_busproxy::test_support::stream_error_category(&error),
-        Some("StreamAborted")
+        Some("StreamAborted/Other")
     );
     assert!(!format!("{error:?}").contains("private stream reason"));
 }
