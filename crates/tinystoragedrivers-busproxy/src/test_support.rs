@@ -7,7 +7,21 @@ use std::io;
 
 pub(crate) fn sdk_error_category(error: &tinybus::Error) -> &'static str {
     match error {
-        tinybus::Error::StreamAborted { .. } => "StreamAborted",
+        tinybus::Error::StreamAborted { reason } => match reason.as_str() {
+            "the stream went idle while being read" => "StreamAborted/ReadIdle",
+            "the connection closed mid-stream" => "StreamAborted/ConnectionClosed",
+            "the sender aborted the stream" => "StreamAborted/SenderAbort",
+            "the receiver stopped reading" => "StreamAborted/ReceiverStoppedReading",
+            "the sender closed a truncated stream" => "StreamAborted/TruncatedClose",
+            "the stream went idle and was reaped" => "StreamAborted/IdleReaped",
+            "the receiver never collected the stream" => "StreamAborted/UncollectedReaped",
+            "the sender exceeded the chunk cap" => "StreamAborted/ChunkLimit",
+            "the sender wrote chunks out of order" => "StreamAborted/OutOfOrder",
+            "the sender exceeded the length it may write" => "StreamAborted/LengthLimit",
+            "the stream is already closed" => "StreamAborted/AlreadyClosed",
+            "the stream is already being read" => "StreamAborted/AlreadyReading",
+            _ => "StreamAborted/Other",
+        },
         tinybus::Error::ConnectionClosed => "ConnectionClosed",
         tinybus::Error::Timeout { .. } => "Timeout",
         tinybus::Error::UnknownStream { .. } => "UnknownStream",
