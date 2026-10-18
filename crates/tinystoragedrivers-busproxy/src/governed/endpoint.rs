@@ -739,6 +739,13 @@ pub(super) struct RelayInstallTestGate {
 pub(super) struct RelayRecvTestGate {
     pub(super) reached: tokio::sync::mpsc::UnboundedSender<()>,
     pub(super) release: Arc<Semaphore>,
+    pub(super) after_lag: Option<RelayRecvTestStage>,
+}
+
+#[cfg(test)]
+pub(super) struct RelayRecvTestStage {
+    pub(super) reached: tokio::sync::mpsc::UnboundedSender<()>,
+    pub(super) release: Arc<Semaphore>,
 }
 
 #[cfg(test)]
@@ -1113,11 +1120,14 @@ where
             .ok()
             .and_then(|events| events.clone());
         *current = Some(self.runtime.spawn(async move {
+            #[cfg(test)]
+            let mut after_lag_test_gate = None;
             loop {
                 #[cfg(test)]
                 {
                     let gate = recv_test_gate.lock().ok().and_then(|mut gate| gate.take());
                     if let Some(gate) = gate {
+                        after_lag_test_gate = gate.after_lag;
                         let _ = gate.reached.send(());
                         if let Ok(permit) = gate.release.acquire().await {
                             permit.forget();
@@ -1167,6 +1177,13 @@ where
                                     reason: WatchReset::Backend,
                                 },
                             });
+                        }
+                        #[cfg(test)]
+                        if let Some(gate) = after_lag_test_gate.take() {
+                            let _ = gate.reached.send(());
+                            if let Ok(permit) = gate.release.acquire().await {
+                                permit.forget();
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => return,

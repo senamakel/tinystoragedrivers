@@ -241,10 +241,16 @@ async fn a_lagged_backend_signal_relay_resets_only_its_live_watch() {
         runtime: tokio::runtime::Handle::current(),
     }));
     let (paused_tx, mut paused_rx) = mpsc::unbounded_channel();
+    let (reset_sent_tx, mut reset_sent_rx) = mpsc::unbounded_channel();
     let release = Arc::new(Semaphore::new(0));
+    let release_backlog = Arc::new(Semaphore::new(0));
     *endpoint.relay_recv_test_gate.lock().unwrap() = Some(RelayRecvTestGate {
         reached: paused_tx,
         release: Arc::clone(&release),
+        after_lag: Some(RelayRecvTestStage {
+            reached: reset_sent_tx,
+            release: Arc::clone(&release_backlog),
+        }),
     });
     let mut signals = endpoint.watch_signals(&peer).unwrap();
     let mut backend_signals = server.signals();
@@ -298,10 +304,14 @@ async fn a_lagged_backend_signal_relay_resets_only_its_live_watch() {
     }
     assert_eq!(server.open_watches(), 1);
     release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), reset_sent_rx.recv())
+        .await
+        .expect("lagged relay did not publish its backend reset")
+        .unwrap();
     let reset = tokio::time::timeout(Duration::from_secs(2), signals.recv())
         .await
-        .expect("lagged relay did not recover")
-        .unwrap();
+        .expect("outward signal observer did not receive backend reset")
+        .unwrap_or_else(|error| panic!("outward signal observer lagged: {error:?}"));
     assert_eq!(reset.watch_id, watch_id);
     assert_eq!(
         reset.notice,
@@ -309,6 +319,14 @@ async fn a_lagged_backend_signal_relay_resets_only_its_live_watch() {
             reason: WatchReset::Backend
         }
     );
+    release_backlog.add_permits(1);
+    for _ in 0..256 {
+        let signal = tokio::time::timeout(Duration::from_secs(2), signals.recv())
+            .await
+            .expect("retained backend invalidations did not drain")
+            .unwrap_or_else(|error| panic!("outward signal observer lagged: {error:?}"));
+        assert_eq!(signal.watch_id, watch_id);
+    }
     endpoint
         .call(StorageCall {
             object: Object::Documents,
