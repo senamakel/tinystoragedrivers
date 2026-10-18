@@ -429,3 +429,21 @@ fn response_serialization_errors_never_echo_custom_private_prose() {
         "document callback serialization failed"
     );
 }
+
+#[test]
+fn owned_sender_lookup_matches_the_host_and_fails_closed_after_host_drop() {
+    let host = ModuleHost::new(Broker::new());
+    let lookup = host.sender_lookup();
+    let unique: tinybus::BusName = ":1.414".parse().unwrap();
+    let alias: tinybus::BusName = "ai.tinyhumans.test.ModuleAlias".parse().unwrap();
+
+    assert_eq!(
+        lookup.module_for_sender(&unique),
+        host.module_for_sender(&unique)
+    );
+    assert!(lookup.module_for_sender(&alias).is_none());
+    drop(host);
+
+    assert!(lookup.module_for_sender(&unique).is_none());
+    assert!(lookup.module_for_sender(&alias).is_none());
+}

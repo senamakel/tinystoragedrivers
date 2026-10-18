@@ -60,6 +60,11 @@ pub(crate) fn wire_value<T: serde::Serialize>(message: &T) -> serde_json::Value 
 /// # Errors
 /// A recipient that is not a unique bus name.
 pub fn watch_path(recipient: &BusName) -> tinybus::Result<ObjectPath> {
+    watch_path_at(OBJECT_ROOT, recipient)
+}
+
+/// Watch path under one lease's exact object root.
+pub(crate) fn watch_path_at(root: &str, recipient: &BusName) -> tinybus::Result<ObjectPath> {
     if !recipient.is_unique() {
         return Err(tinybus::Error::failed(
             "watch signals address a unique bus name",
@@ -70,7 +75,7 @@ pub fn watch_path(recipient: &BusName) -> tinybus::Result<ObjectPath> {
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect();
-    ObjectPath::new(format!("{OBJECT_ROOT}/Watch/{element}"))
+    ObjectPath::new(format!("{root}/Watch/{element}"))
 }
 
 #[cfg(test)]

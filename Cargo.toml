@@ -4,7 +4,7 @@ resolver = "3"
 # package, each directory named for the package it holds. There is no root
 # package: `crates/tinystoragedrivers` is the facade a host depends on, and the
 # ports and drivers it forwards are ordinary members beside it.
-members = ["crates/*"]
+members = ["crates/*", "crates/tinystoragedrivers-tinybus/test-cdylib"]
 # `worktrees/` holds `git worktree` checkouts of this same repository; each
 # contains a full copy of this manifest and every crate under it, so without
 # this entry cargo walks into them and reports duplicate packages.
@@ -22,7 +22,9 @@ repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
 # Minimal document wire clients and confined host callbacks; never linked by core.
-tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "ed1ee4f5ee561c0320fa715eef114e0f1b888e41", default-features = false }
+tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "ab6f3fa6f082a9c15947b33c5f58d69d37b50698", default-features = false }
+# Generate the trusted static linked export owned by the TinyBus storage adapter.
+tinybus-module = { git = "https://github.com/tinyhumansai/tinybus", rev = "ab6f3fa6f082a9c15947b33c5f58d69d37b50698", package = "tinybus-module", features = ["static-link"] }
 tinystoragedrivers-bus = { path = "crates/tinystoragedrivers-bus" }
 # Bus client implementing the storage ports, plus the reference server adapter.
 tinystoragedrivers-client = { path = "crates/tinystoragedrivers-client" }

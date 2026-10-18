@@ -17,13 +17,14 @@ use tinystoragedrivers_bus::{
     BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind, WatchChanged,
 };
 use tinystoragedrivers_client::{Admission, Object};
+use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::chunks::{blob_reader, pump};
 use crate::names::{
-    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, interface, member, object_path,
-    watch_path, wire_value,
+    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, OBJECT_ROOT, WATCH_MEMBER, interface, member,
+    object_path, watch_path_at, wire_value,
 };
 use tinystoragedrivers_core::BlobReader;
 
@@ -126,6 +127,7 @@ pub trait StorageEndpoint: Send + Sync + 'static {
 struct Shared {
     connection: WeakConnection,
     endpoint: Arc<dyn StorageEndpoint>,
+    watch_root: String,
     forwarders: Mutex<HashMap<BusName, (u64, JoinHandle<()>)>>,
 }
 
@@ -143,9 +145,10 @@ impl Shared {
         {
             return;
         }
-        let (Some(mut signals), Ok(path)) =
-            (self.endpoint.watch_signals(sender), watch_path(sender))
-        else {
+        let (Some(mut signals), Ok(path)) = (
+            self.endpoint.watch_signals(sender),
+            watch_path_at(&self.watch_root, sender),
+        ) else {
             return;
         };
         // A forwarder for a binding that was released is replaced, not kept.
@@ -378,6 +381,59 @@ impl Interface for ObjectService {
 pub struct ServedStorage {
     connection: Connection,
     shared: Arc<Shared>,
+    runtime: Handle,
+    armed: bool,
+}
+
+/// Four storage objects served below one lease-specific root.
+pub(crate) struct ServedLease {
+    connection: Connection,
+    paths: Vec<tinybus::ObjectPath>,
+    shared: Arc<Shared>,
+    runtime: Handle,
+    armed: bool,
+}
+
+impl std::fmt::Debug for ServedLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServedLease").finish_non_exhaustive()
+    }
+}
+
+impl ServedLease {
+    /// Withdraw this lease's exact paths and stop its watch relays.
+    pub(crate) async fn shutdown(mut self) {
+        while let Some(path) = self.paths.first().cloned() {
+            self.connection.unserve(&path).await;
+            self.paths.remove(0);
+        }
+        self.abort_forwarders();
+        self.armed = false;
+    }
+
+    fn abort_forwarders(&self) {
+        if let Ok(mut forwarders) = self.shared.forwarders.lock() {
+            for (_, (_, task)) in forwarders.drain() {
+                task.abort();
+            }
+        }
+    }
+}
+
+impl Drop for ServedLease {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.abort_forwarders();
+        let connection = self.connection.clone();
+        let paths = std::mem::take(&mut self.paths);
+        self.runtime.spawn(async move {
+            for path in paths {
+                connection.unserve(&path).await;
+            }
+        });
+    }
 }
 
 impl std::fmt::Debug for ServedStorage {
@@ -391,16 +447,38 @@ impl ServedStorage {
     ///
     /// # Errors
     /// The bus refuses to release the name.
-    pub async fn shutdown(self) -> tinybus::Result<()> {
+    pub async fn shutdown(mut self) -> tinybus::Result<()> {
         for object in ALL {
             self.connection.unserve(&object_path(object)).await;
         }
+        self.abort_forwarders();
+        let result = self.connection.release_name(HOST_NAME).await;
+        self.armed = false;
+        result
+    }
+
+    fn abort_forwarders(&self) {
         if let Ok(mut forwarders) = self.shared.forwarders.lock() {
             for (_, (_, task)) in forwarders.drain() {
                 task.abort();
             }
         }
-        self.connection.release_name(HOST_NAME).await
+    }
+}
+
+impl Drop for ServedStorage {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.abort_forwarders();
+        let connection = self.connection.clone();
+        self.runtime.spawn(async move {
+            for object in ALL {
+                connection.unserve(&object_path(object)).await;
+            }
+            let _ = connection.release_name(HOST_NAME).await;
+        });
     }
 }
 
@@ -419,33 +497,168 @@ pub async fn serve(
     connection: &Connection,
     endpoint: Arc<dyn StorageEndpoint>,
 ) -> tinybus::Result<ServedStorage> {
+    serve_on(connection, endpoint, Handle::current()).await
+}
+
+/// Same as [`serve`] but rolls back and cleans up on a retained host runtime.
+pub(crate) async fn serve_on(
+    connection: &Connection,
+    endpoint: Arc<dyn StorageEndpoint>,
+    runtime: Handle,
+) -> tinybus::Result<ServedStorage> {
     let shared = Arc::new(Shared {
         connection: connection.downgrade(),
         endpoint,
+        watch_root: OBJECT_ROOT.to_owned(),
         forwarders: Mutex::new(HashMap::new()),
     });
+    let mut rollback = RegistrationRollback {
+        connection: connection.clone(),
+        paths: Vec::with_capacity(ALL.len()),
+        shared: Arc::clone(&shared),
+        runtime: runtime.clone(),
+        release_name: true,
+        armed: true,
+    };
     for object in ALL {
+        let path = object_path(object);
         connection
             .serve_at(
-                object_path(object),
+                path.clone(),
                 ObjectService {
                     object,
                     shared: Arc::clone(&shared),
                 },
             )
             .await?;
+        rollback.paths.push(path);
     }
-    if let Err(error) = connection.request_name(HOST_NAME).await {
-        // Do not leave unreachable objects registered behind a name we lack.
-        for object in ALL {
-            connection.unserve(&object_path(object)).await;
-        }
-        return Err(error);
-    }
+    connection.request_name(HOST_NAME).await?;
+    rollback.armed = false;
     Ok(ServedStorage {
         connection: connection.clone(),
         shared,
+        runtime,
+        armed: true,
     })
+}
+
+/// Serve one lease's four exact objects without claiming the legacy well-known
+/// name. Any partial registration is rolled back before returning an error.
+#[cfg(test)]
+pub(crate) async fn serve_lease(
+    connection: &Connection,
+    root: &str,
+    endpoint: Arc<dyn StorageEndpoint>,
+) -> tinybus::Result<ServedLease> {
+    serve_lease_on(connection, root, endpoint, Handle::current()).await
+}
+
+/// Same as [`serve_lease`] but cleanup is scheduled on the retained host
+/// runtime, not the linked module worker runtime that may be shutting down.
+pub(crate) async fn serve_lease_on(
+    connection: &Connection,
+    root: &str,
+    endpoint: Arc<dyn StorageEndpoint>,
+    runtime: Handle,
+) -> tinybus::Result<ServedLease> {
+    serve_lease_transaction(connection, root, endpoint, runtime, |_| async { Ok(()) }).await
+}
+
+async fn serve_lease_transaction<F, Fut>(
+    connection: &Connection,
+    root: &str,
+    endpoint: Arc<dyn StorageEndpoint>,
+    runtime: Handle,
+    mut after_register: F,
+) -> tinybus::Result<ServedLease>
+where
+    F: FnMut(Object) -> Fut,
+    Fut: std::future::Future<Output = tinybus::Result<()>>,
+{
+    validate_lease_root(root)?;
+    let shared = Arc::new(Shared {
+        connection: connection.downgrade(),
+        endpoint,
+        watch_root: root.to_owned(),
+        forwarders: Mutex::new(HashMap::new()),
+    });
+    let mut paths = Vec::with_capacity(ALL.len());
+    let mut rollback = RegistrationRollback {
+        connection: connection.clone(),
+        paths: Vec::new(),
+        shared: Arc::clone(&shared),
+        runtime: runtime.clone(),
+        release_name: false,
+        armed: true,
+    };
+    for object in ALL {
+        let path = tinybus::ObjectPath::new(format!("{root}/{}", object.as_str()))?;
+        connection
+            .serve_at(
+                path.clone(),
+                ObjectService {
+                    object,
+                    shared: Arc::clone(&shared),
+                },
+            )
+            .await?;
+        rollback.paths.push(path.clone());
+        paths.push(path);
+        after_register(object).await?;
+    }
+    rollback.armed = false;
+    Ok(ServedLease {
+        connection: connection.clone(),
+        paths,
+        shared,
+        runtime,
+        armed: true,
+    })
+}
+
+struct RegistrationRollback {
+    connection: Connection,
+    paths: Vec<tinybus::ObjectPath>,
+    shared: Arc<Shared>,
+    runtime: Handle,
+    release_name: bool,
+    armed: bool,
+}
+
+impl Drop for RegistrationRollback {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut forwarders) = self.shared.forwarders.lock() {
+            for (_, (_, task)) in forwarders.drain() {
+                task.abort();
+            }
+        }
+        let connection = self.connection.clone();
+        let paths = std::mem::take(&mut self.paths);
+        let release_name = self.release_name;
+        self.runtime.spawn(async move {
+            for path in paths {
+                connection.unserve(&path).await;
+            }
+            if release_name {
+                let _ = connection.release_name(HOST_NAME).await;
+            }
+        });
+    }
+}
+
+fn validate_lease_root(root: &str) -> tinybus::Result<()> {
+    let prefix = format!("{OBJECT_ROOT}/Leases/");
+    let tail = root
+        .strip_prefix(&prefix)
+        .ok_or_else(|| tinybus::Error::failed("invalid storage lease object root"))?;
+    if tail.is_empty() || tail.contains('/') || !tail.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(tinybus::Error::failed("invalid storage lease object root"));
+    }
+    tinybus::ObjectPath::new(root.to_owned()).map(|_| ())
 }
 
 #[cfg(test)]

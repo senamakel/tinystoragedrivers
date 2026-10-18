@@ -14,10 +14,11 @@ use tinystoragedrivers_core::{BlobReader, Scope};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
+use crate::StorageDescriptor;
 use crate::chunks::{PumpError, blob_reader, pump};
+use crate::names::OBJECT_ROOT;
 use crate::names::{
-    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, host_name, interface, member,
-    object_path, watch_path, wire_value,
+    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, host_name, interface, member, wire_value,
 };
 
 /// Signals buffered for a slow watcher before the oldest are dropped.
@@ -47,6 +48,7 @@ pub fn module_scope_label() -> Scope {
 pub struct BusTransport {
     connection: Connection,
     host: BusName,
+    object_root: String,
     /// The unique name of the peer that owns [`HOST_NAME`]; streams are
     /// accepted only from it.
     owner: BusName,
@@ -80,6 +82,51 @@ impl BusTransport {
             .name_owner(HOST_NAME)
             .await?
             .ok_or_else(|| tinybus::Error::NameHasNoOwner(host_name()))?;
+        Self::connect_to(connection, host_name(), owner, OBJECT_ROOT.to_owned()).await
+    }
+
+    /// Attach to a host-issued lease route, pinned to its unique service peer.
+    /// The descriptor is routing configuration only; the host validates the
+    /// authenticated caller against its live lease registry on every call.
+    ///
+    /// # Errors
+    /// The descriptor is malformed, its service peer has disconnected, or the
+    /// bus refuses the signal subscription.
+    pub async fn connect_bound(
+        connection: Connection,
+        descriptor: StorageDescriptor,
+    ) -> tinybus::Result<Self> {
+        let owner = BusName::new(descriptor.service_peer().to_owned())?;
+        if !owner.is_unique() {
+            return Err(tinybus::Error::failed(
+                "storage descriptor service peer must be unique",
+            ));
+        }
+        validate_object_root(descriptor.object_root())?;
+        let expected_root = format!("{OBJECT_ROOT}/Leases/{}", descriptor.registration_id);
+        if descriptor.object_root() != expected_root {
+            return Err(tinybus::Error::failed(
+                "storage descriptor route does not match its registration",
+            ));
+        }
+        if connection.name_owner(owner.as_str()).await?.as_ref() != Some(&owner) {
+            return Err(tinybus::Error::NameHasNoOwner(owner));
+        }
+        Self::connect_to(
+            connection,
+            owner.clone(),
+            owner,
+            descriptor.object_root().to_owned(),
+        )
+        .await
+    }
+
+    async fn connect_to(
+        connection: Connection,
+        host: BusName,
+        owner: BusName,
+        object_root: String,
+    ) -> tinybus::Result<Self> {
         let me = connection
             .unique_name()
             .ok_or_else(|| tinybus::Error::failed("the connection has no unique name"))?;
@@ -88,7 +135,9 @@ impl BusTransport {
             .sender(owner.clone())
             .interface(interface())
             .member(member(WATCH_MEMBER));
-        rule.path = Some(watch_path(&me)?);
+        let expected_watch_path = watch_path_at(&object_root, &me)?;
+        rule.path = Some(expected_watch_path.clone());
+        let expected_signal_sender = owner.clone();
         // Subscribe before returning so no watch signal can be missed.
         let mut received = connection.add_match(rule).await?;
         let (signals, _) = broadcast::channel(SIGNAL_BUFFER);
@@ -97,7 +146,9 @@ impl BusTransport {
             loop {
                 match received.recv().await {
                     Ok(message) => {
-                        if let Some(signal) = decode_signal(&message) {
+                        if let Some(signal) =
+                            decode_signal(&message, &expected_watch_path, &expected_signal_sender)
+                        {
                             // No receiver just means nobody is watching.
                             let _ = relay.send(signal);
                         }
@@ -109,7 +160,8 @@ impl BusTransport {
         });
         Ok(Self {
             connection,
-            host: host_name(),
+            host,
+            object_root,
             owner,
             timeout: CALL_TIMEOUT,
             signals,
@@ -127,23 +179,62 @@ impl BusTransport {
     fn proxy(&self, object: Object) -> Result<tinybus::Proxy, WireError> {
         tinybus::Proxy::new(
             self.connection.clone(),
-            host_name(),
-            object_path(object),
+            self.host.clone(),
+            route_object_path(&self.object_root, object)
+                .map_err(|error| transport_error(&error))?,
             interface(),
         )
         .map(|proxy| proxy.with_timeout(self.timeout))
         .map_err(|error| transport_error(&error))
     }
 
-    fn streamed_call(selector: &str, body: Value) -> Message {
-        Message::method_call(
-            host_name(),
-            object_path(Object::Blobs),
+    fn streamed_call(&self, selector: &str, body: Value) -> Result<Message, WireError> {
+        Ok(Message::method_call(
+            self.host.clone(),
+            route_object_path(&self.object_root, Object::Blobs)
+                .map_err(|error| transport_error(&error))?,
             interface(),
             member(selector),
             body,
-        )
+        ))
     }
+}
+
+fn validate_object_root(root: &str) -> tinybus::Result<()> {
+    let prefix = format!("{OBJECT_ROOT}/Leases/");
+    let tail = root
+        .strip_prefix(&prefix)
+        .ok_or_else(|| tinybus::Error::failed("storage descriptor has an invalid lease root"))?;
+    if tail.is_empty() || tail.contains('/') || !tail.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(tinybus::Error::failed(
+            "storage descriptor has an invalid lease root",
+        ));
+    }
+    tinybus::ObjectPath::new(root.to_owned()).map(|_| ())
+}
+
+fn route_object_path(root: &str, object: Object) -> tinybus::Result<tinybus::ObjectPath> {
+    tinybus::ObjectPath::new(format!("{root}/{}", object.as_str()))
+}
+
+fn watch_path_at(root: &str, recipient: &BusName) -> tinybus::Result<tinybus::ObjectPath> {
+    if !recipient.is_unique() {
+        return Err(tinybus::Error::failed(
+            "watch signals address a unique bus name",
+        ));
+    }
+    let element: String = recipient
+        .as_str()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    tinybus::ObjectPath::new(format!("{root}/Watch/{element}"))
 }
 
 fn transport_error(error: &tinybus::Error) -> WireError {
@@ -166,7 +257,16 @@ fn wire_error(error: tinybus::Error) -> WireError {
     }
 }
 
-fn decode_signal(message: &Message) -> Option<WatchChanged> {
+fn decode_signal(
+    message: &Message,
+    expected_path: &tinybus::ObjectPath,
+    expected_sender: &BusName,
+) -> Option<WatchChanged> {
+    if message.header.path.as_ref() != Some(expected_path)
+        || message.header.sender.as_ref() != Some(expected_sender)
+    {
+        return None;
+    }
     let first = match &message.body {
         Value::Array(items) if items.len() == 1 => items.first()?.clone(),
         _ => return None,
@@ -221,13 +321,13 @@ impl StorageTransport for BusTransport {
         }
         let writer = self
             .connection
-            .open_stream_with_timeout(&host_name(), descriptor, self.timeout)
+            .open_stream_with_timeout(&self.host, descriptor, self.timeout)
             .await
             .map_err(|error| transport_error(&error))?;
-        let message = Self::streamed_call(
+        let message = self.streamed_call(
             "PutStream",
             json!([wire_value(&head), wire_value(&writer.stream_ref())]),
-        );
+        )?;
         // The call and the body are in flight together: the host reads the
         // stream while it answers, so neither can wait for the other. The
         // first failure wins and the other half is dropped.

@@ -12,7 +12,7 @@ publish = false
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tinybus.workspace = true
+tinybus = { workspace = true, features = ["modules"] }
 tinystoragedrivers-bus.workspace = true
 tinystoragedrivers-client.workspace = true
 tinystoragedrivers-core.workspace = true
@@ -20,7 +20,7 @@ tokio = { workspace = true, features = ["sync", "io-util", "rt", "time"] }
 
 [dev-dependencies]
 tinystoragedrivers-secrets = { path = "../tinystoragedrivers-secrets" }
-tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tinystoragedrivers-core = { workspace = true, features = ["testkit", "test-util"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util"] }
 
 [lints]
