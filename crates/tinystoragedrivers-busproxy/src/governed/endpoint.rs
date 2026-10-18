@@ -705,11 +705,33 @@ struct BoundServer {
 struct WatchOwner {
     server: Arc<StorageServer>,
     binding_epoch: u64,
+    backend_watch_id: String,
 }
 
 struct ResolutionGate {
     next: AtomicU64,
     latest: AtomicU64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RelayPublicationPause {
+    BeforeCommit,
+}
+
+#[cfg(test)]
+pub(super) struct RelayInstallTestGate {
+    pub(super) epoch: u64,
+    pub(super) pause: RelayPublicationPause,
+    pub(super) reached: tokio::sync::mpsc::UnboundedSender<()>,
+    pub(super) release: Arc<Semaphore>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RelayTestEvent {
+    Installed(u64),
+    Forwarded { epoch: u64, watch_id: String },
 }
 
 impl ResolutionGate {
@@ -743,9 +765,14 @@ pub struct GovernedEndpoint<E, A, C> {
     bound_server: Mutex<Option<BoundServer>>,
     resolution_gate: ResolutionGate,
     watch_ids: Arc<Mutex<HashMap<String, WatchOwner>>>,
+    next_watch_id: AtomicU64,
     signals: broadcast::Sender<WatchChanged>,
     signal_relay: Mutex<Option<JoinHandle<()>>>,
     runtime: Handle,
+    #[cfg(test)]
+    relay_install_test_gate: Mutex<Option<RelayInstallTestGate>>,
+    #[cfg(test)]
+    relay_test_events: Mutex<Option<tokio::sync::mpsc::UnboundedSender<RelayTestEvent>>>,
 }
 
 struct LeaseEndpointConfig<E, A, C> {
@@ -778,12 +805,12 @@ impl<E, A, C> Drop for GovernedEndpoint<E, A, C> {
             .map(|mut watches| std::mem::take(&mut *watches))
             .unwrap_or_default();
         self.runtime.spawn(async move {
-            for (watch_id, owner) in watches {
+            for owner in watches.into_values() {
                 let _ = guarded(owner.server.handle(
                     Admission::Private,
                     Object::Documents.as_str(),
                     "WatchClose",
-                    serde_json::json!({"watch_id": watch_id}),
+                    serde_json::json!({"watch_id": owner.backend_watch_id}),
                 ))
                 .await;
             }
@@ -810,9 +837,14 @@ where
             bound_server: Mutex::new(None),
             resolution_gate: ResolutionGate::new(),
             watch_ids: Arc::new(Mutex::new(HashMap::new())),
+            next_watch_id: AtomicU64::new(1),
             signals: broadcast::channel(256).0,
             signal_relay: Mutex::new(None),
             runtime: config.runtime,
+            #[cfg(test)]
+            relay_install_test_gate: Mutex::new(None),
+            #[cfg(test)]
+            relay_test_events: Mutex::new(None),
         }
     }
 
@@ -944,11 +976,24 @@ where
         if !self.resolution_gate.is_latest(ticket) {
             return Err(HostFailure::Denied("stale-binding-resolution"));
         }
-        let (changed, previous) = {
+        // Test barriers are deliberately before the commit critical section:
+        // no test (or production caller) may suspend while binding/watch/relay
+        // state is only partially published.
+        #[cfg(test)]
+        self.pause_publication_for_test(
+            resolved.binding_epoch,
+            RelayPublicationPause::BeforeCommit,
+        )
+        .await;
+
+        let (changed, previous, stale_watches) = {
             let mut held = self
                 .bound_server
                 .lock()
                 .map_err(|_| HostFailure::Denied("host-unavailable"))?;
+            if !self.resolution_gate.is_latest(ticket) {
+                return Err(HostFailure::Denied("stale-binding-resolution"));
+            }
             if let Some(binding) = held.as_ref() {
                 if resolved.binding_epoch < binding.binding_epoch {
                     return Err(HostFailure::Denied("stale-binding-resolution"));
@@ -965,31 +1010,46 @@ where
                 binding.binding_epoch != resolved.binding_epoch
                     || !Arc::ptr_eq(&binding.server, &resolved.server)
             });
-            let previous = held.take();
-            *held = Some(BoundServer {
-                peer: sender.clone(),
-                backend_identity: resolved.backend_identity.clone(),
-                canonical_scope: resolved.canonical_scope.clone(),
-                binding_epoch: resolved.binding_epoch,
-                grant: resolved.grant.clone(),
-                server: Arc::clone(&resolved.server),
-            });
-            (changed, previous)
-        };
-        if changed {
-            let stale_watches = self.reset_watches();
-            if previous.is_some() {
-                for (watch_id, owner) in stale_watches {
-                    let _ = guarded(owner.server.handle(
-                        Admission::Private,
-                        Object::Documents.as_str(),
-                        "WatchClose",
-                        serde_json::json!({"watch_id": watch_id}),
-                    ))
-                    .await;
+            let previous = if changed {
+                let previous = held.take();
+                *held = Some(BoundServer {
+                    peer: sender.clone(),
+                    backend_identity: resolved.backend_identity.clone(),
+                    canonical_scope: resolved.canonical_scope.clone(),
+                    binding_epoch: resolved.binding_epoch,
+                    grant: resolved.grant.clone(),
+                    server: Arc::clone(&resolved.server),
+                });
+                let mut watches = self
+                    .watch_ids
+                    .lock()
+                    .map_err(|_| HostFailure::Denied("host-unavailable"))?;
+                let stale_watches = std::mem::take(&mut *watches);
+                self.install_signal_relay_locked(&resolved.server, resolved.binding_epoch);
+                for watch_id in stale_watches.keys() {
+                    let _ = self.signals.send(WatchChanged {
+                        watch_id: watch_id.clone(),
+                        notice: WatchNotice::ResetRequired {
+                            reason: WatchReset::Backend,
+                        },
+                    });
                 }
+                (previous, stale_watches)
+            } else {
+                (None, HashMap::new())
+            };
+            (changed, previous.0, previous.1)
+        };
+        if changed && previous.is_some() {
+            for owner in stale_watches.into_values() {
+                let _ = guarded(owner.server.handle(
+                    Admission::Private,
+                    Object::Documents.as_str(),
+                    "WatchClose",
+                    serde_json::json!({"watch_id": owner.backend_watch_id}),
+                ))
+                .await;
             }
-            self.start_signal_relay(&resolved.server, resolved.binding_epoch);
         }
         self.module(Some(sender))?;
         if !self.resolution_gate.is_latest(ticket) {
@@ -999,6 +1059,23 @@ where
     }
 
     fn start_signal_relay(&self, server: &Arc<StorageServer>, binding_epoch: u64) {
+        // Serialize relay installation with backend publication. Keep the
+        // bound lock until replacement commits so a newer publication cannot
+        // pass between validation and installation.
+        let Ok(bound) = self.bound_server.lock() else {
+            return;
+        };
+        if !bound.as_ref().is_some_and(|current| {
+            current.binding_epoch == binding_epoch && Arc::ptr_eq(&current.server, server)
+        }) {
+            return;
+        }
+        self.install_signal_relay_locked(server, binding_epoch);
+    }
+
+    /// Replace the relay while the caller holds `bound_server`, making relay
+    /// state part of the same visible binding commit.
+    fn install_signal_relay_locked(&self, server: &Arc<StorageServer>, binding_epoch: u64) {
         let Ok(mut current) = self.signal_relay.lock() else {
             return;
         };
@@ -1009,17 +1086,34 @@ where
         let server = Arc::clone(server);
         let output = self.signals.clone();
         let watch_ids = Arc::clone(&self.watch_ids);
+        #[cfg(test)]
+        let test_events = self
+            .relay_test_events
+            .lock()
+            .ok()
+            .and_then(|events| events.clone());
         *current = Some(self.runtime.spawn(async move {
             loop {
                 match input.recv().await {
                     Ok(signal) => {
-                        let owned = watch_ids.lock().is_ok_and(|ids| {
-                            ids.get(&signal.watch_id).is_some_and(|owner| {
-                                owner.binding_epoch == binding_epoch
-                                    && Arc::ptr_eq(&owner.server, &server)
+                        let outward_id = watch_ids.lock().ok().and_then(|ids| {
+                            ids.iter().find_map(|(watch_id, owner)| {
+                                (owner.backend_watch_id == signal.watch_id
+                                    && owner.binding_epoch == binding_epoch
+                                    && Arc::ptr_eq(&owner.server, &server))
+                                .then(|| watch_id.clone())
                             })
                         });
-                        if owned {
+                        if let Some(watch_id) = outward_id {
+                            #[cfg(test)]
+                            if let Some(events) = &test_events {
+                                let _ = events.send(RelayTestEvent::Forwarded {
+                                    epoch: binding_epoch,
+                                    watch_id: watch_id.clone(),
+                                });
+                            }
+                            let mut signal = signal;
+                            signal.watch_id = watch_id;
                             let _ = output.send(signal);
                         }
                     }
@@ -1028,11 +1122,11 @@ where
                             .lock()
                             .map(|ids| {
                                 ids.iter()
-                                    .filter_map(|(watch_id, owner)| {
-                                        (owner.binding_epoch == binding_epoch
-                                            && Arc::ptr_eq(&owner.server, &server))
-                                        .then(|| watch_id.clone())
+                                    .filter(|(_, owner)| {
+                                        owner.binding_epoch == binding_epoch
+                                            && Arc::ptr_eq(&owner.server, &server)
                                     })
+                                    .map(|(watch_id, _)| watch_id.clone())
                                     .collect::<Vec<_>>()
                             })
                             .unwrap_or_default();
@@ -1049,23 +1143,32 @@ where
                 }
             }
         }));
+        #[cfg(test)]
+        if let Ok(events) = self.relay_test_events.lock()
+            && let Some(events) = &*events
+        {
+            let _ = events.send(RelayTestEvent::Installed(binding_epoch));
+        }
     }
 
-    fn reset_watches(&self) -> HashMap<String, WatchOwner> {
-        let ids = self
-            .watch_ids
+    #[cfg(test)]
+    async fn pause_publication_for_test(&self, binding_epoch: u64, pause: RelayPublicationPause) {
+        let gate = self
+            .relay_install_test_gate
             .lock()
-            .map(|mut ids| std::mem::take(&mut *ids))
-            .unwrap_or_default();
-        for watch_id in ids.keys() {
-            let _ = self.signals.send(WatchChanged {
-                watch_id: watch_id.clone(),
-                notice: WatchNotice::ResetRequired {
-                    reason: WatchReset::Backend,
-                },
+            .ok()
+            .and_then(|mut gate| {
+                gate.as_ref()
+                    .is_some_and(|gate| gate.epoch == binding_epoch && gate.pause == pause)
+                    .then(|| gate.take())
+                    .flatten()
             });
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            if let Ok(permit) = gate.release.acquire().await {
+                permit.forget();
+            }
         }
-        ids
     }
 
     fn record_watch_if_current(
@@ -1073,13 +1176,13 @@ where
         sender: &BusName,
         resolved: &ResolvedStorage,
         ticket: u64,
-        watch_id: &str,
-    ) -> bool {
+        backend_watch_id: &str,
+    ) -> Option<String> {
         if !self.resolution_gate.is_latest(ticket) {
-            return false;
+            return None;
         }
         let Ok(bound) = self.bound_server.lock() else {
-            return false;
+            return None;
         };
         let current = bound.as_ref().is_some_and(|binding| {
             binding.peer == *sender
@@ -1090,19 +1193,24 @@ where
                 && Arc::ptr_eq(&binding.server, &resolved.server)
         });
         if !current || !self.resolution_gate.is_latest(ticket) {
-            return false;
+            return None;
         }
         let Ok(mut watches) = self.watch_ids.lock() else {
-            return false;
+            return None;
         };
+        let watch_id = format!(
+            "host-watch-{:016x}",
+            self.next_watch_id.fetch_add(1, Ordering::AcqRel)
+        );
         watches.insert(
-            watch_id.to_owned(),
+            watch_id.clone(),
             WatchOwner {
                 server: Arc::clone(&resolved.server),
                 binding_epoch: resolved.binding_epoch,
+                backend_watch_id: backend_watch_id.to_owned(),
             },
         );
-        true
+        Some(watch_id)
     }
 }
 
@@ -1122,6 +1230,10 @@ where
     E: Environment<C>,
     A: AuditSink,
 {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The per-call policy, backend fence, and watch ownership transaction must stay ordered."
+    )]
     async fn call(&self, call: StorageCall<'_>) -> Result<Value, HostFailure> {
         let opens_watch = call.object == Object::Documents && call.selector == "WatchOpen";
         let closes_watch = if call.object == Object::Documents && call.selector == "WatchClose" {
@@ -1137,7 +1249,7 @@ where
             .grant
             .authorize(call.object, call.selector, &call.request)
             .map_err(map_denied)?;
-        let (request, filter, write) = match plan {
+        let (mut request, filter, write) = match plan {
             crate::Plan::Answer(answer) => {
                 self.audit(call.object, "allowed", false);
                 return Ok(answer);
@@ -1147,18 +1259,24 @@ where
         if write {
             guarded(self.environment.admit_write(&self.context, &module)).await??;
         }
+        let mut close_owner = None;
         if let Some(watch_id) = closes_watch.as_deref() {
             self.publish_server(call.sender, &resolved, ticket).await?;
-            let owned_here = self.watch_ids.lock().is_ok_and(|ids| {
-                ids.get(watch_id).is_some_and(|owner| {
+            let owner = self
+                .watch_ids
+                .lock()
+                .ok()
+                .and_then(|ids| ids.get(watch_id).cloned())
+                .filter(|owner| {
                     owner.binding_epoch == resolved.binding_epoch
                         && Arc::ptr_eq(&owner.server, &resolved.server)
-                })
-            });
-            if !owned_here {
+                });
+            let Some(owner) = owner else {
                 self.audit(call.object, "denied", false);
                 return Err(HostFailure::Denied("watch-handle-not-owned"));
-            }
+            };
+            request["watch_id"] = serde_json::json!(owner.backend_watch_id);
+            close_owner = Some((watch_id.to_owned(), owner));
         } else {
             self.publish_server(call.sender, &resolved, ticket).await?;
         }
@@ -1195,7 +1313,7 @@ where
                     .map(str::to_owned)
             })
             .flatten();
-        let filtered = match resolved.grant.filter_reply(filter, result) {
+        let mut filtered = match resolved.grant.filter_reply(filter, result) {
             Ok(filtered) => filtered,
             Err(error) => {
                 if let Some(watch_id) = opened_watch_id {
@@ -1210,37 +1328,43 @@ where
                 return Err(map_denied(error));
             }
         };
-        if opens_watch && let Some(watch_id) = filtered.get("watch_id").and_then(Value::as_str) {
+        if opens_watch
+            && let Some(backend_watch_id) = filtered.get("watch_id").and_then(Value::as_str)
+        {
+            let backend_watch_id = backend_watch_id.to_owned();
             let Some(sender) = call.sender else {
                 let _ = guarded(resolved.server.handle(
                     call.admission,
                     Object::Documents.as_str(),
                     "WatchClose",
-                    serde_json::json!({"watch_id": watch_id}),
+                    serde_json::json!({"watch_id": backend_watch_id}),
                 ))
                 .await;
                 return Err(HostFailure::Denied("unauthenticated-caller"));
             };
-            if !self.record_watch_if_current(sender, &resolved, ticket, watch_id) {
+            let Some(watch_id) =
+                self.record_watch_if_current(sender, &resolved, ticket, &backend_watch_id)
+            else {
                 let _ = guarded(resolved.server.handle(
                     call.admission,
                     Object::Documents.as_str(),
                     "WatchClose",
-                    serde_json::json!({"watch_id": watch_id}),
+                    serde_json::json!({"watch_id": backend_watch_id}),
                 ))
                 .await;
                 return Err(HostFailure::Denied("stale-binding-resolution"));
-            }
+            };
+            filtered["watch_id"] = serde_json::json!(watch_id);
         }
-        if let Some(watch_id) = closes_watch
+        if let Some((watch_id, closed_owner)) = close_owner
             && let Ok(mut ids) = self.watch_ids.lock()
+            && ids.get(&watch_id).is_some_and(|owner| {
+                owner.binding_epoch == closed_owner.binding_epoch
+                    && owner.backend_watch_id == closed_owner.backend_watch_id
+                    && Arc::ptr_eq(&owner.server, &closed_owner.server)
+            })
         {
-            if ids.get(&watch_id).is_some_and(|owner| {
-                owner.binding_epoch == resolved.binding_epoch
-                    && Arc::ptr_eq(&owner.server, &resolved.server)
-            }) {
-                ids.remove(&watch_id);
-            }
+            ids.remove(&watch_id);
         }
         self.audit(call.object, "allowed", write);
         Ok(filtered)
