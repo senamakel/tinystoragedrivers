@@ -63,10 +63,20 @@ pub(crate) fn blob_reader(mut stream: StreamReader) -> BlobReader {
                     }
                 }
                 Ok(None) => return,
-                Err(_) => {
-                    let _ = tx
-                        .send(Err(io::Error::other("storage blob stream failed")))
-                        .await;
+                Err(error) => {
+                    #[cfg(test)]
+                    eprintln!(
+                        "storage stream reader error category={}",
+                        tests::stream_error_category(&error)
+                    );
+                    #[cfg(feature = "test-stream-diagnostics")]
+                    let read_error = crate::test_support::diagnostic_io_error(&error);
+                    #[cfg(not(feature = "test-stream-diagnostics"))]
+                    let read_error = {
+                        let _ = error;
+                        io::Error::other("storage blob stream failed")
+                    };
+                    let _ = tx.send(Err(read_error)).await;
                     return;
                 }
             }

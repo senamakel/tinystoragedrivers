@@ -9,6 +9,13 @@ workspace_root="$(pwd -P)/"
 # excluded by the same test.
 source_root="${workspace_root}crates/"
 
+# Keep the exact fixture exclusion and native-proof result check under tests.
+# The actual integration proof runs below under cargo-llvm-cov, and a missing
+# fixture, failed test, or ignored result fails this gate before it can exclude
+# the fixture source from the production denominator.
+python3 .github/scripts/test_file_coverage_policy.py
+python3 .github/scripts/test_governed_cdylib_coverage.py
+
 cargo llvm-cov \
   --locked \
   --workspace \
@@ -17,6 +24,11 @@ cargo llvm-cov \
   --json \
   --output-path "$report"
 
+# This test loads the real compiled consumer cdylib from a linked TinyBus host.
+# cargo llvm-cov's --no-report run preserves and appends the actual
+# module-call execution to workspace profiles before the final per-file report.
+bash scripts/test-governed-cdylib.sh --coverage
+
 # Include the real native publication failure and concurrency executions in
 # this full-workspace report, just as the dedicated native secrets lane does.
 python3 .github/scripts/native_profile_tests.py
@@ -24,62 +36,4 @@ python3 .github/scripts/check-native-io-fault.py
 python3 .github/scripts/check-native-key-race.py
 python3 .github/scripts/check-native-secret-service.py --coverage
 cargo llvm-cov report --json --output-path "$report"
-
-covered_files="$(jq --arg source_root "$source_root" '
-  [
-    .data[].files[]
-    | select(.filename | startswith($source_root))
-    | select(.summary.lines.count > 0)
-  ]
-  | length
-' "$report")"
-
-if [[ "$covered_files" -eq 0 ]]; then
-  echo "coverage report contains no files with executable lines under crates/" >&2
-  exit 1
-fi
-
-summary="$(jq -r --arg workspace_root "$workspace_root" --arg source_root "$source_root" '
-  .data[].files[]
-  | select(.filename | startswith($source_root))
-  | select(.summary.lines.count > 0)
-  | [
-      (.filename | ltrimstr($workspace_root)),
-      (.summary.lines.percent | tostring),
-      (.summary.lines.covered | tostring),
-      (.summary.lines.count | tostring)
-    ]
-  | @tsv
-' "$report")"
-
-printf 'File\tLine coverage\tCovered lines\tCoverable lines\n'
-while IFS=$'\t' read -r file percent covered count; do
-  printf '%s\t%.2f%%\t%s\t%s\n' "$file" "$percent" "$covered" "$count"
-done <<< "$summary"
-
-if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-  {
-    printf '### Per-file line coverage\n\n'
-    printf '| File | Coverage | Lines |\n'
-    printf '| --- | ---: | ---: |\n'
-    while IFS=$'\t' read -r file percent covered count; do
-      printf '| %s | %.2f%% | %s/%s |\n' "$file" "$percent" "$covered" "$count"
-    done <<< "$summary"
-  } >> "$GITHUB_STEP_SUMMARY"
-fi
-
-failures="$(jq -r \
-  --arg workspace_root "$workspace_root" \
-  --arg source_root "$source_root" \
-  --argjson minimum "$minimum" '
-    .data[].files[]
-    | select(.filename | startswith($source_root))
-    | select(.summary.lines.count > 0)
-    | select(.summary.lines.percent < $minimum)
-    | "\(.filename | ltrimstr($workspace_root)): \(.summary.lines.percent)%"
-  ' "$report")"
-
-if [[ -n "$failures" ]]; then
-  printf '\nFiles below %s%% line coverage:\n%s\n' "$minimum" "$failures" >&2
-  exit 1
-fi
+python3 .github/scripts/file_coverage_policy.py "$minimum" "$report" "$(pwd -P)"

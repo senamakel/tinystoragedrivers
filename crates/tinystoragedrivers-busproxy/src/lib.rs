@@ -53,12 +53,21 @@
 //! * Watch signals are unicast with `Connection::emit_to` to the subscribing
 //!   caller, so a peer that matches the same path or interface never sees them.
 mod chunks;
+pub mod governed;
 pub mod grant;
 mod host;
 mod names;
 mod per_caller;
+#[cfg(any(test, feature = "test-stream-diagnostics"))]
+#[doc(hidden)]
+pub mod test_support;
 mod transport;
 
+pub use governed::{
+    AuditEvent, AuditSink, CallerDirectory, Environment, GovernedEndpoint, GovernedEndpointLimits,
+    GovernedStorage, HostContext, HostStorageContext, ResolvedStorage, StorageDescriptor,
+    StorageLease, StorageRegistration, TinyBusCallerDirectory,
+};
 pub use grant::{Denied, GrantError, GrantPolicy, Plan, ReplyFilter, StorageGrant};
 pub use host::{HostFailure, ServedStorage, StorageCall, StorageEndpoint, serve};
 pub use names::{

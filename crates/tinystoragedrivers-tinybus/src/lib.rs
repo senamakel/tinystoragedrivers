@@ -24,6 +24,9 @@ use tinybus::module::{HostCallbackBinding, HostCallbackEndpoint, HostCallbackGua
 use tinybus::{CallContext, Interface, InterfaceName, MemberName, ObjectPath};
 use tinystoragedrivers_core::DocumentStore;
 
+mod storage_host;
+pub use storage_host::{StorageRegistration, attach_storage};
+
 /// Declare the exact callback interface and finite member allowlist.
 ///
 /// # Errors
@@ -209,3 +212,7 @@ impl Interface for DocumentService {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "storage_host_tests.rs"]
+mod storage_host_tests;

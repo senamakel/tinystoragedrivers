@@ -8,11 +8,14 @@ repository.workspace = true
 description = "The real TinyBus transport for the storage bus: a module-side StorageTransport over bus proxies, and the host-side registration of the Storage objects."
 publish = false
 
+[features]
+test-stream-diagnostics = []
+
 [dependencies]
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tinybus.workspace = true
+tinybus = { workspace = true, features = ["modules"] }
 tinystoragedrivers-bus.workspace = true
 tinystoragedrivers-client.workspace = true
 tinystoragedrivers-core.workspace = true
@@ -20,7 +23,8 @@ tokio = { workspace = true, features = ["sync", "io-util", "rt", "time"] }
 
 [dev-dependencies]
 tinystoragedrivers-secrets = { path = "../tinystoragedrivers-secrets" }
-tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tinystoragedrivers-core = { workspace = true, features = ["testkit", "test-util"] }
+tinybus-module.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util"] }
 
 [lints]

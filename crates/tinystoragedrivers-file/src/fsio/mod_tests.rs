@@ -126,12 +126,6 @@ fn lists_only_finished_files_with_the_suffix() {
         std::fs::write(dir.path().join(name), b"{}").unwrap();
     }
     std::fs::create_dir(dir.path().join("d.json")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let raw = std::ffi::OsStr::from_bytes(b"\xff.json");
-        std::fs::write(dir.path().join(raw), b"{}").unwrap();
-    }
     let listed = files_with_suffix(dir.path(), ".json").unwrap();
     assert_eq!(
         listed,
@@ -140,6 +134,22 @@ fn lists_only_finished_files_with_the_suffix() {
     sync_dir(dir.path()).unwrap();
     #[cfg(unix)]
     assert!(sync_dir(&dir.path().join("missing")).is_err());
+}
+
+// The native macOS filesystem rejects this fixture with EILSEQ before the
+// driver can inspect it. Other Unix platforms retain the non-UTF8 case.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn listing_ignores_non_utf8_filenames() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let raw = std::ffi::OsStr::from_bytes(b"\xff.json");
+    std::fs::write(dir.path().join(raw), b"{}").unwrap();
+    std::fs::write(dir.path().join("valid.json"), b"{}").unwrap();
+    assert_eq!(
+        files_with_suffix(dir.path(), ".json").unwrap(),
+        [dir.path().join("valid.json")]
+    );
 }
 
 #[test]

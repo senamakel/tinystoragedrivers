@@ -1,5 +1,6 @@
 use super::*;
 use crate::PerCallerEndpoint;
+use std::time::Duration;
 use tinybus::{broker::Broker, transport::memory::MemoryBus};
 use tinystoragedrivers_bus::STORAGE_INTERFACE;
 use tinystoragedrivers_client::StorageServer;
@@ -20,6 +21,7 @@ async fn service(object: Object) -> (ObjectService, Connection) {
     let shared = Arc::new(Shared {
         connection: connection.downgrade(),
         endpoint: Arc::new(endpoint),
+        watch_root: OBJECT_ROOT.to_owned(),
         forwarders: Mutex::new(HashMap::new()),
     });
     (ObjectService { object, shared }, connection)
@@ -71,6 +73,145 @@ async fn each_object_advertises_its_selectors_and_only_secrets_are_confidential(
             object == Object::Secrets
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_lease_registration_rolls_back_only_its_paths() {
+    let bus = MemoryBus::new();
+    let _broker_task = Broker::new().spawn(bus.clone());
+    let connection = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let root = "/ai/tinyhumans/tinystorage/Leases/73";
+    let documents_path = tinybus::ObjectPath::new(format!("{root}/Documents")).unwrap();
+    let service_peer = connection.unique_name().unwrap();
+    let backend = MemoryStorage::new();
+    let endpoint = PerCallerEndpoint::new(move |_| {
+        Some(StorageServer::new(
+            backend.for_scope(&Scope::local()).unwrap(),
+        ))
+    });
+    let proxy =
+        tinybus::Proxy::new(client, service_peer, documents_path.clone(), interface()).unwrap();
+    let failed = serve_lease_transaction(
+        &connection,
+        root,
+        Arc::new(endpoint),
+        tokio::runtime::Handle::current(),
+        |object| {
+            let proxy = proxy.clone();
+            async move {
+                if object == Object::Documents {
+                    proxy.call::<Value>("Capabilities", (Value::Null,)).await?;
+                    Err(tinybus::Error::failed("injected registration failure"))
+                } else {
+                    Ok(())
+                }
+            }
+        },
+    )
+    .await;
+    assert!(failed.is_err());
+
+    // The injected failure happens only after a real call succeeded on the
+    // first path. Once rollback finishes, that old path no longer dispatches.
+    let mut withdrawn = false;
+    for _ in 0..100 {
+        if proxy
+            .call::<Value>("Capabilities", (Value::Null,))
+            .await
+            .is_err()
+        {
+            withdrawn = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(withdrawn, "partial lease path was not rolled back");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_partial_lease_registration_uses_the_retained_cleanup_runtime() {
+    let bus = MemoryBus::new();
+    let _broker_task = Broker::new().spawn(bus.clone());
+    let connection = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let root = "/ai/tinyhumans/tinystorage/Leases/74";
+    let documents_path = tinybus::ObjectPath::new(format!("{root}/Documents")).unwrap();
+    let service_peer = connection.unique_name().unwrap();
+    let proxy = tinybus::Proxy::new(client, service_peer, documents_path, interface()).unwrap();
+    let backend = MemoryStorage::new();
+    let endpoint = PerCallerEndpoint::new(move |_| {
+        Some(StorageServer::new(
+            backend.for_scope(&Scope::local()).unwrap(),
+        ))
+    });
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+    let mut ready_tx = Some(ready_tx);
+    let mut continue_rx = Some(continue_rx);
+    let hook = move |object| {
+        let pause = if object == Object::Documents {
+            Some((ready_tx.take().unwrap(), continue_rx.take().unwrap()))
+        } else {
+            None
+        };
+        async move {
+            if let Some((ready, resume)) = pause {
+                let _ = ready.send(());
+                resume
+                    .await
+                    .map_err(|_| tinybus::Error::failed("test transaction cancelled"))?;
+            }
+            Ok(())
+        }
+    };
+    let cleanup_runtime = tokio::runtime::Handle::current();
+    let setup_connection = connection.clone();
+    let task = tokio::spawn(async move {
+        serve_lease_transaction(
+            &setup_connection,
+            root,
+            Arc::new(endpoint),
+            cleanup_runtime,
+            hook,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), ready_rx)
+        .await
+        .expect("first path registration timed out")
+        .unwrap();
+    assert!(
+        proxy
+            .call::<Value>("Capabilities", (Value::Null,))
+            .await
+            .is_ok()
+    );
+
+    task.abort();
+    let _ = task.await;
+    let mut withdrawn = false;
+    for _ in 0..100 {
+        if proxy
+            .call::<Value>("Capabilities", (Value::Null,))
+            .await
+            .is_err()
+        {
+            withdrawn = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(withdrawn, "cancelled lease path was not withdrawn");
+    drop(continue_tx);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -170,6 +311,7 @@ async fn a_released_and_rebound_caller_gets_a_fresh_signal_forwarder() {
     let shared = Shared {
         connection: connection.downgrade(),
         endpoint: Arc::clone(&endpoint) as Arc<dyn StorageEndpoint>,
+        watch_root: OBJECT_ROOT.to_owned(),
         forwarders: Mutex::new(HashMap::new()),
     };
     let caller = BusName::new(":1.7").unwrap();
@@ -182,6 +324,16 @@ async fn a_released_and_rebound_caller_gets_a_fresh_signal_forwarder() {
             .map(|(e, _)| *e)
     };
 
+    endpoint
+        .call(StorageCall {
+            object: Object::Documents,
+            selector: "Capabilities",
+            request: Value::Null,
+            sender: Some(&caller),
+            admission: tinystoragedrivers_client::Admission::Private,
+        })
+        .await
+        .unwrap();
     shared.forward_watch_signals(&caller);
     let first = epoch_of().expect("a forwarder is started");
     shared.forward_watch_signals(&caller);
@@ -192,6 +344,16 @@ async fn a_released_and_rebound_caller_gets_a_fresh_signal_forwarder() {
     );
 
     assert!(endpoint.release(&caller));
+    endpoint
+        .call(StorageCall {
+            object: Object::Documents,
+            selector: "Capabilities",
+            request: Value::Null,
+            sender: Some(&caller),
+            admission: tinystoragedrivers_client::Admission::Private,
+        })
+        .await
+        .unwrap();
     shared.forward_watch_signals(&caller);
     let second = epoch_of().expect("the rebound caller is forwarded");
     assert_ne!(first, second, "the stale forwarder is replaced on rebind");

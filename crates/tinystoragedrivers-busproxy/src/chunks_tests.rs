@@ -2,6 +2,19 @@ use super::*;
 use tinybus::{Connection, StreamDescriptor, broker::Broker, transport::memory::MemoryBus};
 use tokio::io::AsyncReadExt;
 
+pub(super) fn stream_error_category(error: &tinybus::Error) -> &'static str {
+    crate::test_support::sdk_error_category(error)
+}
+
+#[test]
+fn stream_error_diagnostic_reports_only_the_sdk_category() {
+    let error = tinybus::Error::StreamAborted {
+        reason: "private stream detail".to_owned(),
+    };
+    assert_eq!(stream_error_category(&error), "StreamAborted/Other");
+    assert_ne!(stream_error_category(&error), "private stream detail");
+}
+
 /// Two connected peers on an in-process broker: `(sender, receiver)`.
 async fn peers() -> (Connection, Connection) {
     let bus = MemoryBus::new();
@@ -50,6 +63,11 @@ async fn an_aborted_stream_is_an_error_on_the_reader_not_a_clean_end() {
     let mut out = Vec::new();
     let error = reader.read_to_end(&mut out).await.unwrap_err();
     assert_eq!(error.to_string(), "storage blob stream failed");
+    #[cfg(feature = "test-stream-diagnostics")]
+    assert_eq!(
+        crate::test_support::stream_error_category(&error),
+        Some("StreamAborted/SenderAbort")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
