@@ -12,22 +12,6 @@ use tokio::sync::mpsc;
 /// stream's own window is the buffer, this only decouples the two tasks.
 const READ_AHEAD: usize = 2;
 
-#[cfg(test)]
-fn stream_error_category(error: &tinybus::Error) -> &'static str {
-    match error {
-        tinybus::Error::StreamAborted { .. } => "StreamAborted",
-        tinybus::Error::ConnectionClosed => "ConnectionClosed",
-        tinybus::Error::Timeout { .. } => "Timeout",
-        tinybus::Error::UnknownStream { .. } => "UnknownStream",
-        tinybus::Error::StreamTooLarge { .. } => "StreamTooLarge",
-        tinybus::Error::TooManyStreams { .. } => "TooManyStreams",
-        tinybus::Error::Transport(_) => "Transport",
-        tinybus::Error::Protocol(_) => "Protocol",
-        tinybus::Error::MethodFailed { .. } => "MethodFailed",
-        _ => "Other",
-    }
-}
-
 /// An `AsyncRead` over the chunks a spawned task pulls from a stream.
 struct ChunkReader {
     rx: mpsc::Receiver<io::Result<Vec<u8>>>,
@@ -83,7 +67,7 @@ pub(crate) fn blob_reader(mut stream: StreamReader) -> BlobReader {
                     #[cfg(test)]
                     eprintln!(
                         "storage stream reader error category={}",
-                        stream_error_category(&error)
+                        tests::stream_error_category(&error)
                     );
                     #[cfg(not(test))]
                     let _ = error;

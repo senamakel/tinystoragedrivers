@@ -2,6 +2,21 @@ use super::*;
 use tinybus::{Connection, StreamDescriptor, broker::Broker, transport::memory::MemoryBus};
 use tokio::io::AsyncReadExt;
 
+pub(super) fn stream_error_category(error: &tinybus::Error) -> &'static str {
+    match error {
+        tinybus::Error::StreamAborted { .. } => "StreamAborted",
+        tinybus::Error::ConnectionClosed => "ConnectionClosed",
+        tinybus::Error::Timeout { .. } => "Timeout",
+        tinybus::Error::UnknownStream { .. } => "UnknownStream",
+        tinybus::Error::StreamTooLarge { .. } => "StreamTooLarge",
+        tinybus::Error::TooManyStreams { .. } => "TooManyStreams",
+        tinybus::Error::Transport(_) => "Transport",
+        tinybus::Error::Protocol(_) => "Protocol",
+        tinybus::Error::MethodFailed { .. } => "MethodFailed",
+        _ => "Other",
+    }
+}
+
 #[test]
 fn stream_error_diagnostic_reports_only_the_sdk_category() {
     let error = tinybus::Error::StreamAborted {
