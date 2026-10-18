@@ -946,7 +946,7 @@ async fn a_stale_publication_cannot_reset_a_newer_binding_watch() {
     if let (Some(first), Some(second)) = (&first_cursor, &second_cursor) {
         assert_ne!(first, second, "fresh invalidations must have fresh cursors");
     }
-    assert!(same_epoch_events.is_empty());
+    assert_eq!(same_epoch_events.len(), 0);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), relay_events.recv())
             .await

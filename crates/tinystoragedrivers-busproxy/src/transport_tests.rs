@@ -408,7 +408,7 @@ async fn bound_calls_stay_on_the_issuing_peer_after_public_alias_handover() {
     assert_eq!(head.meta.key, "A");
     let mut downloaded = Vec::new();
     body.read_to_end(&mut downloaded).await.unwrap();
-    assert!(downloaded.is_empty());
+    assert_eq!(downloaded.len(), 0);
 
     service_a.close().await.unwrap();
     assert!(

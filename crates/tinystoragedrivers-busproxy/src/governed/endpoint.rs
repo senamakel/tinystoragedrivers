@@ -192,11 +192,19 @@ fn reserve_lease_slot(
     count: &Arc<AtomicUsize>,
     limit: usize,
 ) -> Result<LeaseReservation, HostFailure> {
-    count
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            (current < limit).then_some(current + 1)
-        })
-        .map_err(|_| HostFailure::Denied("lease-capacity"))?;
+    let mut current = count.load(Ordering::Acquire);
+    loop {
+        if current >= limit {
+            return Err(HostFailure::Denied("lease-capacity"));
+        }
+        let next = current
+            .checked_add(1)
+            .ok_or(HostFailure::Denied("lease-capacity"))?;
+        match count.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
+    }
     Ok(LeaseReservation {
         count: Arc::clone(count),
         committed: false,
@@ -1220,12 +1228,19 @@ where
         let Ok(mut watches) = self.watch_ids.lock() else {
             return None;
         };
-        let sequence = self
-            .next_watch_id
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |next| {
-                next.checked_add(1)
-            })
-            .ok()?;
+        let mut sequence = self.next_watch_id.load(Ordering::Acquire);
+        loop {
+            let next = sequence.checked_add(1)?;
+            match self.next_watch_id.compare_exchange_weak(
+                sequence,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => sequence = actual,
+            }
+        }
         let watch_id = format!(
             "host-watch-{:016x}-{:016x}",
             self.lease.registration_id, sequence
