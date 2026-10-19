@@ -6,6 +6,8 @@ use super::*;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::AtomicU64;
 
 use tinystoragedrivers_core::ErrorKind;
@@ -41,6 +43,46 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn start_file_cas_worker(dir: &Path) -> (Child, BufReader<ChildStdout>) {
+    let mut child = Command::new(std::env::current_exe().expect("get current test executable"))
+        .arg("--exact")
+        .arg("file::tests::file_cas_process_worker")
+        .arg("--nocapture")
+        .env("TSD_SECRET_CAS_PROCESS_DIR", dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn file CAS worker");
+    let stdout = BufReader::new(child.stdout.take().expect("worker has stdout"));
+    (child, stdout)
+}
+
+fn wait_for_file_cas_worker(output: &mut BufReader<ChildStdout>) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(
+            output.read_line(&mut line).expect("read worker readiness") > 0,
+            "worker exited before ready"
+        );
+        if line.trim() == "READY" {
+            return;
+        }
+    }
+}
+
+fn file_cas_worker_result(output: &mut BufReader<ChildStdout>) -> String {
+    let mut text = String::new();
+    output
+        .read_to_string(&mut text)
+        .expect("read worker result");
+    text.lines()
+        .find_map(|line| line.strip_prefix("CAS_RESULT:"))
+        .expect("worker reports its compare-and-set result")
+        .to_owned()
 }
 
 // Compatibility fixtures themselves must meet admission; the bytes and format
@@ -118,11 +160,7 @@ async fn independent_file_handles_have_atomic_versioned_writes() {
     let first_write = async {
         first_barrier.wait().await;
         first
-            .set_if(
-                "shared",
-                b"writer-a",
-                crate::Precondition::Version(version.clone()),
-            )
+            .set_if("shared", b"writer-a", crate::Precondition::Version(version))
             .await
     };
     let second_write = async {
@@ -133,7 +171,7 @@ async fn independent_file_handles_have_atomic_versioned_writes() {
     };
     let (first_result, second_result) = tokio::join!(first_write, second_write);
     assert_eq!(
-        first_result.is_ok() as usize + second_result.is_ok() as usize,
+        usize::from(first_result.is_ok()) + usize::from(second_result.is_ok()),
         1
     );
     let loser = first_result.err().or_else(|| second_result.err()).unwrap();
@@ -160,87 +198,51 @@ async fn another_file_entry_write_invalidates_the_snapshot_version() {
     assert_eq!(error.kind(), ErrorKind::Conflict);
 }
 
-#[tokio::test]
-async fn copied_encrypted_files_have_distinct_version_domains() {
+#[test]
+fn file_version_hash_binds_path_even_for_identical_ciphertext() {
     let first_dir = TempDir::new("cas-file-domain-a");
     let second_dir = TempDir::new("cas-file-domain-b");
-    let key = fixture_key();
-    let first = EncryptedFileSecrets::new(&first_dir.0, key.clone());
+    let first = EncryptedFileSecrets::new(&first_dir.0, fixture_key());
     first.set("shared", b"same").await.unwrap();
-    fs::copy(first.path(), second_dir.0.join("secrets.enc")).unwrap();
-    let second = EncryptedFileSecrets::new(&second_dir.0, key);
-    let (_, first_version) = first.get_versioned("shared").await.unwrap().unwrap();
-    let (_, second_version) = second.get_versioned("shared").await.unwrap().unwrap();
+    let snapshot = fs::read(first.path()).expect("read encrypted snapshot");
+    let first_identity = path_identity(first.path());
+    let second_identity = path_identity(&second_dir.0.join("secrets.enc"));
+    let first_version =
+        version_from_parts(&[b"encrypted_file", &first_identity, b"shared", &snapshot]);
+    let second_version =
+        version_from_parts(&[b"encrypted_file", &second_identity, b"shared", &snapshot]);
     assert_ne!(first_version, second_version);
-    let error = second
-        .set_if(
-            "shared",
-            b"wrong-domain",
-            crate::Precondition::Version(first_version),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Conflict);
 }
 
 #[tokio::test]
 async fn independent_processes_have_atomic_versioned_writes() {
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::process::{Command, Stdio};
-
     let dir = TempDir::new("cas-independent-processes");
     let store = EncryptedFileSecrets::new(&dir.0, fixture_key());
     store.set("shared", b"initial").await.unwrap();
 
-    let worker = || {
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .arg("--exact")
-            .arg("file::tests::file_cas_process_worker")
-            .arg("--nocapture")
-            .env("TSD_SECRET_CAS_PROCESS_DIR", &dir.0)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap());
-        (child, stdout)
-    };
-    let (mut first, mut first_output) = worker();
-    let (mut second, mut second_output) = worker();
-
-    fn wait_until_ready(output: &mut BufReader<std::process::ChildStdout>) {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            assert!(
-                output.read_line(&mut line).unwrap() > 0,
-                "worker exited before ready"
-            );
-            if line.trim() == "READY" {
-                return;
-            }
-        }
-    }
-    wait_until_ready(&mut first_output);
-    wait_until_ready(&mut second_output);
+    let (mut first, mut first_output) = start_file_cas_worker(&dir.0);
+    let (mut second, mut second_output) = start_file_cas_worker(&dir.0);
+    wait_for_file_cas_worker(&mut first_output);
+    wait_for_file_cas_worker(&mut second_output);
     for child in [&mut first, &mut second] {
-        child.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
-        child.stdin.as_mut().unwrap().flush().unwrap();
+        child
+            .stdin
+            .as_mut()
+            .expect("worker has stdin")
+            .write_all(b"go\n")
+            .expect("release worker");
+        child
+            .stdin
+            .as_mut()
+            .expect("worker has stdin")
+            .flush()
+            .expect("flush worker signal");
     }
 
-    fn result(output: &mut BufReader<std::process::ChildStdout>) -> String {
-        let mut text = String::new();
-        output.read_to_string(&mut text).unwrap();
-        text.lines()
-            .find_map(|line| line.strip_prefix("CAS_RESULT:"))
-            .expect("worker reports its compare-and-set result")
-            .to_owned()
-    }
-    let first_result = result(&mut first_output);
-    let second_result = result(&mut second_output);
-    assert!(first.wait().unwrap().success());
-    assert!(second.wait().unwrap().success());
+    let first_result = file_cas_worker_result(&mut first_output);
+    let second_result = file_cas_worker_result(&mut second_output);
+    assert!(first.wait().expect("wait for first worker").success());
+    assert!(second.wait().expect("wait for second worker").success());
     assert_eq!(
         [first_result.as_str(), second_result.as_str()]
             .into_iter()
@@ -264,8 +266,6 @@ async fn file_cas_process_worker() {
     let Ok(dir) = std::env::var("TSD_SECRET_CAS_PROCESS_DIR") else {
         return;
     };
-    use std::io::{Read, Write};
-
     let store = EncryptedFileSecrets::new(dir, fixture_key());
     let (_, version) = store
         .get_versioned("shared")

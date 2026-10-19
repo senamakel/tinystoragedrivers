@@ -47,11 +47,7 @@ async fn independent_document_handles_have_atomic_versioned_writes() {
     let first_write = async {
         first_barrier.wait().await;
         first
-            .set_if(
-                "shared",
-                b"writer-a",
-                crate::Precondition::Version(version.clone()),
-            )
+            .set_if("shared", b"writer-a", crate::Precondition::Version(version))
             .await
     };
     let second_write = async {
@@ -62,7 +58,7 @@ async fn independent_document_handles_have_atomic_versioned_writes() {
     };
     let (first_result, second_result) = tokio::join!(first_write, second_write);
     assert_eq!(
-        first_result.is_ok() as usize + second_result.is_ok() as usize,
+        usize::from(first_result.is_ok()) + usize::from(second_result.is_ok()),
         1
     );
     let loser = first_result.err().or_else(|| second_result.err()).unwrap();

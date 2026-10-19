@@ -62,7 +62,10 @@ fn secret_debug_output_is_redacted() {
     };
     let text = format!("{conditional:?} {:?}", conditional.condition);
     assert!(!text.contains("hunter2") && !text.contains("very-secret-name"));
-    assert!(!text.contains("7"));
+    assert_eq!(
+        format!("{:?}", conditional.condition),
+        "Version(SecretRevision(..))"
+    );
 }
 
 #[test]

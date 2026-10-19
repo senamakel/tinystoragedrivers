@@ -6,7 +6,7 @@ use tokio::sync::Barrier;
 
 use super::{CatchUnwind, unique_prefix};
 use crate::store::{Precondition, SecretStore};
-use tinystoragedrivers_core::ErrorKind;
+use tinystoragedrivers_core::{ErrorKind, StorageError};
 
 /// Check versioned reads and atomic conditional writes against `store`.
 ///
@@ -27,6 +27,16 @@ pub async fn versioned_secrets_conformance(store: &dyn SecretStore) {
 }
 
 async fn check_versioned(store: &dyn SecretStore, name: &str) {
+    let version = create_and_rewrite_same_value(store, name).await;
+    let version = replace_and_check_stale(store, name, version).await;
+    let version = delete_and_recreate(store, name, version).await;
+    check_competing_writers(store, name, version).await;
+}
+
+async fn create_and_rewrite_same_value(
+    store: &dyn SecretStore,
+    name: &str,
+) -> crate::SecretVersion {
     assert!(
         store
             .get_versioned(name)
@@ -73,7 +83,14 @@ async fn check_versioned(store: &dyn SecretStore, name: &str) {
         .await
         .expect_err("rewriting identical plaintext invalidates the old version");
     assert_eq!(stale_rewrite.kind(), ErrorKind::Conflict);
+    rewritten
+}
 
+async fn replace_and_check_stale(
+    store: &dyn SecretStore,
+    name: &str,
+    rewritten: crate::SecretVersion,
+) -> crate::SecretVersion {
     let replaced_version = store
         .set_if(name, b"second", Precondition::Version(rewritten))
         .await
@@ -83,19 +100,31 @@ async fn check_versioned(store: &dyn SecretStore, name: &str) {
         .await
         .expect_err("a stale version must not overwrite the secret");
     assert_eq!(stale.kind(), ErrorKind::Conflict);
-    let (_, committed) = store.get_versioned(name).await.unwrap().unwrap();
+    let (_, committed) = store
+        .get_versioned(name)
+        .await
+        .expect("read after conditional replace")
+        .expect("the replaced secret remains present");
     assert_eq!(
         replaced_version, committed,
         "set_if returns its committed revision"
     );
     assert!(!stale.to_string().contains("stale"));
     assert!(!stale.to_string().contains(name));
+    replaced_version
+}
 
-    let (_, before_delete) = store
+async fn delete_and_recreate(
+    store: &dyn SecretStore,
+    name: &str,
+    before_delete: crate::SecretVersion,
+) -> crate::SecretVersion {
+    let (_, observed_before_delete) = store
         .get_versioned(name)
         .await
         .expect("read before delete")
         .expect("the secret exists before delete");
+    assert_eq!(observed_before_delete, before_delete);
     assert!(store.delete(name).await.expect("delete secret"));
     store
         .set(name, b"second")
@@ -115,12 +144,20 @@ async fn check_versioned(store: &dyn SecretStore, name: &str) {
         .await
         .expect_err("a deleted and recreated secret rejects its old version");
     assert_eq!(stale_recreation.kind(), ErrorKind::Conflict);
+    recreated
+}
 
-    let (_, concurrent_version) = store
+async fn check_competing_writers(
+    store: &dyn SecretStore,
+    name: &str,
+    concurrent_version: crate::SecretVersion,
+) {
+    let (_, observed_version) = store
         .get_versioned(name)
         .await
         .expect("read version before racing writers")
         .expect("the secret still exists");
+    assert_eq!(observed_version, concurrent_version);
     let barrier = Arc::new(Barrier::new(2));
     let first_barrier = Arc::clone(&barrier);
     let first = async {
@@ -150,7 +187,7 @@ async fn check_versioned(store: &dyn SecretStore, name: &str) {
         results
             .iter()
             .filter_map(|result| result.as_ref().err())
-            .map(|error| error.kind())
+            .map(StorageError::kind)
             .collect::<Vec<_>>(),
         [ErrorKind::Conflict],
         "the losing writer must receive a typed conflict"
