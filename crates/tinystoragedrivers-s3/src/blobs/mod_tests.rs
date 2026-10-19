@@ -2,7 +2,7 @@
 
 use super::*;
 use futures_util::stream::BoxStream;
-use object_store::{CopyOptions, GetOptions, PutOptions};
+use object_store::{CopyOptions, GetOptions, MultipartUpload, PutOptions};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tinystoragedrivers_core::{MemoryStorage, ScopeGeneration, ScopedStorage, StorageBackend};
 
