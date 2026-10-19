@@ -164,7 +164,7 @@ impl SqliteStorage {
         fencing: Option<&Arc<Fencing>>,
         generation: tinystoragedrivers_core::ScopeGeneration,
     ) -> ScopedStorage {
-        ScopedStorage::new(
+        let storage = ScopedStorage::new(
             scope.clone(),
             self.driver(),
             Arc::new(
@@ -198,14 +198,18 @@ impl SqliteStorage {
                 )
                 .with_generation(generation),
             ),
-        )
-        .with_purge(Arc::new(crate::purge::SqlitePurge {
-            db: Arc::clone(&self.db),
-            tables: Arc::clone(&self.tables),
-            scope: scope.clone(),
-            generation,
-            fencing: fencing.cloned(),
-        }))
+        );
+        if self.db.is_read_only() {
+            storage
+        } else {
+            storage.with_purge(Arc::new(crate::purge::SqlitePurge {
+                db: Arc::clone(&self.db),
+                tables: Arc::clone(&self.tables),
+                scope: scope.clone(),
+                generation,
+                fencing: fencing.cloned(),
+            }))
+        }
     }
 
     /// The database file this storage reads and writes.
@@ -222,15 +226,15 @@ impl StorageBackend for SqliteStorage {
     }
 
     fn capabilities(&self) -> Capabilities {
-        capabilities()
+        capabilities(self.db.is_read_only())
     }
 
     fn supports_scope_purge_binding_validation(&self) -> bool {
-        true
+        !self.db.is_read_only()
     }
 
     fn supports_scope_purge_generation_validation(&self) -> bool {
-        true
+        !self.db.is_read_only()
     }
 
     async fn prepare_schema(&self) -> Result<()> {

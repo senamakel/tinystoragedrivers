@@ -148,6 +148,11 @@ impl Db {
         &self.path
     }
 
+    /// Whether this handle was opened with SQLite's read-only flags.
+    pub(crate) const fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Run `f` with exclusive use of the connection.
     pub(crate) async fn run<T, F>(self: &Arc<Self>, f: F) -> Result<T>
     where
