@@ -121,6 +121,66 @@ async fn connect_rejects_bad_input_without_echoing_it() {
     assert!(!malformed.to_string().contains("s3cret"), "{malformed}");
 }
 
+#[tokio::test]
+async fn live_required_capabilities_open_on_a_replica_set() {
+    let Some(url) = std::env::var("TSD_MONGO_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!("live_required_capabilities_open_on_a_replica_set: TSD_MONGO_URL is not set; skipping");
+        return;
+    };
+    let backend = MongoStorage::connect_with_options(
+        &url,
+        "tsd_test",
+        MongoOpenOptions::default()
+            .require_fencing()
+            .require_transactions(),
+    )
+    .await
+    .unwrap();
+    assert!(backend.capabilities().contains(Capability::Fencing));
+    assert!(backend.capabilities().contains(Capability::Transactions));
+}
+
+#[tokio::test]
+async fn live_standalone_reports_reduced_capabilities_and_refuses_requirements() {
+    let Some(url) = std::env::var("TSD_MONGO_STANDALONE_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!("live_standalone_reports_reduced_capabilities_and_refuses_requirements: TSD_MONGO_STANDALONE_URL is not set; skipping");
+        return;
+    };
+    let backend = MongoStorage::connect(&url, "tsd_test").await.unwrap();
+    let capabilities = backend.capabilities();
+    for missing in [
+        Capability::Transactions,
+        Capability::ValidatedBatch,
+        Capability::ConditionalStreamAppend,
+        Capability::Fencing,
+        Capability::ScopePurge,
+    ] {
+        assert!(!capabilities.contains(missing), "unexpected {missing:?}");
+    }
+
+    for (options, expected) in [
+        (
+            MongoOpenOptions::default().require_fencing(),
+            Capability::Fencing,
+        ),
+        (
+            MongoOpenOptions::default().require_transactions(),
+            Capability::Transactions,
+        ),
+    ] {
+        let error = MongoStorage::connect_with_options(&url, "tsd_test", options)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported(expected));
+    }
+}
+
 // Live checks of what the driver stores. They read and plant raw documents,
 // so they live here, beside the private layout, rather than in `tests/`.
 
