@@ -32,6 +32,7 @@ async fn a_directory_path_maps_to_the_storage_file_inside_it() {
             .without(tinystoragedrivers_core::Capability::Watch)
             .without(tinystoragedrivers_core::Capability::PresignedUrls)
             .without(tinystoragedrivers_core::Capability::StreamingBlobs)
+            .without(tinystoragedrivers_core::Capability::ConditionalSecretWrites)
     );
     assert!(format!("{storage:?}").contains("storage.db"));
 }

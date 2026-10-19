@@ -18,14 +18,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tinystoragedrivers_core::{
-    DocumentStore, DocumentStoreExt, Precondition, Query, Result, Scope, ScopedStorage,
-    StorageError, validate_collection,
+    DocumentStore, DocumentStoreExt, ErrorKind, Precondition as DocumentPrecondition, Query,
+    Result, Scope, ScopedStorage, StorageError, Versioned, validate_collection,
 };
 use zeroize::Zeroizing;
 
 use crate::crypto;
 use crate::keys::KeyProvider;
-use crate::store::{SecretStore, validate_name, validate_prefix};
+use crate::store::{
+    Precondition, SecretStore, SecretVersion, validate_name, validate_prefix, version_from_parts,
+};
 
 /// The collection secrets live in unless the host picks another.
 pub const DEFAULT_COLLECTION: &str = "secrets";
@@ -122,6 +124,21 @@ impl SecretStore for DocumentSecrets {
         crypto::decrypt_enc2(&key, ciphertext).map(Some)
     }
 
+    async fn get_versioned(
+        &self,
+        name: &str,
+    ) -> Result<Option<(Zeroizing<Vec<u8>>, SecretVersion)>> {
+        validate_name(name)?;
+        let Some(found) = self.documents.get(&self.collection, name).await? else {
+            return Ok(None);
+        };
+        let ciphertext = ciphertext(&found)?;
+        let version = self.version(name, found.version.0, ciphertext);
+        let key = self.keys.data_key_async(&self.scope).await?;
+        let value = crypto::decrypt_enc2(&key, ciphertext)?;
+        Ok(Some((value, version)))
+    }
+
     async fn set(&self, name: &str, value: &[u8]) -> Result<()> {
         validate_name(name)?;
         let key = self.keys.data_key_async(&self.scope).await?;
@@ -131,16 +148,51 @@ impl SecretStore for DocumentSecrets {
                 &self.collection,
                 name,
                 json!({ CIPHERTEXT_FIELD: ciphertext }),
-                Precondition::None,
+                DocumentPrecondition::None,
             )
             .await?;
         Ok(())
     }
 
+    async fn set_if(
+        &self,
+        name: &str,
+        value: &[u8],
+        condition: Precondition,
+    ) -> Result<SecretVersion> {
+        validate_name(name)?;
+        let key = self.keys.data_key_async(&self.scope).await?;
+        let encrypted = crypto::encrypt_enc2(&key, value)?;
+        let native_condition = match condition {
+            Precondition::Absent => DocumentPrecondition::Absent,
+            Precondition::Version(expected) => {
+                let Some(found) = self.documents.get(&self.collection, name).await? else {
+                    return Err(stale_secret());
+                };
+                let current = ciphertext(&found)?;
+                if self.version(name, found.version.0, current) != expected {
+                    return Err(stale_secret());
+                }
+                DocumentPrecondition::Version(found.version)
+            }
+        };
+        let version = self
+            .documents
+            .put(
+                &self.collection,
+                name,
+                json!({ CIPHERTEXT_FIELD: encrypted }),
+                native_condition,
+            )
+            .await
+            .map_err(map_conditional_write_error)?;
+        Ok(self.version(name, version.0, &encrypted))
+    }
+
     async fn delete(&self, name: &str) -> Result<bool> {
         validate_name(name)?;
         self.documents
-            .delete(&self.collection, name, Precondition::None)
+            .delete(&self.collection, name, DocumentPrecondition::None)
             .await
     }
 
@@ -161,6 +213,41 @@ impl SecretStore for DocumentSecrets {
 
     fn backend_name(&self) -> &'static str {
         "document"
+    }
+}
+
+impl DocumentSecrets {
+    fn version(&self, name: &str, document_version: u64, ciphertext: &str) -> SecretVersion {
+        version_from_parts(&[
+            b"document",
+            self.scope.as_str().as_bytes(),
+            self.collection.as_bytes(),
+            name.as_bytes(),
+            &document_version.to_be_bytes(),
+            ciphertext.as_bytes(),
+        ])
+    }
+}
+
+fn ciphertext(found: &Versioned<Value>) -> Result<&str> {
+    found
+        .doc
+        .get(CIPHERTEXT_FIELD)
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            StorageError::serialization("secret document has no string ciphertext field")
+        })
+}
+
+fn stale_secret() -> StorageError {
+    StorageError::conflict("secret changed since it was read")
+}
+
+fn map_conditional_write_error(error: StorageError) -> StorageError {
+    if matches!(error.kind(), ErrorKind::Conflict | ErrorKind::AlreadyExists) {
+        stale_secret()
+    } else {
+        error
     }
 }
 

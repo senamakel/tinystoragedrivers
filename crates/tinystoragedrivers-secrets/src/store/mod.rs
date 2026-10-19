@@ -1,13 +1,71 @@
 //! The [`SecretStore`] port and the name rules every driver enforces.
 
-use std::fmt::Debug;
+use std::fmt::{self, Debug, Formatter};
 
 use async_trait::async_trait;
-use tinystoragedrivers_core::{Result, StorageError};
+use sha2::{Digest, Sha256};
+use tinystoragedrivers_core::{Capability, Result, StorageError};
 use zeroize::Zeroizing;
 
 /// The longest secret name, in bytes.
 pub const MAX_SECRET_NAME_LEN: usize = 256;
+
+/// An opaque revision token for one stored secret.
+///
+/// A version is valid only for the secret name and storage domain that
+/// returned it. Another handle to the same persistent store may use it. Its
+/// representation is deliberately hidden and its debug output never reveals
+/// the token.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SecretVersion([u8; 32]);
+
+impl SecretVersion {
+    /// Rebuild a token from its opaque wire representation.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the opaque wire representation without assigning meaning to it.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Consume the token into its opaque wire representation.
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl fmt::Debug for SecretVersion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretVersion(..)")
+    }
+}
+
+/// The condition that must hold before [`SecretStore::set_if`] writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precondition {
+    /// The secret must not exist.
+    Absent,
+    /// The secret must still have the revision returned by
+    /// [`SecretStore::get_versioned`].
+    Version(SecretVersion),
+}
+
+/// Derive a store-specific token from unambiguous, length-delimited parts.
+/// Callers pass only non-plaintext identity, ciphertext, and revision bytes.
+pub(crate) fn version_from_parts(parts: &[&[u8]]) -> SecretVersion {
+    let mut digest = Sha256::new();
+    digest.update(b"tinystoragedrivers-secrets/version/v1\0");
+    for part in parts {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part);
+    }
+    SecretVersion(digest.finalize().into())
+}
 
 /// Secret bytes by name.
 ///
@@ -31,6 +89,26 @@ pub trait SecretStore: Send + Sync + Debug {
     /// backend error.
     async fn get(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>>;
 
+    /// Read one secret and the opaque revision of the same snapshot.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput)
+    /// for an invalid name,
+    /// [`ErrorKind::Unsupported`](tinystoragedrivers_core::ErrorKind::Unsupported)
+    /// when this store cannot compare revisions atomically, or the same
+    /// storage and decryption errors as [`SecretStore::get`].
+    async fn get_versioned(
+        &self,
+        name: &str,
+    ) -> Result<Option<(Zeroizing<Vec<u8>>, SecretVersion)>> {
+        validate_name(name)?;
+        Err(StorageError::unsupported(
+            Capability::ConditionalSecretWrites,
+            "this secret store does not support versioned reads",
+        ))
+    }
+
     /// Store `value` under `name`, replacing any previous value.
     ///
     /// # Errors
@@ -39,6 +117,35 @@ pub trait SecretStore: Send + Sync + Debug {
     /// for an invalid name or a value the backend cannot hold (the file and
     /// keyring drivers store UTF-8 text only), or a backend error.
     async fn set(&self, name: &str, value: &[u8]) -> Result<()>;
+
+    /// Store `value` only when `condition` still holds, atomically.
+    ///
+    /// A stale revision and an already-present secret under
+    /// [`Precondition::Absent`] return
+    /// [`ErrorKind::Conflict`](tinystoragedrivers_core::ErrorKind::Conflict).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput)
+    /// for an invalid name or unsupported value,
+    /// [`ErrorKind::Conflict`](tinystoragedrivers_core::ErrorKind::Conflict)
+    /// when the precondition no longer holds,
+    /// [`ErrorKind::Unsupported`](tinystoragedrivers_core::ErrorKind::Unsupported)
+    /// when this store cannot compare and write atomically, or a backend
+    /// error.
+    async fn set_if(
+        &self,
+        name: &str,
+        value: &[u8],
+        condition: Precondition,
+    ) -> Result<SecretVersion> {
+        validate_name(name)?;
+        let _ = (value, condition);
+        Err(StorageError::unsupported(
+            Capability::ConditionalSecretWrites,
+            "this secret store does not support conditional writes",
+        ))
+    }
 
     /// Remove one secret and report whether it existed.
     ///

@@ -3,9 +3,10 @@
 The contract is specified in
 [`docs/specs/secret-storage.md`](../../docs/specs/secret-storage.md).
 
-Encrypted secret storage for OpenHuman: one `SecretStore` port (`get`, `set`,
-`delete`, `list`), with drivers for each place a secret can live. Desktop and
-cloud builds share the port and the byte formats.
+Encrypted secret storage for OpenHuman: one `SecretStore` port (`get`,
+`get_versioned`, `set`, `set_if`, `delete`, `list`), with drivers for each
+place a secret can live. Desktop and cloud builds share the port and the byte
+formats.
 
 | Driver | Where the bytes live | Use |
 | --- | --- | --- |
@@ -81,6 +82,13 @@ on every call:
 - `EncryptedFileSecrets` takes the same `secrets.enc.lock` advisory lock as
   OpenHuman for its read → modify → write cycle. It writes through a unique
   temp file (`0600`, synced) and renames it into place.
+- `get_versioned` pairs a value with an opaque `SecretVersion`; `set_if` uses
+  `Precondition::Absent` or `Precondition::Version`. A stale precondition is a
+  typed conflict. File versions hash the encrypted whole-file snapshot, so a
+  change to any entry conservatively invalidates every version from that file.
+  The hash contains ciphertext, not plaintext, and adds no persisted format.
+- `KeyringSecrets` does not claim `ConditionalSecretWrites`: OS keyrings do
+  not expose an atomic compare-and-set operation.
 - A `secrets.enc` that does not decrypt or parse fails the call
   (`ErrorKind::Crypto` / `Serialization`) and is left untouched. It is never
   treated as empty or overwritten.

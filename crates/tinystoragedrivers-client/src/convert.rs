@@ -23,8 +23,9 @@ use tinystoragedrivers_core::{
 /// module bound to one grant cannot do.
 ///
 /// `RecordMetadata` (contract version 4: `Meta` on every read, `schema` and
-/// `expires_ms` on `Put`) and `StreamSeal` (`Streams.Seal`) act only inside
-/// the module's own grant, so they are exposed.
+/// `expires_ms` on `Put`), `StreamSeal` (`Streams.Seal`) and
+/// `ConditionalSecretWrites` (contract version 5) act only inside the
+/// module's own grant, so they are exposed.
 pub(crate) const HOST_ONLY: [Capability; 7] = [
     Capability::Fencing,
     Capability::ScopePurge,
