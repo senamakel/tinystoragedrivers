@@ -80,7 +80,7 @@ async fn concurrent_secret_creates_through_the_bus_have_one_winner() {
                 winning_version = Some(version);
             }
             Err(error) if matches!(error.kind(), tinystoragedrivers_core::ErrorKind::Conflict) => {
-                conflicts += 1
+                conflicts += 1;
             }
             Err(error) => panic!("unexpected secret CAS error: {error:?}"),
         }

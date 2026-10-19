@@ -198,8 +198,8 @@ async fn another_file_entry_write_invalidates_the_snapshot_version() {
     assert_eq!(error.kind(), ErrorKind::Conflict);
 }
 
-#[test]
-fn file_version_hash_binds_path_even_for_identical_ciphertext() {
+#[tokio::test]
+async fn file_version_hash_binds_path_even_for_identical_ciphertext() {
     let first_dir = TempDir::new("cas-file-domain-a");
     let second_dir = TempDir::new("cas-file-domain-b");
     let first = EncryptedFileSecrets::new(&first_dir.0, fixture_key());
