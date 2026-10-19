@@ -298,7 +298,7 @@ fn fenced_handles_say_so_in_their_debug_output() {
 }
 
 #[tokio::test]
-async fn unfenced_stream_delete_blob_and_drop_writes_never_read_the_clock() {
+async fn unfenced_deletes_and_document_drop_only_read_the_clock_for_blob_age() {
     let reads = Arc::new(AtomicU64::new(0));
     let counter = Arc::clone(&reads);
     let storage = MemoryStorage::with_clock(Arc::new(move || {
@@ -306,16 +306,23 @@ async fn unfenced_stream_delete_blob_and_drop_writes_never_read_the_clock() {
         0
     }));
     let scoped = storage.for_scope(&Scope::local()).unwrap();
-    // An append reads the clock for the stream's last-append time; a guard
-    // check on an unfenced handle does not.
+    // Appends read the clock for their last-append time, and blob writes read
+    // it to record the age used by orphan cleanup. Unfenced guard checks,
+    // deletes, and document drops do not read it.
     scoped.streams().append("s", json!({"n": 1})).await.unwrap();
     let after_append = reads.load(Ordering::SeqCst);
     assert_eq!(after_append, 1, "one read stamps the append");
     scoped.streams().delete_stream("s").await.unwrap();
     scoped.blobs().put("b", vec![1], None).await.unwrap();
+    let after_blob_write = reads.load(Ordering::SeqCst);
+    assert_eq!(
+        after_blob_write,
+        after_append + 1,
+        "one read stamps blob age"
+    );
     scoped.blobs().delete("b").await.unwrap();
     scoped.documents().drop_collection("c").await.unwrap();
-    assert_eq!(reads.load(Ordering::SeqCst), after_append);
+    assert_eq!(reads.load(Ordering::SeqCst), after_blob_write);
 }
 
 #[tokio::test]
