@@ -14,10 +14,11 @@ One storage is one database file. The path decides which:
 `SqliteStorage::open_existing_read_only` uses the same path rules for a file
 that already exists. It does not create a missing database or parent
 directory, apply write-oriented database pragmas, or prepare or migrate the
-schema. It validates the current TSD table layout, allows normal port reads,
-and SQLite refuses writes through storage ports and `SqliteNative`. When a
-WAL database needs coordination, SQLite may create or update its `-wal` and
-`-shm` files; those files can remain after the read-only handle closes.
+schema; the opened database's contents and schema remain unchanged. It
+validates the current TSD table layout, allows normal port reads, and SQLite
+refuses writes through storage ports and `SqliteNative`. When a WAL database
+needs coordination, SQLite may create or update its `-wal` and `-shm` files;
+those files can remain after the read-only handle closes.
 
 ## Storage
 

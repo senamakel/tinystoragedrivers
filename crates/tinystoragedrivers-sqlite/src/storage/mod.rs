@@ -93,7 +93,8 @@ impl SqliteStorage {
 
     /// Open an existing database for reads without creating the database or
     /// its parent directory, applying write-oriented SQLite pragmas, or
-    /// preparing or migrating its schema.
+    /// preparing or migrating its schema. The opened database's contents and
+    /// schema are left unchanged.
     ///
     /// SQLite may create or update `-wal` and `-shm` coordination files while
     /// opening a WAL database. Those files can remain after this handle closes.
