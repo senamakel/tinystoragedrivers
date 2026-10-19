@@ -72,6 +72,8 @@ in the process that opened the same (canonicalized) directory, which makes
 `claim` and compare-and-swap atomic within the process. File IO runs on tokio's
 blocking pool when a runtime is present, and inline otherwise. Several
 processes writing the same directory are **not** coordinated.
+The backend therefore omits `Capability::SharedAcrossProcesses` and
+`Capability::CrossProcessCas`.
 
 `for_scope_fenced` holds the directory lock through guard validation and the
 document, stream or blob mutation. This fencing guarantee is process-local and

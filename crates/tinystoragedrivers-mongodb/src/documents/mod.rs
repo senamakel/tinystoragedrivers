@@ -248,6 +248,8 @@ impl DocumentStore for MongoDocuments {
             .with(Capability::CollectionValidation)
             .with(Capability::RecordMetadata)
             .with(Capability::StreamSeal)
+            .with(Capability::SharedAcrossProcesses)
+            .with(Capability::CrossProcessCas)
             .with(Capability::ScopeEnumeration);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)

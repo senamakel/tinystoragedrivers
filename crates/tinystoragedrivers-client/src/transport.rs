@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 /// Body of a streamed blob transfer: the bytes of a `TinyBus` stream.
 pub type BlobBody = BlobReader;
 
-/// The four objects of `ai.tinyhumans.tinystorage.Storage`.
+/// The five objects of `ai.tinyhumans.tinystorage.Storage`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Object {
     /// Versioned JSON documents.
@@ -23,6 +23,8 @@ pub enum Object {
     Blobs,
     /// Encrypted secrets; confidential route only.
     Secrets,
+    /// Durable at-least-once message queues.
+    Queues,
 }
 
 impl Object {
@@ -34,15 +36,22 @@ impl Object {
             Self::Streams => tinystoragedrivers_bus::STREAMS_OBJECT,
             Self::Blobs => tinystoragedrivers_bus::BLOBS_OBJECT,
             Self::Secrets => tinystoragedrivers_bus::SECRETS_OBJECT,
+            Self::Queues => tinystoragedrivers_bus::QUEUES_OBJECT,
         }
     }
 
     /// Parse a wire object name; unknown names are refused.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
-        [Self::Documents, Self::Streams, Self::Blobs, Self::Secrets]
-            .into_iter()
-            .find(|object| object.as_str() == name)
+        [
+            Self::Documents,
+            Self::Streams,
+            Self::Blobs,
+            Self::Secrets,
+            Self::Queues,
+        ]
+        .into_iter()
+        .find(|object| object.as_str() == name)
     }
 }
 

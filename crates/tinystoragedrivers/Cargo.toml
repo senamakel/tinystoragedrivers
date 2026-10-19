@@ -25,6 +25,8 @@ tinystoragedrivers-secrets = { workspace = true, optional = true }
 # The MongoDB driver, compiled in only with the `mongodb` feature so a desktop
 # build never links a MongoDB client.
 tinystoragedrivers-mongodb = { workspace = true, optional = true }
+# The RabbitMQ queue backend, compiled in only with the `rabbitmq` feature.
+tinystoragedrivers-rabbitmq = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The integration test runs the conformance suite through the facade.
@@ -41,6 +43,8 @@ kms-gcp = ["secrets", "tinystoragedrivers-secrets/kms-gcp"]
 # Independent s3:// blob URLs and composite storage.
 s3 = ["dep:tinystoragedrivers-s3"]
 default = []
+# Re-export the optional confidential migration delivery runtime.
+migration-delivery = ["tinystoragedrivers-core/migration-delivery"]
 # Explicit core polling adapter; independent of native Watch support.
 polling-watch = ["tinystoragedrivers-core/polling-watch"]
 # `sqlite:` URLs and bare paths: the SQLite driver.
@@ -61,6 +65,9 @@ keyring-secret-service = ["keyring", "tinystoragedrivers-secrets/keyring-secret-
 # `mongodb://…/<db>` and `mongodb+srv://…/<db>` URLs: the multi-tenant MongoDB
 # driver.
 mongodb = ["dep:tinystoragedrivers-mongodb"]
+# `amqp://` and `amqps://` queue URLs (`QueueConfig`, `open_queues`): the
+# RabbitMQ queue backend, separate from the storage URL.
+rabbitmq = ["dep:tinystoragedrivers-rabbitmq"]
 
 [lints]
 workspace = true

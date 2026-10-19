@@ -58,15 +58,23 @@
 //! the host, which records completion with [`Migrations::mark_done`].
 //! A stream's [`SealPolicy`](crate::SealPolicy) is applied by [`Registry::maintain`].
 
+#[cfg(feature = "migration-delivery")]
+pub mod delivery;
+
 mod compose;
+mod executor;
+mod metadata;
 mod migrations;
 mod policy;
+mod prepared;
 mod runner;
 mod runner_blobs;
 mod runner_streams;
 mod types;
 
-pub use compose::Registry;
+pub use compose::{ComposedRegistry, Registry};
+pub use executor::{BoxFuture, TransformExecutor};
+pub use metadata::{SchemaMetadata, StepExecution, StepMetadata};
 pub use migrations::{MIGRATIONS_COLLECTION, Migrations, Progress};
 pub use policy::PolicyReport;
 pub use runner::{MigrateOptions, MigrationReport, StepReport};
@@ -74,3 +82,16 @@ pub use types::{
     BlobOutput, BlobStepFn, Expiry, Item, Owner, Schema, ScopeClass, SourceRecord, Step, StepBody,
     StepFn, StreamStepFn, TargetRecord,
 };
+
+pub use tinystoragedrivers_schema::{
+    BlobTargetRequest, BlobTransformOutput, BlobTransformRequest, DocumentsTransformRequest,
+    ExchangeErrorKind, MIGRATION_CHUNK_BYTES, MIGRATION_EXCHANGE_VERSION, MigrationExchangeReply,
+    MigrationExchangeRequest, MigrationPayload, MigrationPayloadReply, SchemaDeclaration,
+    StepDeclaration, StreamEntriesRequest, StreamMapMode, StreamPlan, StreamPlanRequest,
+    StreamTransformOutput, StreamTransformRequest, TransformDescriptor, TransformError,
+    TransformErrorKind, TransformKind, TransformResult,
+};
+
+#[cfg(test)]
+#[path = "executor_tests.rs"]
+mod executor_tests;

@@ -24,8 +24,6 @@ fn reserves_the_tsd_owner_for_the_crate() {
     let error = Owner::new("tsd").unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert!(error.message().contains("reserved"));
-    assert_eq!(Owner::tsd().as_str(), "tsd");
-    assert_eq!(Owner::tsd().to_string(), "tsd");
 }
 
 #[test]

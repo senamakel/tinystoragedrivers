@@ -1,4 +1,4 @@
-//! The host side: register the four `Storage` objects on a `TinyBus`
+//! The host side: register the five `Storage` objects on a `TinyBus`
 //! connection and hand every call to a [`StorageEndpoint`].
 //!
 //! The host decides everything. The endpoint is given the broker-authenticated
@@ -64,7 +64,7 @@ impl From<HostFailure> for tinybus::Error {
 /// One request/reply call, as the bus delivered it.
 #[derive(Debug)]
 pub struct StorageCall<'a> {
-    /// Which of the four objects.
+    /// Which of the five objects.
     pub object: Object,
     /// The member name; the endpoint must treat unknown ones as invalid.
     pub selector: &'a str,
@@ -202,6 +202,7 @@ fn selectors(object: Object) -> &'static [&'static str] {
         Object::Streams => &wire::STREAMS_SELECTORS,
         Object::Blobs => &wire::BLOBS_SELECTORS,
         Object::Secrets => &wire::SECRETS_SELECTORS,
+        Object::Queues => &wire::QUEUES_SELECTORS,
     }
 }
 
@@ -482,11 +483,12 @@ impl Drop for ServedStorage {
     }
 }
 
-const ALL: [Object; 4] = [
+const ALL: [Object; 5] = [
     Object::Documents,
     Object::Streams,
     Object::Blobs,
     Object::Secrets,
+    Object::Queues,
 ];
 
 /// Serve the `Storage` objects on `connection` and claim [`HOST_NAME`].

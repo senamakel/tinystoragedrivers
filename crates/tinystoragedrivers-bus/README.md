@@ -17,7 +17,7 @@ The wire uses document_id and strictly parsed inline document_json text. This
 preserves arbitrary business JSON without confusing id-only data with native
 TinyBus stream references. No privacy check or stream API is bypassed.
 
-The crate also pins the Streams, Blobs and Secrets wire shapes, finite
+The crate also pins the Streams, Blobs, Secrets and Queues wire shapes, finite
 selector sets, size limits and `CONTRACT_VERSION`; see
 [the storage bus spec](../../docs/specs/storage-bus.md).
 

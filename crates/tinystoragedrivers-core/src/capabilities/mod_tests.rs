@@ -43,6 +43,8 @@ fn all_holds_every_capability() {
             Capability::Maintenance,
             Capability::ScopeEnumeration,
             Capability::StreamSeal,
+            Capability::SharedAcrossProcesses,
+            Capability::CrossProcessCas,
         ]
     );
 }
@@ -88,6 +90,8 @@ fn renders_names() {
         (Capability::Maintenance, "maintenance"),
         (Capability::ScopeEnumeration, "scope_enumeration"),
         (Capability::StreamSeal, "stream_seal"),
+        (Capability::SharedAcrossProcesses, "shared_across_processes"),
+        (Capability::CrossProcessCas, "cross_process_cas"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }

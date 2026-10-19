@@ -8,6 +8,7 @@
 //! [`StorageFailure`] category.
 mod blobs;
 mod documents;
+mod queues;
 mod secrets;
 mod streams;
 mod watch;
@@ -23,6 +24,7 @@ use tinystoragedrivers_bus::{
     BlobInfo, BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind,
     WatchChanged,
 };
+use tinystoragedrivers_core::queue::QueueManifest;
 use tinystoragedrivers_core::{ScopedStorage, StorageError};
 use tinystoragedrivers_secrets::SecretStore;
 use tokio::sync::broadcast;
@@ -78,6 +80,8 @@ pub struct StorageServer {
     pub(crate) signals: broadcast::Sender<WatchChanged>,
     pub(crate) watches: Arc<Mutex<WatchRegistry>>,
     pub(crate) next_watch: AtomicU64,
+    pub(crate) queue_manifest: Option<Arc<QueueManifest>>,
+    pub(crate) queues_declared: tokio::sync::OnceCell<()>,
 }
 
 impl std::fmt::Debug for StorageServer {
@@ -85,6 +89,7 @@ impl std::fmt::Debug for StorageServer {
         f.debug_struct("StorageServer")
             .field("storage", &self.storage)
             .field("secrets", &self.secrets.is_some())
+            .field("queue_manifest", &self.queue_manifest.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -101,7 +106,21 @@ impl StorageServer {
             signals,
             watches: Arc::new(Mutex::new(WatchRegistry::default())),
             next_watch: AtomicU64::new(1),
+            queue_manifest: None,
+            queues_declared: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// Serve exactly the queues `manifest` declares. The host declares them
+    /// (with [`QueueManifest::apply`]) on the caller's first `Queues` call;
+    /// a request naming any other queue is refused `NotFound`, and an
+    /// `EnsureQueue` is accepted only when it asks for the declared spec
+    /// (`Conflict` otherwise), so the manifest stays the one source of truth.
+    /// Without a manifest the caller may declare any queue in its scope.
+    #[must_use]
+    pub fn with_queue_manifest(mut self, manifest: Arc<QueueManifest>) -> Self {
+        self.queue_manifest = Some(manifest);
+        self
     }
 
     /// Also serve `Secrets` from `secrets`, to confidential callers only.
@@ -142,6 +161,7 @@ impl StorageServer {
             Object::Documents => self.documents(selector, request).await,
             Object::Streams => self.streams(selector, request).await,
             Object::Blobs => self.blobs(selector, request).await,
+            Object::Queues => self.queues(selector, request).await,
             Object::Secrets => {
                 if admission != Admission::Confidential {
                     return Err(StorageFailure {

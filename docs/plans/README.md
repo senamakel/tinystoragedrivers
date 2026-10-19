@@ -23,3 +23,5 @@ See [`storage-rollout.md`](storage-rollout.md) and [`schema-v2.md`](schema-v2.md
 
 The test-only memory watch helper is planned in
 [`memory-watch-test-util.md`](memory-watch-test-util.md).
+
+[`queue-store.md`](queue-store.md) delivers the `QueueStore` port.

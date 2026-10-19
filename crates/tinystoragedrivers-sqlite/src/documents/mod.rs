@@ -57,6 +57,8 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::ScopeEnumeration)
         .with(Capability::StreamSeal)
         .with(Capability::RecordMetadata)
+        .with(Capability::SharedAcrossProcesses)
+        .with(Capability::CrossProcessCas)
 }
 
 /// SQLite documents bound to one scope.

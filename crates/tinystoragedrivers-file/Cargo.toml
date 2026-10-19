@@ -28,6 +28,8 @@ tokio = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+# `document_secrets_conformance`: the secrets suite over this driver's documents.
+tinystoragedrivers-secrets = { workspace = true, features = ["testkit"] }
 # The conformance suite every driver runs.
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }

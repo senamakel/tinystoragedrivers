@@ -169,6 +169,8 @@ fn reports_its_driver_and_capabilities() {
             .without(crate::Capability::Watch)
             .without(crate::Capability::PresignedUrls)
             .without(crate::Capability::StreamingBlobs)
+            .without(crate::Capability::SharedAcrossProcesses)
+            .without(crate::Capability::CrossProcessCas)
     );
     assert_eq!(format!("{storage:?}"), "MemoryStorage { .. }");
     let docs = storage.for_scope(&Scope::local()).unwrap();

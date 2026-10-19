@@ -36,6 +36,8 @@ futures-util = { version = "0.3", default-features = false, features = ["io"] }
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+# `document_secrets_conformance`: the secrets suite over this driver's documents.
+tinystoragedrivers-secrets = { workspace = true, features = ["testkit"] }
 # The conformance suite, the memory driver the differential test compares
 # against, and the blocking bridge the live tests call the driver through.
 tinystoragedrivers-core = { workspace = true, features = ["testkit", "blocking"] }

@@ -1,6 +1,7 @@
 //! Error kinds, constructors, display and retry classification.
 
 use super::*;
+use crate::Capability;
 
 #[test]
 fn every_constructor_sets_its_kind() {

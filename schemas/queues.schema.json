@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/tinyhumansai/tinystoragedrivers/main/schemas/queues.schema.json",
+  "title": "tinystoragedrivers queue manifest",
+  "description": "Queues declared for a QueueStore. Loaded by tinystoragedrivers_core::queue::QueueManifest, which rejects unknown fields and duplicate names.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "queues"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "This schema's URL, for editors. Not interpreted."
+    },
+    "version": {
+      "const": 1,
+      "description": "Manifest format version."
+    },
+    "queues": {
+      "type": "array",
+      "description": "The declared queues. Each name appears at most once.",
+      "items": { "$ref": "#/$defs/queue" }
+    }
+  },
+  "$defs": {
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,64}$",
+          "description": "Queue name: 1 to 64 lowercase letters, digits, '.', '_' or '-'."
+        },
+        "description": {
+          "type": "string",
+          "description": "What the queue is for."
+        },
+        "owner": {
+          "type": "string",
+          "description": "The component that consumes the queue."
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8,
+          "description": "Deliveries a message gets before it is dead-lettered. A lapsed lease counts."
+        },
+        "dedupe_window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "How long an acknowledged dedupe key keeps rejecting re-enqueues, in milliseconds. 0 forgets it at acknowledgement."
+        },
+        "visibility_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Lease length consumers should request when they receive, in milliseconds."
+        }
+      }
+    }
+  }
+}

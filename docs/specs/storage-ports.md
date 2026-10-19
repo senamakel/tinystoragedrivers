@@ -213,6 +213,53 @@ should become async.
   asserts this.
 - Every source file has at least 90% line coverage.
 
+## Host conformance
+
+A host that composes several scopes, shares one store between handles and
+migrates its own collections should not repeat the driver matrix in its own
+tests. `conformance::run` therefore also covers, on every driver:
+
+- **Nested scopes** (`isolation.rs`, `nested`): a tenant `S`, `S/agent:a` and
+  `S/module:m` hold the same collection, id, stream and blob key without
+  seeing each other, and collection and scope listings do not leak between
+  parent and child.
+- **Document migrations** (`migrations.rs`): a two-step chain over several
+  batches, a crash part way, a resume that writes no record twice, and a no-op
+  re-run (drivers with `RecordMetadata`).
+- **Holder fences**: see [`write-fencing.md`](write-fencing.md).
+
+External drivers should call the public
+`conformance::run_with_process_capabilities(backend, single_scope,
+shared_across_processes, cross_process_cas)` entry point with their declared
+process guarantees. It checks both `StorageBackend::capabilities()` and the
+`DocumentStore::capabilities()` on the local handle and, for multi-scope
+drivers, the `conformance-b` handle. The declarations must match the supplied expectations
+on both surfaces; `SharedAcrossProcesses` requires `CrossProcessCas` on each.
+This catches a backend whose top-level declaration promises a guarantee that
+its scoped document port does not expose, or vice versa. Built-in native
+drivers use `conformance::run`, which supplies their fixed expectations.
+
+`conformance::run_shared(open)` takes a closure that opens independent
+backends on one store. A driver declaring `CrossProcessCas` must arbitrate
+racing document claims, version-guarded puts, create-only (`Absent`) puts and
+lease acquisitions across handles: each race has exactly one winner, and a
+fresh lease starts at epoch 1. When it also advertises `Fencing`, a fenced
+handle must reject a write after another handle changes its guard. CAS-only
+drivers make no immediate-visibility promise for the other storage ports.
+
+A driver declaring `SharedAcrossProcesses` promises all of those CAS and
+fencing guarantees, and also immediate cross-handle visibility: document
+creates, updates and deletes, stream appends and blob writes are visible to
+other handles. The suite verifies these reads after the corresponding writes
+and checks that all handles observe the winning claim, lease and version race.
+Every driver, including ones with neither process capability, must show that
+a backend opened after another was dropped reads the stored data and continues
+its document versions, stream offsets and lease epochs. The memory driver (one
+heap) and file driver (one process) do not report either process capability.
+`tinystoragedrivers_secrets::testkit::document_secrets_conformance` runs the
+secrets suite and the `enc2`-ciphertext-at-rest check over any driver's
+documents; the SQLite, file and MongoDB crates run it.
+
 
 ## Validated document batches
 
@@ -267,6 +314,15 @@ backend and external owner stage completes.
 Unknown adapters return `Unsupported(ScopePurge)` before erasing data.
 `ScopePurge` advertises native scope admission and reset support;
 `AtomicScopePurge` additionally promises one atomic all-port operation.
+A custom `ScopePurge` implementation must explicitly opt in to generation
+validation before CompositeStorage can rely on its generation check. Full
+binding validation is a separate opt-in that also checks a native writer fence.
+This distinction lets composite blob reads reject retired generations while
+retaining the existing fenced-read contract; writes still enforce their fence.
+Both trait defaults are unsupported for compatibility with older custom ports;
+advertising purge alone does not prove that a handle rejects retired
+generations. A composite refuses purge capability if its record or blob half
+cannot validate the required generation binding.
 A stable operation identity makes retries idempotent and its receipt survives
 the erased data. `PurgeMode::Quiescent` is a trusted host assertion that every
 writer has been stopped and drained; it is never a model-selectable option.
@@ -286,8 +342,10 @@ Generation zero is the legacy handle default. On memory and SQLite, every data
 read and mutation, including empty operations and schema
 declarations, validates its issued generation under the same native
 lock/transaction as the data access. SQLite reads pin generation and data in
-one deferred read transaction. Retired handles cannot read replacement data. Old handles therefore fail
-`Fenced` after reset, even if the operation would otherwise change nothing.
+one deferred read transaction. Retired handles cannot read replacement data.
+Revoked generations fail with `ScopeGenerationRejected`, even if the operation
+would otherwise change nothing; an actual stale native lease guard continues
+to fail with `Fenced`.
 Hosts persist the returned generation in authoritative profile state before
 reopening through `for_scope_generation` or
 `for_scope_fenced_generation`. Generations come from trusted
@@ -299,9 +357,26 @@ revive the old generation.
 A fenced purge checks and holds the native guard through the operation. The
 guard's scope must differ from the erased scope, including when the guard is
 in another scope. A stale guard changes nothing.
-Memory and SQLite support this natively. File, Mongo GridFS, S3 and composite
-storage do not currently advertise atomic all-port purge; they must not turn
-an unsupported native guarantee into an unfenced best-effort success.
+Memory and SQLite support this natively. File purge is durable but staged
+across filesystem entries and makes no crash-atomicity claim. CompositeStorage
+uses a durable coordinator in the record backend and stages records and blob
+deletion separately; it never advertises AtomicScopePurge. Its coordinator
+collection must already be present and compatible when the record backend is
+opened through ExistingSchema. Trusted bootstrap prepares that internal
+collection; restricted use validates it and refuses if it is missing, without
+creating or repairing schema. Nested compositions reserve deterministic
+internal coordinator scopes, which public scope constructors and enumeration
+hide.
+
+S3 advertises ScopePurge only when a signer is installed. It enumerates every
+object version and delete marker beneath the exact generation prefix and
+deletes each VersionId. AWS permissions must include `s3:ListBucketVersions`
+for the bucket and `s3:DeleteObjectVersion` for the scoped object keys. A
+signer-less S3 backend or a custom blob driver without generation isolation
+withholds the composite capability before record or blob mutation. File,
+Mongo GridFS, S3 and composite storage do not advertise atomic all-port purge;
+they must not turn an unsupported native guarantee into an unfenced
+best-effort success.
 
 Reset invalidates application query caches, old version preconditions, stream
 cursors, import receipts and scoped secret providers. Shared declaration caches

@@ -9,12 +9,23 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | Tests, stateless embedders | `memory` | in-process maps |
 | Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file (feature `sqlite`) |
 | Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant (feature `mongodb`) |
+| Cloud records and object blobs | `mongodb://…/<db>?blobs=s3%3A%2F%2Fbucket%2Fprefix%3Fregion%3Dus-east-1` | MongoDB records with S3 blobs (features `mongodb`, `s3`) |
 | Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
 | Secrets | none (features `secrets`, `keyring`, `keyring-secret-service`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
 
 Drivers are separate crates. A host compiles in only the ones it enables, as
 Cargo features on the `tinystoragedrivers` facade. A desktop build never links
 a MongoDB client, and a cloud build never links SQLite.
+
+Add one percent-encoded `blobs=<URL>` query option to any records URL to keep
+documents and streams on that backend while storing blobs independently. Other
+records query options stay on the records URL. The blob URL may name `s3:` or
+another supported storage backend; nested composite blob URLs are rejected.
+For example, with the `mongodb` and `s3` features enabled:
+
+```text
+mongodb://db.example/openhuman?retryWrites=true&blobs=s3%3A%2F%2Fbucket%2Fattachments%3Fregion%3Dus-east-1
+```
 
 ## The ports
 
@@ -28,6 +39,14 @@ a MongoDB client, and a cloud build never links SQLite.
 - **`StreamStore`** holds append-only logs with dense offsets, for transcripts,
   journals, and audit trails.
 - **`BlobStore`** holds opaque bytes by key, for attachments and artifacts.
+- **`QueueStore`** holds durable at-least-once message queues: leases with a
+  visibility window, retries, dead letters, priorities, delays, per-group
+  serialization and dedupe keys. `queue::DocumentQueue` runs one on any
+  `DocumentStore`, so every document driver is a queue backend. Queues are
+  declared in an editable `queues.json` manifest (`queue::QueueManifest`,
+  format in `schemas/queues.schema.json`). Every scope has one at
+  `ScopedStorage::queues()`; a separate queue URL (`amqp://…`, feature
+  `rabbitmq`, `QueueConfig` and `open_queues`) moves them to RabbitMQ.
 
 A `StorageBackend` hands out a `ScopedStorage` for each `Scope`, the tenant key
 every record carries. Two scopes on one backend never see each other's data.
@@ -40,6 +59,18 @@ belong to the crate that owns the record, which keeps this crate free of every
 consumer's schema.
 
 ## The schema
+
+Owners needing only declarations and wire contracts can use
+[`tinystoragedrivers-schema`](crates/tinystoragedrivers-schema/README.md) without
+linking the storage runtime. Core and the facade reexport these shared types
+while keeping their existing executable schema and migration APIs.
+
+The optional `migration-delivery` feature adds transport-independent confidential
+fragmentation for external migration executors. Blob bytes and identity-stream
+entries stay local; document and independent-entry requests/replies use bounded
+frames without a new total size ceiling. See the
+[delivery contract](docs/specs/migration-delivery.md) and
+[runtime adapter requirements](crates/tinystoragedrivers-core/src/schema/delivery/README.md).
 
 Since v1.0.0, every record follows one uniform schema
 ([`docs/specs/schema-v2.md`](docs/specs/schema-v2.md)):
@@ -81,6 +112,7 @@ crates/
 ├── tinystoragedrivers-mongodb/ # MongoDB: multi-tenant, scope on every record
 ├── tinystoragedrivers-secrets/ # SecretStore port: memory, secrets.enc file,
 │                               # DocumentStore and OS keyring drivers
+├── tinystoragedrivers-rabbitmq/ # QueueStore over AMQP 0-9-1 (queues only)
 └── tinystoragedrivers/         # facade: StorageConfig URL parsing, open(),
                                 # driver features, re-exports the core
 ```
@@ -89,6 +121,7 @@ Each driver gets its own crate (`tinystoragedrivers-sqlite`,
 `-mongodb`, `-file`, `-secrets`) and must pass
 `tinystoragedrivers_core::conformance::run`. The suite runs the same checks
 against every driver:
+- declared process-sharing and cross-process CAS capabilities
 - precondition conflicts
 - unique-index violations
 - paging
@@ -97,6 +130,10 @@ against every driver:
 - blob ranges
 - scope isolation
 - scope isolation
+
+`run` checks the built-in document-driver identities. External drivers should
+use `conformance::run_with_process_capabilities` and explicitly supply their
+expected `shared_across_processes` and `cross_process_cas` declarations.
 
 ## Develop
 
@@ -119,6 +156,13 @@ docker exec tsd-mongo mongosh --quiet --eval \
 export TSD_MONGO_URL='mongodb://localhost:27017/tsd_test?directConnection=true'
 ```
 
+The RabbitMQ queue backend's `live_*` tests likewise need `TSD_RABBITMQ_URL`:
+
+```sh
+docker run -d --rm --name tsd-rabbit -p 127.0.0.1:5672:5672 rabbitmq:4-management
+export TSD_RABBITMQ_URL='amqp://guest:guest@127.0.0.1:5672/%2f'
+```
+
 The design and its guarantees are in
 [`docs/specs/storage-ports.md`](docs/specs/storage-ports.md). The order in which
 drivers land and consumers migrate is in
@@ -128,8 +172,13 @@ drivers land and consumers migrate is in
 ## Releases
 
 `.github/workflows/release.yml` (manual dispatch) validates, bumps the single
-workspace version, tags `vX.Y.Z`, and creates a GitHub release. Consumers pin
-the tag through a git dependency or a submodule gitlink.
+workspace version, refreshes the root and discovered proof-workspace lockfiles,
+tags `vX.Y.Z`, and creates a GitHub release. Before staging the exact version
+and lockfile paths, it validates each workspace with locked metadata using
+default and all features. Failed updates or validation restore the affected
+files to their original bytes and existence. See the
+[release runbook](AGENTS.md#releases). Consumers pin the tag through a git
+dependency or a submodule gitlink.
 
 ## License
 

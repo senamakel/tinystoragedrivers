@@ -646,3 +646,46 @@ async fn a_module_cannot_run_the_hosts_conditional_retention_delete() {
     );
     assert_eq!(streams.len("log").await.unwrap(), 1, "nothing was deleted");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_checks_run_across_the_bus_on_the_host_clock() {
+    let rig = rig(Admission::Private).await;
+    let queues = rig.storage.queues();
+    assert!(format!("{queues:?}").contains("BusQueues"));
+    let features = queues.features();
+    assert!(features.dedupe && features.groups && features.priorities && features.delay);
+    conformance::run_queue(queues.as_ref()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_manifest_declares_the_queues_a_module_reaches() {
+    let backend = MemoryStorage::new();
+    let manifest = tinystoragedrivers_core::queue::QueueManifest::from_json(
+        r#"{"version": 1, "queues": [{"name": "inbound"}]}"#,
+    )
+    .unwrap();
+    let server = StorageServer::new(backend.for_scope(&Scope::local()).unwrap())
+        .with_queue_manifest(Arc::new(manifest.clone()));
+    let bus = BusStorage::connect(
+        Arc::new(Loopback::new(Arc::new(server), Admission::Private)),
+        Scope::local(),
+    )
+    .await
+    .unwrap();
+    let queues = bus.for_scope(&Scope::local()).unwrap().queues().clone();
+    // A module applying the same manifest agrees with the host.
+    manifest.apply(queues.as_ref()).await.unwrap();
+    let message = tinystoragedrivers_core::queue::NewMessage::new(json!({"t": 1}));
+    queues
+        .enqueue("inbound", std::slice::from_ref(&message))
+        .await
+        .unwrap();
+    assert_eq!(
+        queues
+            .enqueue("elsewhere", &[message])
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotFound
+    );
+}

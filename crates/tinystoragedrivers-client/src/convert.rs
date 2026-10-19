@@ -1,4 +1,6 @@
 //! Mechanical conversions between native port types and bus wire types.
+pub(crate) mod queues;
+
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -19,16 +21,22 @@ use tinystoragedrivers_core::{
 /// must neither learn that others exist nor spend the host's I/O budget, so
 /// the contract has no selector for either and the host runs them natively.
 ///
+/// `SharedAcrossProcesses` and `CrossProcessCas` describe how a host opens its
+/// own backends and coordinates across clients, which a module bound to one
+/// grant cannot do.
+///
 /// `RecordMetadata` (contract version 4: `Meta` on every read, `schema` and
 /// `expires_ms` on `Put`) and `StreamSeal` (`Streams.Seal`) act only inside
 /// the module's own grant, so they are exposed.
-pub(crate) const HOST_ONLY: [Capability; 6] = [
+pub(crate) const HOST_ONLY: [Capability; 8] = [
     Capability::Fencing,
     Capability::ScopePurge,
     Capability::AtomicScopePurge,
     Capability::ExistingSchema,
     Capability::Maintenance,
     Capability::ScopeEnumeration,
+    Capability::SharedAcrossProcesses,
+    Capability::CrossProcessCas,
 ];
 
 /// Convert between types that share one serde shape (filters, sorts, specs,

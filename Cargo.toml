@@ -8,7 +8,12 @@ members = ["crates/*", "crates/tinystoragedrivers-tinybus/test-cdylib"]
 # `worktrees/` holds `git worktree` checkouts of this same repository; each
 # contains a full copy of this manifest and every crate under it, so without
 # this entry cargo walks into them and reports duplicate packages.
-exclude = ["worktrees", "proof-workspaces/document-callback", "proof-workspaces/storage-needs"]
+exclude = [
+    "worktrees",
+    "proof-workspaces/document-callback",
+    "proof-workspaces/schema-contract",
+    "proof-workspaces/storage-needs",
+]
 
 # Shared package metadata. A member inherits a field with `field.workspace =
 # true`, so the version the release workflow bumps is written in exactly one
@@ -21,6 +26,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
+# Pure declarations and transform wire contracts, shared without runtime dependencies.
+tinystoragedrivers-schema = { path = "crates/tinystoragedrivers-schema" }
 # Minimal document wire clients and confined host callbacks; never linked by core.
 tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "207a9a7df15e44fdba00a807d0f7eaf21904ba0e", default-features = false }
 # Generate the trusted static linked export owned by the TinyBus storage adapter.
@@ -38,6 +45,8 @@ sha2 = "0.10"
 data-encoding = "2"
 # Shared streaming buffers for the S3 driver and zeroized cloud KMS payloads.
 bytes = "1"
+# Portable advisory locks used by the optional lease/fence crate's local lease store.
+fs2 = "0.4"
 # HTTP transports for AWS/GCP KMS; also used by the S3 HTTP contract tests.
 # TLS and JSON stay caller-selected to keep optional transports out of core.
 reqwest = { version = "0.12", default-features = false }
@@ -63,6 +72,15 @@ tinystoragedrivers-sqlite = { path = "crates/tinystoragedrivers-sqlite" }
 tinystoragedrivers-secrets = { path = "crates/tinystoragedrivers-secrets" }
 # The MongoDB driver. The facade forwards it behind its `mongodb` feature.
 tinystoragedrivers-mongodb = { path = "crates/tinystoragedrivers-mongodb" }
+# The RabbitMQ queue backend. The facade forwards it behind its `rabbitmq`
+# feature; it is a QueueStore only, never a document store.
+tinystoragedrivers-rabbitmq = { path = "crates/tinystoragedrivers-rabbitmq" }
+# The AMQP 0-9-1 client the RabbitMQ queue backend speaks through: publisher
+# confirms, basic.get leases, queue declare/purge. Tokio runtime only, and TLS
+# (`amqps://`) through rustls on ring with the webpki roots, as the MongoDB
+# client links them, so a cloud build carries one crypto backend (lapin's
+# default would add aws-lc and the platform verifier).
+lapin = { version = "4.12", default-features = false, features = ["tokio", "rustls--ring", "rustls-webpki-roots-certs"] }
 # The ports are object-safe async traits (`Arc<dyn DocumentStore>`), which
 # native `async fn` in traits cannot express on the declared MSRV.
 async-trait = "0.1"

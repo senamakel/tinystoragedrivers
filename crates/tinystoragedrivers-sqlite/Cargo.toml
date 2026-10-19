@@ -28,6 +28,8 @@ zstd = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# `document_secrets_conformance`: the secrets suite over this driver's documents.
+tinystoragedrivers-secrets = { workspace = true, features = ["testkit"] }
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt"] }
 tempfile = "3"

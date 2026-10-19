@@ -11,7 +11,9 @@
 //! backend.maintain(budget).await?;                          // vacuum
 //! ```
 
-use super::compose::Registry;
+#[cfg(any(test, doc))]
+use super::Registry;
+use super::compose::PreparedRegistry;
 use super::types::Item;
 use crate::backend::{MaintenanceBudget, ScopedStorage, StorageBackend};
 use crate::error::{ErrorKind, Result};
@@ -80,7 +82,7 @@ fn acts(policy: &SealPolicy) -> bool {
     matches!(policy.when, SealWhen::Idle(_)) || policy.retain_ms.is_some()
 }
 
-impl Registry {
+impl PreparedRegistry {
     /// Apply every declared stream policy to the streams in `storage`'s scope.
     ///
     /// For each `Item::Stream` family (the base stream `<base>` and every
@@ -115,7 +117,7 @@ impl Registry {
     ///
     /// `Unsupported(StreamSeal)` when the driver records no stream times and
     /// some policy has work to do, or a backend error.
-    pub async fn maintain(
+    pub(super) async fn maintain(
         &self,
         storage: &ScopedStorage,
         now_ms: i64,
@@ -142,7 +144,7 @@ impl Registry {
     ///
     /// `Unsupported(ScopeEnumeration)` when the backend cannot list scopes,
     /// otherwise as [`maintain`](Self::maintain).
-    pub async fn maintain_all(
+    pub(super) async fn maintain_all(
         &self,
         backend: &dyn StorageBackend,
         now_ms: i64,

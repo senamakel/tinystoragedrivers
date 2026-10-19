@@ -5,6 +5,9 @@ One MongoDB database is shared by every tenant, and the driver enforces the
 `Scope` on every operation. Hosts usually reach it through the facade:
 `tinystoragedrivers = { features = ["mongodb"] }` and a
 `mongodb://…/<db>` or `mongodb+srv://…/<db>` URL.
+It reports `Capability::SharedAcrossProcesses` and
+`Capability::CrossProcessCas`: conditional writes are committed by the
+database, independently of a client's process.
 
 Requires MongoDB 5.0 or newer. The client is the official `mongodb` crate
 with rustls (never OpenSSL), matching the copy OpenHuman already links.

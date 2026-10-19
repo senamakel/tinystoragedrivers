@@ -1,0 +1,13 @@
+# An independent resolver proves the schema dependency closure without workspace
+# feature unification or the runtime crates being roots of the resolve graph.
+[workspace]
+resolver = "3"
+
+[package]
+name = "schema-contract-proof"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tinystoragedrivers-schema = { path = "../../crates/tinystoragedrivers-schema" }

@@ -9,6 +9,9 @@
 //!   expiry, transactions and full-text search.
 //! - [`StreamStore`]: append-only logs with dense offsets.
 //! - [`BlobStore`]: opaque bytes by key.
+//! - [`QueueStore`]: durable at-least-once message queues with leases,
+//!   retries, dead letters, groups and dedupe; [`queue::DocumentQueue`] runs
+//!   one on any [`DocumentStore`].
 //!
 //! Typed repositories (sessions, approvals, workflow runs) belong to the crates
 //! that own those records and are built on these ports; this crate knows
@@ -46,6 +49,7 @@
 //!
 //! # Features
 //!
+//! - `migration-delivery`: confidential fragmented external transforms, without a bus dependency.
 //! - `blocking`: [`Blocking`], a bridge for synchronous callers.
 //! - `testkit`: the [`conformance`] suite drivers run in their tests.
 //! - `polling-watch`: explicit conservative `PollingWatch` invalidations;
@@ -63,6 +67,7 @@ mod filter;
 mod key;
 mod memory;
 pub mod primitives;
+pub mod queue;
 pub mod schema;
 mod scope;
 mod secret;
@@ -101,7 +106,10 @@ pub use filter::{
 };
 pub use key::Key;
 pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStreams};
-pub use primitives::{Counters, Kv, Lease, Leases, Repo, RetryPolicy};
+pub use primitives::{
+    Acquire, Acquisition, Counters, Kv, Lease, LeaseRecord, Leases, Repo, RetryPolicy,
+};
+pub use queue::QueueStore;
 pub use schema::{
     Expiry, Item, MIGRATIONS_COLLECTION, MigrateOptions, MigrationReport, Migrations, Owner,
     Progress, Registry, Schema, ScopeClass, SourceRecord, Step, StepFn, StepReport, TargetRecord,
@@ -124,4 +132,22 @@ pub use async_trait::async_trait;
 pub use watch::PollingWatch;
 pub use watch::{
     DocumentWatch, MAX_WATCH_CURSOR_BYTES, WatchCursor, WatchNotice, WatchOptions, WatchReset,
+};
+
+/// Pure schema declarations and transformation wire contracts.
+pub use tinystoragedrivers_schema as declarations;
+pub use tinystoragedrivers_schema::{
+    BlobTargetRequest, BlobTransformOutput, BlobTransformRequest, DocumentsTransformRequest,
+    ExchangeErrorKind, MIGRATION_CHUNK_BYTES, MIGRATION_EXCHANGE_VERSION, MigrationExchangeReply,
+    MigrationExchangeRequest, MigrationPayload, MigrationPayloadReply, SchemaDeclaration,
+    StepDeclaration, StreamEntriesRequest, StreamMapMode, StreamPlan, StreamPlanRequest,
+    StreamTransformOutput, StreamTransformRequest, TransformDescriptor, TransformError,
+    TransformErrorKind, TransformKind, TransformResult,
+};
+
+#[cfg(feature = "migration-delivery")]
+pub use schema::delivery::{
+    CleanupGuard, DEFAULT_MAX_IN_FLIGHT, ExchangeClock, IDLE_TTL_MS, MigrationDeliveryClient,
+    MigrationExchangeServer, MigrationPayloadHandler, MigrationTransport, PeerIdentity,
+    TransferIds, TransformFuture,
 };

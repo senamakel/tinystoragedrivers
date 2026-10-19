@@ -2,6 +2,14 @@
 
 use tinystoragedrivers::{StorageConfig, conformance};
 
+#[test]
+fn redacts_urls_through_the_public_api() {
+    assert_eq!(
+        tinystoragedrivers::redact_url("mongodb://app:secret@host/db"),
+        "mongodb://app:***@host/db"
+    );
+}
+
 #[tokio::test]
 async fn a_memory_url_opens_a_conforming_backend() {
     let backend = tinystoragedrivers::open(&StorageConfig::parse("memory").unwrap())

@@ -247,10 +247,19 @@ explicitly declined with a reason.
 Releases run from `.github/workflows/release.yml` via a manual
 `workflow_dispatch` with a `patch` / `minor` / `major` bump; `current` resumes
 an interrupted release after its version commit and tag exist. The workflow
-re-runs the full validation suite, computes the next version, updates
-the root `[workspace.package]` version and `Cargo.lock`, commits and tags
-`vX.Y.Z`, pushes, and creates a GitHub release. Consumers pin the tag through a
-git dependency or a submodule gitlink, so there are no binary assets.
+re-runs the full validation suite and computes the next version. For a version
+bump, `.github/scripts/update-release-version.py` updates the root
+`[workspace.package]` version and refreshes the root `Cargo.lock` and each
+independent lockfile discovered through `proof-workspaces/*/Cargo.toml` with
+`cargo update --workspace --manifest-path <manifest>`. It then validates every
+workspace with `cargo metadata --locked`, using both default features and
+`--all-features`, and checks that the release package has the requested version.
+Only after all validation succeeds does it stage the exact root `Cargo.toml`
+and root and discovered proof-workspace `Cargo.lock` paths. If an update or
+validation fails, it restores their original bytes and removes lockfiles that
+did not previously exist. The workflow then commits and tags `vX.Y.Z`, pushes,
+and creates a GitHub release. Consumers pin the tag through a git dependency
+or a submodule gitlink, so there are no binary assets.
 
 Consequently:
 

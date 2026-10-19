@@ -102,6 +102,13 @@ filter) is `InvalidInput` from `for_scope_fenced`.
   absent, success while it matches, refusal after it moves on (with no state
   change), the new holder's fence writing again, an expired guard (with
   `Ttl`), an invalid fence, and `Unsupported(Fencing)` without the capability.
+- `conformance::run` also checks the compound fence `Lease::holder_fence`
+  (`epoch == e AND holder == h AND released absent`, built with
+  `Filter::and` and `Filter::exists`): on every driver with the capability,
+  a write fenced by a tenure that was taken over, released with no successor,
+  rewritten under another holder at the same epoch, or compacted away is
+  refused, while the epoch-only `Lease::fence` still holds across a bare
+  release.
 - Persistent-driver tests cover reopening and independent SQLite connections.
   Mongo standalone never advertises the fence capability.
 - Every source file keeps at least 90% line coverage.

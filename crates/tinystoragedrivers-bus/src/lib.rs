@@ -22,6 +22,7 @@ mod client;
 mod documents;
 mod inline_json;
 mod limits;
+mod queues;
 mod secrets;
 mod streams;
 mod types;
@@ -45,6 +46,14 @@ pub use documents::{
 pub use limits::{
     BLOB_STREAM_CHUNK_BYTES, CONTRACT_VERSION, MAX_BATCH_OPS, MAX_FRAME_BYTES,
     MAX_INLINE_BLOB_BYTES, MAX_INLINE_BYTES, MAX_PAGE_ITEMS, MAX_PRESIGN_TTL_SECS,
+    MAX_QUEUE_MESSAGE_BYTES,
+};
+pub use queues::{
+    DeadLettersRequest, DeadLettersResponse, EnqueueRequest, EnqueueResponse, EnqueuedMessage,
+    EnsureQueueRequest, ExtendRequest, NackRequest, QUEUES_OBJECT, QUEUES_SELECTORS,
+    QueueDeadLetter, QueueDelivery, QueueFeaturesReply, QueueMessage, QueueReceipt, QueueRequest,
+    QueueRetry, QueueSpec, QueueStatsReply, ReceiptRequest, ReceiveRequest, ReceiveResponse,
+    RedriveRequest, is_queues_selector,
 };
 pub use secrets::{
     ListSecretsRequest, SECRETS_OBJECT, SECRETS_SELECTORS, SecretNameRequest, SecretValue,

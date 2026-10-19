@@ -17,6 +17,8 @@
     reason = "the conformance suite reports a failed check by panicking inside the driver's test"
 )]
 
+mod document;
+
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::pin::Pin;
@@ -27,6 +29,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tinystoragedrivers_core::ErrorKind;
 
 use crate::store::{MAX_SECRET_NAME_LEN, SecretStore};
+
+pub use document::document_secrets_conformance;
 
 /// Run every check against `store`.
 ///

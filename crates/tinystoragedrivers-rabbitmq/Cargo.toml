@@ -1,0 +1,30 @@
+[package]
+name = "tinystoragedrivers-rabbitmq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The RabbitMQ queue backend for tinystoragedrivers: QueueStore over AMQP 0-9-1, scoped by queue-name prefix."
+readme = "README.md"
+keywords = ["queue", "rabbitmq", "amqp", "driver"]
+categories = ["database"]
+publish = false
+
+[dependencies]
+tinystoragedrivers-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+lapin = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+# `conformance::run_queue`, the clock-free queue suite the live tests run.
+tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+# The live tests publish a foreign message straight to the broker.
+lapin = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

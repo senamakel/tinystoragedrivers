@@ -133,6 +133,8 @@ jobs:
       # The MongoDB driver's `live_*` tests run against this server; the
       # coverage gate counts them, so this job needs the server up.
       TSD_MONGO_URL: mongodb://localhost:27017/tsd_test?directConnection=true
+      # Likewise the RabbitMQ queue backend's `live_*` tests.
+      TSD_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/%2f
     steps:
       - uses: actions/checkout@v7
         with:
@@ -157,9 +159,25 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev libglib2.0-bin dbus gnome-keyring
       - name: Start a MongoDB replica set
         run: .github/scripts/start-mongo-replset.sh 27017
+      - name: Start RabbitMQ
+        run: .github/scripts/start-rabbitmq.sh 5672
+
+      - name: Test release version and proof lockfile updates
+        run: python3 .github/scripts/release_version_tests.py
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Prove isolated schema dependency closure and negative fixture
+        run: python3 scripts/check-schema-dependencies.py --negative-test
+
+      # All-target checks unify dev features and hide a missing tokio/macros
+      # dependency in testkit. Keep the library-only feature build independent.
+      - name: Check core feature closure without dev dependency unification
+        run: cargo check -p tinystoragedrivers-core --lib --all-features --locked
+
+      - name: Check migration delivery without dev or testkit features
+        run: cargo check -p tinystoragedrivers-core --no-default-features --features migration-delivery --lib --locked
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -188,7 +206,7 @@ jobs:
         run: |
           set -euo pipefail
           forbidden="$(cargo tree -p tinystoragedrivers-core --all-features -e normal,build --prefix none \
-            | grep -Ei 'rusqlite|libsqlite3|mongodb|bson|reqwest|hyper' || true)"
+            | grep -Ei 'rusqlite|libsqlite3|mongodb|bson|reqwest|hyper|lapin|amq-protocol' || true)"
           if [ -n "$forbidden" ]; then
             echo "tinystoragedrivers-core pulled in a dependency its manifest forbids:" >&2
             echo "$forbidden" >&2
@@ -268,6 +286,29 @@ jobs:
 
       - name: Test the facade's mongodb feature
         run: cargo test -p tinystoragedrivers --features mongodb
+
+  rabbitmq:
+    name: RabbitMQ queue backend
+    runs-on: ubuntu-latest
+    env:
+      TSD_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/%2f
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Start RabbitMQ
+        run: .github/scripts/start-rabbitmq.sh 5672
+
+      - name: Test the queue backend against RabbitMQ
+        run: cargo test -p tinystoragedrivers-rabbitmq --all-features
+
+      - name: Test the facade's rabbitmq feature
+        run: cargo test -p tinystoragedrivers --features rabbitmq
 
   s3:
     name: S3-compatible blob driver

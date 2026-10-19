@@ -5,7 +5,7 @@ use tinystoragedrivers_client::Object;
 
 /// The well-known name the host owns, and the interface its objects speak.
 pub const HOST_NAME: &str = STORAGE_INTERFACE;
-/// Where the four objects are served: `<root>/<Object>`.
+/// Where the five objects are served: `<root>/<Object>`.
 pub const OBJECT_ROOT: &str = "/ai/tinyhumans/tinystorage";
 /// Error name for a call the host refused before reaching a backend.
 pub const ERROR_DENIED: &str = "ai.tinyhumans.tinystorage.Error.Denied";

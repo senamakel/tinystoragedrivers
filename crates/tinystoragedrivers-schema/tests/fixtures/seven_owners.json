@@ -1,0 +1,827 @@
+[
+  {
+    "owner": "juice",
+    "items": [
+      {
+        "kind": "blobs",
+        "prefix": "juice/ccr/",
+        "scope": {
+          "kind": "module"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "id": "ccr_prefix_v2",
+        "item": "juice/ccr/",
+        "source": "tinyjuice_ccr/",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "ccr_prefix_v2",
+          "kind": {
+            "kind": "blob"
+          },
+          "version": 1
+        }
+      }
+    ]
+  },
+  {
+    "owner": "connectors",
+    "items": [
+      {
+        "kind": "collection",
+        "name": "connectors.user_scopes",
+        "version": 2,
+        "spec": {
+          "name": "connectors.user_scopes",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "stream",
+        "name": "connectors.triggers",
+        "scope": {
+          "kind": "module"
+        },
+        "seal": {
+          "when": {
+            "idle": 172800000
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "id": "user_scopes_unwrap_value",
+        "item": "connectors.user_scopes",
+        "source": "composio-user-scopes",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "user_scopes_unwrap_value",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "triggers_rename",
+        "item": "connectors.triggers",
+        "source": "triggers/",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "triggers_rename",
+          "kind": {
+            "kind": "stream"
+          },
+          "version": 1
+        }
+      }
+    ]
+  },
+  {
+    "owner": "mcp",
+    "items": [
+      {
+        "kind": "collection",
+        "name": "mcp.servers",
+        "version": 2,
+        "spec": {
+          "name": "mcp.servers",
+          "indexes": [
+            {
+              "name": "qualified_name",
+              "fields": [
+                "qualified_name"
+              ],
+              "unique": false
+            },
+            {
+              "name": "installed_ms",
+              "fields": [
+                "installed_ms"
+              ],
+              "unique": false
+            }
+          ]
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "mcp.server_names",
+        "version": 2,
+        "spec": {
+          "name": "mcp.server_names",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "mcp.registry_cache",
+        "version": 2,
+        "spec": {
+          "name": "mcp.registry_cache",
+          "indexes": [
+            {
+              "name": "cache_key",
+              "fields": [
+                "cache_key"
+              ],
+              "unique": false
+            }
+          ]
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "mcp.tool_cache",
+        "version": 2,
+        "spec": {
+          "name": "mcp.tool_cache",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "mcp.registry_index",
+        "version": 2,
+        "spec": {
+          "name": "mcp.registry_index",
+          "indexes": [
+            {
+              "name": "source",
+              "fields": [
+                "source"
+              ],
+              "unique": false
+            }
+          ]
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "mcp.registry_index_state",
+        "version": 2,
+        "spec": {
+          "name": "mcp.registry_index_state",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "stream",
+        "name": "mcp.audit",
+        "scope": {
+          "kind": "module"
+        },
+        "seal": {
+          "when": "never"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "id": "servers_v2",
+        "item": "mcp.servers",
+        "source": "mcp_servers",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "servers_v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "server_names_v2",
+        "item": "mcp.server_names",
+        "source": "mcp_server_names",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "server_names_v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "registry_cache_v2",
+        "item": "mcp.registry_cache",
+        "source": "mcp_registry_cache",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "registry_cache_v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "tool_cache_v2",
+        "item": "mcp.tool_cache",
+        "source": "mcp_tool_cache",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "tool_cache_v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "registry_index_v2",
+        "item": "mcp.registry_index",
+        "source": "mcp_registry_index",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "registry_index_v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "registry_index_state_v2",
+        "item": "mcp.registry_index_state",
+        "source": "mcp_registry_index_state",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "registry_index_state_v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "audit_v2",
+        "item": "mcp.audit",
+        "source": "mcp_audit",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "audit_v2",
+          "kind": {
+            "kind": "stream"
+          },
+          "version": 1
+        }
+      }
+    ]
+  },
+  {
+    "owner": "channels",
+    "items": [
+      {
+        "kind": "collection",
+        "name": "channels.delivery_pending",
+        "version": 2,
+        "spec": {
+          "name": "channels.delivery_pending",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.delivery_failed",
+        "version": 2,
+        "spec": {
+          "name": "channels.delivery_failed",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.delivery_results",
+        "version": 2,
+        "spec": {
+          "name": "channels.delivery_results",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.remote_bindings",
+        "version": 2,
+        "spec": {
+          "name": "channels.remote_bindings",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.remote_busy",
+        "version": 2,
+        "spec": {
+          "name": "channels.remote_busy",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.remote_meta",
+        "version": 2,
+        "spec": {
+          "name": "channels.remote_meta",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.whatsapp_device",
+        "version": 2,
+        "spec": {
+          "name": "channels.whatsapp_device",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.whatsapp_identity",
+        "version": 2,
+        "spec": {
+          "name": "channels.whatsapp_identity",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.whatsapp_session",
+        "version": 2,
+        "spec": {
+          "name": "channels.whatsapp_session",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.whatsapp_prekey",
+        "version": 2,
+        "spec": {
+          "name": "channels.whatsapp_prekey",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.whatsapp_signed_prekey",
+        "version": 2,
+        "spec": {
+          "name": "channels.whatsapp_signed_prekey",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.whatsapp_sender_key",
+        "version": 2,
+        "spec": {
+          "name": "channels.whatsapp_sender_key",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.whatsapp_sync_key",
+        "version": 2,
+        "spec": {
+          "name": "channels.whatsapp_sync_key",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "channels.whatsapp_lid_mapping",
+        "version": 2,
+        "spec": {
+          "name": "channels.whatsapp_lid_mapping",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "id": "delivery-pending-v2",
+        "item": "channels.delivery_pending",
+        "source": "channels_delivery_pending",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "delivery-pending-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "delivery-failed-v2",
+        "item": "channels.delivery_failed",
+        "source": "channels_delivery_failed",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "delivery-failed-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "delivery-results-v2",
+        "item": "channels.delivery_results",
+        "source": "channels_delivery_results",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "delivery-results-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "remote-bindings-v2",
+        "item": "channels.remote_bindings",
+        "source": "channel_remote_bindings",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "remote-bindings-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "remote-busy-v2",
+        "item": "channels.remote_busy",
+        "source": "channel_remote_busy",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "remote-busy-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "remote-meta-v2",
+        "item": "channels.remote_meta",
+        "source": "channel_remote_meta",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "remote-meta-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "whatsapp-device-v2",
+        "item": "channels.whatsapp_device",
+        "source": "whatsapp_device",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "whatsapp-device-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "whatsapp-identity-v2",
+        "item": "channels.whatsapp_identity",
+        "source": "whatsapp_identity",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "whatsapp-identity-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "whatsapp-session-v2",
+        "item": "channels.whatsapp_session",
+        "source": "whatsapp_session",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "whatsapp-session-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "whatsapp-prekey-v2",
+        "item": "channels.whatsapp_prekey",
+        "source": "whatsapp_prekey",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "whatsapp-prekey-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "whatsapp-signed-prekey-v2",
+        "item": "channels.whatsapp_signed_prekey",
+        "source": "whatsapp_signed_prekey",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "whatsapp-signed-prekey-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "whatsapp-sender-key-v2",
+        "item": "channels.whatsapp_sender_key",
+        "source": "whatsapp_sender_key",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "whatsapp-sender-key-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "whatsapp-sync-key-v2",
+        "item": "channels.whatsapp_sync_key",
+        "source": "whatsapp_sync_key",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "whatsapp-sync-key-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "whatsapp-lid-mapping-v2",
+        "item": "channels.whatsapp_lid_mapping",
+        "source": "whatsapp_lid_mapping",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "whatsapp-lid-mapping-v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      }
+    ]
+  },
+  {
+    "owner": "wallet",
+    "items": [
+      {
+        "kind": "collection",
+        "name": "wallet.budgets",
+        "version": 2,
+        "spec": {
+          "name": "wallet.budgets",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "stream",
+        "name": "wallet.payments",
+        "scope": {
+          "kind": "module"
+        },
+        "seal": {
+          "when": "never"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "id": "budgets_v2",
+        "item": "wallet.budgets",
+        "source": "x402_budget",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "budgets_v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "payments_v2",
+        "item": "wallet.payments",
+        "source": "x402.payments",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "payments_v2",
+          "kind": {
+            "kind": "stream"
+          },
+          "version": 1
+        }
+      }
+    ]
+  },
+  {
+    "owner": "memes",
+    "items": [
+      {
+        "kind": "collection",
+        "name": "memes.state",
+        "version": 2,
+        "spec": {
+          "name": "memes.state",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "tenant"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "id": "state_v2",
+        "item": "memes.state",
+        "source": "tinymemes_documents",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "state_v2",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      }
+    ]
+  },
+  {
+    "owner": "box",
+    "items": [
+      {
+        "kind": "collection",
+        "name": "box.boxes",
+        "version": 2,
+        "spec": {
+          "name": "box.boxes",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      },
+      {
+        "kind": "collection",
+        "name": "box.jail_index",
+        "version": 2,
+        "spec": {
+          "name": "box.jail_index",
+          "indexes": []
+        },
+        "scope": {
+          "kind": "module"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "id": "rename_boxes",
+        "item": "box.boxes",
+        "source": "tinybox_boxes",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "rename_boxes",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      },
+      {
+        "id": "rename_jail_index",
+        "item": "box.jail_index",
+        "source": "tinybox_jail_index",
+        "from": 1,
+        "to": 2,
+        "transform": {
+          "operation": "rename_jail_index",
+          "kind": {
+            "kind": "documents"
+          },
+          "version": 1
+        }
+      }
+    ]
+  }
+]

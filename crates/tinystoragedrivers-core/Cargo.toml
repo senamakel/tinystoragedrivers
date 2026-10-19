@@ -12,8 +12,9 @@ categories = ["database"]
 publish = false
 
 [dependencies]
+# Reexport shared pure declarations while retaining the legacy core API.
+tinystoragedrivers-schema = { workspace = true }
 async-trait = { workspace = true }
-thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # `Key::of` hashes keys that outgrow the document id limit.
@@ -32,6 +33,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync", 
 
 [features]
 default = []
+# Fragmented confidential migration delivery; owns asynchronous conversion and cleanup tasks.
+migration-delivery = ["tokio/rt", "tokio/sync", "tokio/time"]
 # Explicit conservative invalidation; never claims native Watch history.
 polling-watch = ["tokio/time"]
 # `Blocking`: run a port's future from synchronous code on a dedicated runtime
@@ -41,7 +44,9 @@ polling-watch = ["tokio/time"]
 blocking = ["tokio/rt-multi-thread"]
 # `conformance`: the behavioral suite every driver must pass. Drivers enable it
 # from their dev-dependencies.
-testkit = []
+# The conformance suite uses tokio::join! outside cfg(test); dev-dependency
+# feature unification must not be needed to build or document this feature.
+testkit = ["tokio/macros"]
 # Opt-in native memory watches for tests that require the Watch capability.
 test-util = ["tokio/sync"]
 

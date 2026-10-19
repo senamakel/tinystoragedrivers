@@ -12,8 +12,13 @@ use crate::primitives;
 use crate::scope::Scope;
 use crate::stream::{SEALED_BLOB_PREFIX, validate_stream};
 
+#[cfg(any(test, doc))]
+use super::Step;
 use super::migrations::migrations_spec;
-use super::types::{Item, Owner, Schema, Step, StepBody};
+use super::prepared::{PreparedBody as StepBody, PreparedSchema, PreparedStep};
+use super::types::{Item, Owner, Schema};
+use super::{MigrateOptions, MigrationReport, PolicyReport, SchemaDeclaration, TransformExecutor};
+use crate::backend::{MaintenanceBudget, ScopedStorage};
 
 /// The composed declarations of every owner in a process.
 ///
@@ -37,7 +42,20 @@ use super::types::{Item, Owner, Schema, Step, StepBody};
 /// ```
 #[derive(Debug)]
 pub struct Registry {
-    pub(super) schemas: Vec<Schema>,
+    schemas: Vec<Schema>,
+    prepared: PreparedRegistry,
+}
+
+/// A registry combining local closures and owned external transform declarations.
+#[derive(Debug)]
+pub struct ComposedRegistry {
+    declarations: Vec<super::SchemaMetadata>,
+    prepared: PreparedRegistry,
+}
+
+#[derive(Debug)]
+pub(super) struct PreparedRegistry {
+    pub(super) schemas: Vec<PreparedSchema>,
     pub(super) collections: HashMap<String, CollectionInfo>,
     /// Every declared name or prefix, for [`Registry::check_ready`].
     declared: HashSet<String>,
@@ -63,7 +81,7 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput), naming the
+    /// [`crate::ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput), naming the
     /// owner and item at fault, for: a malformed owner, collection, stream or
     /// prefix; a name outside its owner's prefix; a name or owner declared
     /// twice; a collection version of 0; a step for an item that is not declared by
@@ -74,7 +92,282 @@ impl Registry {
     /// or does not end at the declared version (stream and blob items have no
     /// declared version, so their chains only have to start at 1 and not skip).
     pub fn compose(schemas: impl IntoIterator<Item = Schema>) -> Result<Self> {
-        let schemas: Vec<Schema> = schemas.into_iter().collect();
+        let schemas: Vec<_> = schemas.into_iter().collect();
+        let prepared =
+            PreparedRegistry::compose(schemas.iter().map(PreparedSchema::local).collect())?;
+        Ok(Self { schemas, prepared })
+    }
+
+    /// Compose local schemas with transport-independent external declarations.
+    /// External descriptor versions and operation names are checked before any storage access.
+    ///
+    /// # Errors
+    /// Invalid declarations, step chains, unsupported descriptor versions, or malformed selectors.
+    pub fn compose_with_declarations(
+        local: impl IntoIterator<Item = Schema>,
+        external: impl IntoIterator<Item = SchemaDeclaration>,
+    ) -> Result<ComposedRegistry> {
+        let mut schemas: Vec<_> = local
+            .into_iter()
+            .map(|s| PreparedSchema::local(&s))
+            .collect();
+        for declaration in external {
+            schemas.push(PreparedSchema::external(declaration)?);
+        }
+        let prepared = PreparedRegistry::compose(schemas)?;
+        let declarations = prepared
+            .schemas
+            .iter()
+            .map(PreparedSchema::metadata)
+            .collect();
+        Ok(ComposedRegistry {
+            declarations,
+            prepared,
+        })
+    }
+
+    #[cfg(test)]
+    fn set_pending(&self, scope: &Scope, items: HashSet<String>) {
+        self.prepared.set_pending(scope, items);
+    }
+    #[cfg(test)]
+    fn mark_ready(&self, scope: &Scope, item: &str) {
+        self.prepared.mark_ready(scope, item);
+    }
+    /// Original closure declarations, in composition order.
+    pub fn schemas(&self) -> &[Schema] {
+        &self.schemas
+    }
+}
+
+impl ComposedRegistry {
+    /// Every owner and step, including external operation descriptors.
+    pub fn schemas(&self) -> &[super::SchemaMetadata] {
+        &self.declarations
+    }
+}
+
+macro_rules! registry_api {
+    ($registry:ty) => {
+        impl $registry {
+            /// The owners, in the order they were composed.
+            pub fn owners(&self) -> impl Iterator<Item = &str> {
+                self.prepared.owners()
+            }
+            /// The declared version of collection `name`, or `None` when no owner
+            /// declares it.
+            pub fn collection_version(&self, name: &str) -> Option<u32> {
+                self.prepared.collection_version(name)
+            }
+            /// Declare every collection in `backend`, including the internal
+            /// `tsd.migrations` and the shared primitives' `tsd.leases`, `tsd.kv`
+            /// and `tsd.counters` ([`primitives::collection_specs`]). Safe to call again: `ensure_collection` merges into
+            /// what is declared.
+            ///
+            /// **Trusted bootstrap, host only.** Owners never call this; it is the one
+            /// place declarations are made. Drivers declare a collection for the whole
+            /// backend, so the handle's scope (`local`) is only a way in.
+            ///
+            /// # Errors
+            ///
+            /// Whatever the driver's `ensure_collection` returns, for instance
+            /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) on an
+            /// existing-schema backend.
+            pub async fn prepare(&self, backend: &dyn StorageBackend) -> Result<()> {
+                self.prepared.prepare(backend).await
+            }
+            /// Whether `item` may be written now, without naming a scope: for a
+            /// process that migrates one scope, or a host that has no use for the
+            /// distinction.
+            ///
+            /// An item with steps is open once `migrate` has run over at least one
+            /// scope and no scope it has run over still has steps pending for it.
+            /// The registry cannot know scopes it has not been asked to migrate, so
+            /// this does **not** vouch for them; a host with several scopes calls
+            /// [`Registry::check_ready_in`] instead.
+            ///
+            /// # Errors
+            ///
+            /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) with the
+            /// message `migrating <owner>.<item>` while steps are pending (or before
+            /// any scope was migrated); [`ErrorKind::NotFound`](crate::ErrorKind::NotFound)
+            /// when no owner declares `item`.
+            pub fn check_ready(&self, item: &str) -> Result<()> {
+                self.prepared.check_ready(item)
+            }
+            /// Whether `item` may be written in `scope` now. Typed repositories and
+            /// hosts call it before a write; drivers do not enforce it.
+            ///
+            /// Migration progress lives in each scope's own `tsd.migrations`, so
+            /// readiness is per scope: an item with steps is open in `scope` only
+            /// after [`Registry::migrate`](Registry::migrate) has finished every one of
+            /// its steps over that scope. A scope `migrate` has not run over is not
+            /// ready. Use this for any item whose data is split across scopes.
+            ///
+            /// # Errors
+            ///
+            /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) with the
+            /// message `migrating <owner>.<item>` while steps are pending in `scope`;
+            /// [`ErrorKind::NotFound`](crate::ErrorKind::NotFound) when no owner
+            /// declares `item`.
+            pub fn check_ready_in(&self, scope: &Scope, item: &str) -> Result<()> {
+                self.prepared.check_ready_in(scope, item)
+            }
+            /// Run every pending step over `storage`'s scope, in schema order and step
+            /// order, then open the migrated collections for writes.
+            ///
+            /// For each step the runner pages the source (the item itself, filtered to
+            /// records below version `to`, or the legacy collection named by
+            /// [`Step::source`]) by id with a keyset cursor, `batch_size` records at a
+            /// time. It writes every output with `Precondition::Absent` and the
+            /// schema version `to`. The batch's writes and its progress record are
+            /// two steps, so a crash between them leaves outputs the cursor does not
+            /// know; on resume the same outputs are produced again, and an output
+            /// that already exists counts as written **only when it holds exactly the
+            /// body the step produced**. A different document under the id, or a
+            /// unique-index collision with another document, stops the step with the
+            /// driver's `AlreadyExists` or `Conflict`. An in-place rewrite of a record
+            /// under the same id replaces it instead, guarded by the version it read;
+            /// a source record of an in-place step that is not re-emitted under its
+            /// id (the step renamed or dropped it) is deleted once the batch's
+            /// outputs are written. After each batch it stores `{cursor, written}` in
+            /// `tsd.migrations`. Only when the source is exhausted does it delete a
+            /// legacy source's rows and mark the step done. A crash or error anywhere leaves the progress of the
+            /// last finished batch; calling `migrate` again resumes there and yields
+            /// the same final state as an uninterrupted run, because steps are pure.
+            ///
+            /// **Stream steps** ([`Step::stream`]) list the streams under the step's
+            /// source prefix and move them one at a time: read the source whole (paged
+            /// by `batch_size`), map it, append the result to its new name in batches,
+            /// seal the target if the source was sealed (as the stream backend
+            /// reports it), then delete the source. Appends are conditional on the
+            /// length the run observed. The
+            /// per-source progress (target name and entries appended) is saved before
+            /// the first append and after every batch. On resume the target's length
+            /// says where to continue, so no entry is appended twice; a target that
+            /// was not started by this step is refused with `Conflict`. Migrated
+            /// streams start at offset 0 (see [`Step::stream`]).
+            ///
+            /// **Blob steps** ([`Step::blobs`]) move one blob at a time: put the
+            /// target, then delete the source. An existing target is accepted only when
+            /// its bytes and content type equal the step's output (an interrupted
+            /// earlier write); otherwise the step fails with `Conflict` and keeps the
+            /// source. The step's
+            /// count is saved after every blob and a resume lists what is left.
+            ///
+            /// Run one `migrate` per scope at a time (hold a lease). Two concurrent
+            /// runners do not corrupt the data (document writes are idempotent and
+            /// stream appends are conditional, so the loser gets a `Conflict`) but
+            /// waste work or fail.
+            ///
+            /// Readiness is recorded per scope (`storage.scope()`): see
+            /// [`Registry::check_ready_in`]. Run `migrate` over every scope the host
+            /// serves before relying on the unscoped [`Registry::check_ready`].
+            /// The target collections must have been declared with
+            /// [`Registry::prepare`]; the progress collection and a legacy source are
+            /// declared here.
+            ///
+            /// External steps need an executor only when an eligible source document,
+            /// stream name or blob exists. Empty sources and completed steps can finish
+            /// without one; use [`Self::migrate_with_executor`] to transform legacy data.
+            ///
+            /// # Errors
+            ///
+            /// [`crate::ErrorKind::Unavailable`] when source data requires an external
+            /// transform executor. The step remains pending and its source is retained.
+            /// [`crate::ErrorKind::InvalidInput`] for a zero batch size or a step that emits
+            /// a record for a collection its owner does not declare; whatever the step
+            /// function or the document store returns otherwise.
+            pub async fn migrate(
+                &self,
+                storage: &ScopedStorage,
+                options: &MigrateOptions,
+            ) -> Result<MigrationReport> {
+                self.prepared.migrate(storage, options, None).await
+            }
+            /// Run the same resumable migration algorithm with an async external executor.
+            ///
+            /// # Errors
+            /// As with migrate, plus any executor error. Failure leaves the step pending.
+            pub async fn migrate_with_executor(
+                &self,
+                storage: &ScopedStorage,
+                options: &MigrateOptions,
+                executor: &dyn TransformExecutor,
+            ) -> Result<MigrationReport> {
+                self.prepared
+                    .migrate(storage, options, Some(executor))
+                    .await
+            }
+            /// Apply every declared stream policy to the streams in `storage`'s scope.
+            ///
+            /// For each `Item::Stream` family (the base stream `<base>` and every
+            /// `<base>/…`), at `now_ms` (epoch milliseconds):
+            ///
+            /// - a stream that is not sealed, under [`crate::SealWhen::Idle`]`(ms)`, whose
+            ///   last append is more than `ms` before `now_ms`, is sealed;
+            /// - a sealed stream under a policy with `retain_ms`, sealed more than
+            ///   `retain_ms` before `now_ms`, is deleted (`delete_sealed_stream`,
+            ///   which removes the sealed blob too, and only if the stream is still
+            ///   the one inspected: sealed at the same instant).
+            ///
+            /// [`crate::SealWhen::OnFinish`] streams are sealed by their owners and
+            /// [`crate::SealWhen::Never`] ones never, but retention applies to any sealed
+            /// stream whose policy states it. A stream whose driver recorded no time
+            /// (written before times existed) is left alone.
+            ///
+            /// `budget.max_streams` bounds the streams sealed or deleted in this
+            /// call; when it runs out the report says `exhausted` and the host calls
+            /// again later. A race (another writer sealed or deleted the stream
+            /// first, or deleted and recreated it so it is no longer the one
+            /// inspected) is counted in `conflicts`, not returned. An idle stream
+            /// appended to after inspection is still sealed: idleness was the
+            /// trigger, and `seal` keeps every entry.
+            ///
+            /// The policy applies to every scope class: the host chooses which scopes
+            /// to hand in. Run the backend's own
+            /// [`maintain`](crate::StorageBackend::maintain) afterwards to return the
+            /// freed space.
+            ///
+            /// # Errors
+            ///
+            /// `Unsupported(StreamSeal)` when the driver records no stream times and
+            /// some policy has work to do, or a backend error.
+            pub async fn maintain(
+                &self,
+                storage: &ScopedStorage,
+                now_ms: i64,
+                budget: MaintenanceBudget,
+            ) -> Result<PolicyReport> {
+                self.prepared.maintain(storage, now_ms, budget).await
+            }
+            /// [`maintain`](Self::maintain) over every scope `backend` holds records
+            /// for, sharing one budget across them.
+            ///
+            /// Needs [`Capability::ScopeEnumeration`](crate::Capability::ScopeEnumeration);
+            /// without it, enumerate the scopes yourself and call
+            /// [`maintain`](Self::maintain) for each.
+            ///
+            /// # Errors
+            ///
+            /// `Unsupported(ScopeEnumeration)` when the backend cannot list scopes,
+            /// otherwise as [`maintain`](Self::maintain).
+            pub async fn maintain_all(
+                &self,
+                backend: &dyn StorageBackend,
+                now_ms: i64,
+                budget: MaintenanceBudget,
+            ) -> Result<PolicyReport> {
+                self.prepared.maintain_all(backend, now_ms, budget).await
+            }
+        }
+    };
+}
+registry_api!(Registry);
+registry_api!(ComposedRegistry);
+
+impl PreparedRegistry {
+    fn compose(schemas: Vec<PreparedSchema>) -> Result<Self> {
         let mut owners = HashSet::new();
         for schema in &schemas {
             if !owners.insert(schema.owner.as_str()) {
@@ -104,7 +397,7 @@ impl Registry {
                 }
             }
             check_steps(schema)?;
-            stepped.extend(schema.steps.iter().map(|step| step.item.to_owned()));
+            stepped.extend(schema.steps.iter().map(|step| step.item.clone()));
         }
         Ok(Self {
             schemas,
@@ -116,14 +409,14 @@ impl Registry {
     }
 
     /// The owners, in the order they were composed.
-    pub fn owners(&self) -> impl Iterator<Item = &str> {
+    pub(super) fn owners(&self) -> impl Iterator<Item = &str> {
         self.schemas.iter().map(|schema| schema.owner.as_str())
     }
 
     /// The declared version of collection `name`, or `None` when no owner
     /// declares it.
     #[must_use]
-    pub fn collection_version(&self, name: &str) -> Option<u32> {
+    pub(super) fn collection_version(&self, name: &str) -> Option<u32> {
         self.collections.get(name).map(|info| info.version)
     }
 
@@ -141,7 +434,7 @@ impl Registry {
     /// Whatever the driver's `ensure_collection` returns, for instance
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) on an
     /// existing-schema backend.
-    pub async fn prepare(&self, backend: &dyn StorageBackend) -> Result<()> {
+    pub(super) async fn prepare(&self, backend: &dyn StorageBackend) -> Result<()> {
         let storage = backend.for_scope(&Scope::local())?;
         storage
             .documents()
@@ -175,7 +468,7 @@ impl Registry {
     /// message `migrating <owner>.<item>` while steps are pending in `scope`;
     /// [`ErrorKind::NotFound`](crate::ErrorKind::NotFound) when no owner
     /// declares `item`.
-    pub fn check_ready_in(&self, scope: &Scope, item: &str) -> Result<()> {
+    pub(super) fn check_ready_in(&self, scope: &Scope, item: &str) -> Result<()> {
         self.check_declared(item)?;
         if !self.stepped.contains(item) {
             return Ok(());
@@ -203,7 +496,7 @@ impl Registry {
     /// message `migrating <owner>.<item>` while steps are pending (or before
     /// any scope was migrated); [`ErrorKind::NotFound`](crate::ErrorKind::NotFound)
     /// when no owner declares `item`.
-    pub fn check_ready(&self, item: &str) -> Result<()> {
+    pub(super) fn check_ready(&self, item: &str) -> Result<()> {
         self.check_declared(item)?;
         if !self.stepped.contains(item) {
             return Ok(());
@@ -244,7 +537,7 @@ impl Registry {
     }
 
     /// Every step with its owner, in run order.
-    pub(super) fn steps(&self) -> impl Iterator<Item = (&Owner, &Step)> {
+    pub(super) fn steps(&self) -> impl Iterator<Item = (&Owner, &PreparedStep)> {
         self.schemas
             .iter()
             .flat_map(|schema| schema.steps.iter().map(|step| (&schema.owner, step)))
@@ -362,9 +655,9 @@ fn outside_prefix(
     ))
 }
 
-fn check_steps(schema: &Schema) -> Result<()> {
+fn check_steps(schema: &PreparedSchema) -> Result<()> {
     let owner = &schema.owner;
-    let mut chains: HashMap<&str, Vec<&Step>> = HashMap::new();
+    let mut chains: HashMap<&str, Vec<&PreparedStep>> = HashMap::new();
     for step in &schema.steps {
         let Some(item) = schema.items.iter().find(|item| item.name() == step.item) else {
             return Err(StorageError::invalid_input(format!(
@@ -380,7 +673,7 @@ fn check_steps(schema: &Schema) -> Result<()> {
             )));
         }
         check_source(step, item)?;
-        let chain = chains.entry(step.item).or_default();
+        let chain = chains.entry(&step.item).or_default();
         if chain.iter().any(|earlier| earlier.id == step.id) {
             return Err(StorageError::invalid_input(format!(
                 "step id `{}` is used twice for `{}`",
@@ -402,7 +695,7 @@ fn check_steps(schema: &Schema) -> Result<()> {
 }
 
 /// A step runs against exactly the kind of item its body is written for.
-fn check_step_kind(step: &Step, item: &Item) -> Result<()> {
+fn check_step_kind(step: &PreparedStep, item: &Item) -> Result<()> {
     let (matches, wanted) = match (&step.run, item) {
         (StepBody::Documents(_), Item::Collection { .. }) => (true, "collection"),
         (StepBody::Streams(_), Item::Stream { .. }) => (true, "stream"),
@@ -424,16 +717,16 @@ fn check_step_kind(step: &Step, item: &Item) -> Result<()> {
 /// The legacy source of a step: a collection name, or for stream and blob
 /// steps a required prefix that stays clear of the item and, for blobs, of
 /// the sealed-stream blobs.
-fn check_source(step: &Step, item: &Item) -> Result<()> {
+fn check_source(step: &PreparedStep, item: &Item) -> Result<()> {
     let fail = |why: String| {
         StorageError::invalid_input(format!(
             "step `{}` of `{}` has source `{}`: {why}",
             step.id,
             step.item,
-            step.source.unwrap_or_default()
+            step.source.as_deref().unwrap_or_default()
         ))
     };
-    match (&step.run, step.source) {
+    match (&step.run, step.source.as_deref()) {
         (StepBody::Documents(_), Some(source)) => {
             validate_collection(source).map_err(|e| fail(e.message().to_owned()))
         }
@@ -473,7 +766,7 @@ fn check_source(step: &Step, item: &Item) -> Result<()> {
 
 /// Stream and blob items declare no version: the chain only has to start at 1
 /// and not skip.
-fn check_unversioned_chain(name: &str, chain: &[&Step]) -> Result<()> {
+fn check_unversioned_chain(name: &str, chain: &[&PreparedStep]) -> Result<()> {
     let Some(first) = chain.first() else {
         return Ok(());
     };
@@ -496,7 +789,7 @@ fn check_unversioned_chain(name: &str, chain: &[&Step]) -> Result<()> {
     Ok(())
 }
 
-fn check_chain(name: &str, version: u32, chain: &[&Step]) -> Result<()> {
+fn check_chain(name: &str, version: u32, chain: &[&PreparedStep]) -> Result<()> {
     let (Some(first), Some(last)) = (chain.first(), chain.last()) else {
         return if version == 1 {
             Ok(())

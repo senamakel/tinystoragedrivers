@@ -2,7 +2,7 @@
 //!
 //! [`BusStorage`] implements the same ports as a native driver
 //! ([`StorageBackend`](tinystoragedrivers_core::StorageBackend),
-//! `DocumentStore`, `StreamStore`, `BlobStore`, `SecretStore`) by turning each
+//! `DocumentStore`, `StreamStore`, `BlobStore`, `QueueStore`, `SecretStore`) by turning each
 //! call into a typed `tinystoragedrivers-bus` message sent through a
 //! [`StorageTransport`]. A transport is the only thing that knows about
 //! `TinyBus`; this crate has no dependency on it.
@@ -39,7 +39,7 @@ mod loopback;
 mod server;
 mod transport;
 
-pub use client::{BusBlobs, BusDocuments, BusSecrets, BusStorage, BusStreams};
+pub use client::{BusBlobs, BusDocuments, BusQueues, BusSecrets, BusStorage, BusStreams};
 pub use loopback::Loopback;
 pub use server::StorageServer;
 pub use transport::{Admission, BlobBody, Object, StorageTransport, WireError};

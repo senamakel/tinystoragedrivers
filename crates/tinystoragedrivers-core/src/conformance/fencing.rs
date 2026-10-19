@@ -10,6 +10,7 @@ use crate::document::{CollectionSpec, Precondition, Query, WriteOp};
 use crate::error::{ErrorKind, Result};
 use crate::fence::Fence;
 use crate::filter::Filter;
+use crate::primitives::{self, Lease, Leases, RetryPolicy};
 use crate::scope::Scope;
 
 /// The names one run writes under.
@@ -125,6 +126,7 @@ pub(super) async fn run(backend: &dyn StorageBackend, single_scope: bool) {
     if backend.capabilities().contains(Capability::Ttl) {
         expired_guard(backend, &guard_scope, &guards).await;
     }
+    holder(backend, single_scope).await;
 }
 
 /// Every fenced write is refused and changes nothing; reads and declarations
@@ -496,4 +498,201 @@ async fn expired_guard(backend: &dyn StorageBackend, guard_scope: &Scope, guards
         ErrorKind::Fenced,
         "an expired guard",
     );
+}
+
+/// What the holder-fence checks share: the leases, and the data they fence.
+struct HolderRig<'a> {
+    backend: &'a dyn StorageBackend,
+    guard_scope: Scope,
+    guards: ScopedStorage,
+    leases: Leases,
+    owner: String,
+    coll: String,
+    stream: String,
+}
+
+/// The outcome of one fenced document put and stream append.
+type Writes = (Result<crate::Version>, Result<u64>);
+
+impl HolderRig<'_> {
+    /// A handle fenced by `lease`'s holder fence.
+    fn bind(&self, lease: &Lease) -> ScopedStorage {
+        ok(
+            self.backend
+                .for_scope_fenced(&Scope::local(), &lease.holder_fence(&self.guard_scope)),
+            "bind a holder fence",
+        )
+    }
+
+    /// A document put and a stream append through `fenced`.
+    async fn writes(&self, fenced: &ScopedStorage, id: &str) -> Writes {
+        let put = fenced
+            .documents()
+            .put(&self.coll, id, json!({"id": id}), Precondition::None)
+            .await;
+        let append = fenced.streams().append(&self.stream, json!(id)).await;
+        (put, append)
+    }
+
+    /// Acquire `key` for `holder`, which must be free.
+    async fn acquire(&self, key: &str, holder: &str) -> Lease {
+        ok(
+            self.leases.acquire(&self.owner, key, holder, 60_000).await,
+            "holder acquire",
+        )
+        .expect("a free lease is acquirable")
+    }
+
+    /// Release `key` held by `holder` at `lease`'s epoch.
+    async fn release(&self, key: &str, holder: &str, lease: &Lease) {
+        assert!(
+            ok(
+                self.leases
+                    .release(&self.owner, key, holder, lease.epoch)
+                    .await,
+                "holder release"
+            ),
+            "the holder releases its own tenure"
+        );
+    }
+
+    /// Overwrite the lease record `lease` fences on, as another actor would.
+    async fn rewrite_record(&self, lease: &Lease, holder: &str) {
+        let record = lease.holder_fence(&self.guard_scope);
+        ok(
+            self.guards
+                .documents()
+                .put(
+                    record.collection(),
+                    record.id(),
+                    json!({"holder": holder, "epoch": lease.epoch, "expires_ms": i64::MAX}),
+                    Precondition::None,
+                )
+                .await,
+            "rewrite the lease record",
+        );
+    }
+}
+
+/// Both writes of `outcome` were refused as fenced.
+fn writes_refused(outcome: Writes, check: &str) {
+    fails(outcome.0, ErrorKind::Fenced, &format!("{check}: put"));
+    fails(outcome.1, ErrorKind::Fenced, &format!("{check}: append"));
+}
+
+/// Both writes of `outcome` landed.
+fn writes_landed(outcome: Writes, check: &str) {
+    ok(outcome.0, &format!("{check}: put"));
+    ok(outcome.1, &format!("{check}: append"));
+}
+
+/// The compound fence of [`Lease::holder_fence`]: `epoch == e AND holder == h
+/// AND released absent`. A write fenced by a tenure that was taken over,
+/// released or compacted away is refused, which the epoch-only fence cannot
+/// say for a release.
+async fn holder(backend: &dyn StorageBackend, single_scope: bool) {
+    if !backend.capabilities().contains(Capability::Fencing) {
+        return;
+    }
+    let guard_scope = if single_scope {
+        Scope::local()
+    } else {
+        Scope::new("conformance-fence").expect("valid scope")
+    };
+    let guards = ok(backend.for_scope(&guard_scope), "holder guard scope");
+    ok(primitives::ensure(&guards).await, "holder primitives");
+    let rig = HolderRig {
+        backend,
+        guard_scope,
+        leases: Leases::new(guards.documents()).with_retry(RetryPolicy::default()),
+        guards,
+        owner: unique("holder_fence"),
+        coll: unique("holder_fenced"),
+        stream: unique("holder_fenced_stream"),
+    };
+    holder_takeover(&rig).await;
+    holder_release(&rig).await;
+    holder_compaction(&rig).await;
+    let plain = ok(backend.for_scope(&Scope::local()), "holder plain scope");
+    let landed = ok(
+        plain.documents().count(&rig.coll, &Filter::All).await,
+        "holder count",
+    );
+    assert_eq!(landed, 5, "only the permitted holder writes landed");
+}
+
+/// Another holder under the same epoch, then a takeover, cut the old holder off.
+async fn holder_takeover(rig: &HolderRig<'_>) {
+    let a = rig.acquire("takeover", "a").await;
+    let fenced_a = rig.bind(&a);
+    writes_landed(rig.writes(&fenced_a, "a1").await, "the holder writes");
+
+    // A record carrying the same epoch under another holder does not match.
+    rig.rewrite_record(&a, "z").await;
+    writes_refused(
+        rig.writes(&fenced_a, "a2").await,
+        "another holder at the same epoch",
+    );
+    rig.rewrite_record(&a, "a").await;
+    writes_landed(
+        rig.writes(&fenced_a, "a3").await,
+        "the restored holder writes",
+    );
+
+    rig.release("takeover", "a", &a).await;
+    writes_refused(rig.writes(&fenced_a, "a4").await, "a released tenure");
+    let b = ok(
+        rig.leases
+            .acquire(&rig.owner, "takeover", "b", 60_000)
+            .await,
+        "acquire b",
+    )
+    .expect("a released lease is acquirable");
+    assert!(b.epoch > a.epoch, "a takeover raises the epoch");
+    writes_refused(rig.writes(&rig.bind(&a), "a5").await, "a taken-over tenure");
+    writes_landed(
+        rig.writes(&rig.bind(&b), "b1").await,
+        "the new holder writes",
+    );
+}
+
+/// A release alone, with no successor: the epoch is unchanged, so the
+/// epoch-only fence would still hold, and the holder fence does not.
+async fn holder_release(rig: &HolderRig<'_>) {
+    let c = rig.acquire("release", "c").await;
+    let fenced_c = rig.bind(&c);
+    let epoch_only = ok(
+        rig.backend
+            .for_scope_fenced(&Scope::local(), &c.fence(&rig.guard_scope)),
+        "bind an epoch fence",
+    );
+    rig.release("release", "c", &c).await;
+    writes_refused(
+        rig.writes(&fenced_c, "c1").await,
+        "a released tenure with no successor",
+    );
+    ok(
+        rig.writes(&epoch_only, "c2").await.0,
+        "the epoch-only fence cannot see a release",
+    );
+}
+
+/// Compaction removes the record: the fence has nothing to match.
+async fn holder_compaction(rig: &HolderRig<'_>) {
+    let d = rig.acquire("compact", "d").await;
+    let fenced_d = rig.bind(&d);
+    ok(
+        rig.writes(&fenced_d, "d1").await.0,
+        "the holder writes before compaction",
+    );
+    assert!(
+        ok(
+            rig.leases
+                .compact(&rig.owner, "compact", "d", d.epoch)
+                .await,
+            "compact d"
+        ),
+        "compaction removes the holder's own tenure"
+    );
+    writes_refused(rig.writes(&fenced_d, "d2").await, "a compacted tenure");
 }

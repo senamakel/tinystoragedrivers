@@ -464,7 +464,9 @@ impl StorageBackend for MongoStorage {
             .with(Capability::CollectionValidation)
             .with(Capability::BlobTtl)
             .with(Capability::ScopeEnumeration)
-            .with(Capability::StreamSeal);
+            .with(Capability::StreamSeal)
+            .with(Capability::SharedAcrossProcesses)
+            .with(Capability::CrossProcessCas);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)
         } else {
@@ -479,6 +481,14 @@ impl StorageBackend for MongoStorage {
         } else {
             base
         }
+    }
+
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        self.shared.transactions
+    }
+
+    fn supports_scope_purge_generation_validation(&self) -> bool {
+        self.shared.transactions
     }
 
     async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
