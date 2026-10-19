@@ -19,6 +19,75 @@ async fn passes_the_conformance_suite_on_a_current_thread_runtime() {
     conformance::run(&FileStorage::open(dir.path()).unwrap(), false).await;
 }
 
+#[tokio::test]
+async fn quiescent_purge_revokes_old_handles_and_replays_without_erasing_replacements() {
+    use tinystoragedrivers_core::{PurgeMode, PurgeRequest, ScopeGeneration};
+    let dir = tempfile::tempdir().unwrap();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    let target = Scope::new("purge-target").unwrap();
+    let sibling = Scope::new("purge-sibling").unwrap();
+    let old = storage.for_scope(&target).unwrap();
+    let sibling_handle = storage.for_scope(&sibling).unwrap();
+    old.blobs().put("old", b"old".to_vec(), None).await.unwrap();
+    sibling_handle
+        .blobs()
+        .put("keep", b"keep".to_vec(), None)
+        .await
+        .unwrap();
+    let request = PurgeRequest {
+        operation_id: "reset-1".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    let receipt = old.purge(&request).await.unwrap();
+    assert_eq!(receipt.generation, ScopeGeneration(1));
+    assert_eq!(
+        old.purge_status("reset-1").await.unwrap(),
+        Some(receipt.clone())
+    );
+    assert_eq!(
+        old.blobs().get("old").await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        old.streams().len("old").await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    let current = storage
+        .for_scope_generation(&target, receipt.generation)
+        .unwrap();
+    assert!(current.blobs().get("old").await.unwrap().is_none());
+    current
+        .blobs()
+        .put("new", b"new".to_vec(), None)
+        .await
+        .unwrap();
+    assert_eq!(old.purge(&request).await.unwrap(), receipt);
+    assert_eq!(
+        current.blobs().get("new").await.unwrap().unwrap().bytes,
+        b"new"
+    );
+    assert_eq!(
+        FileStorage::open(dir.path())
+            .unwrap()
+            .for_scope(&target)
+            .unwrap()
+            .purge_status("reset-1")
+            .await
+            .unwrap(),
+        Some(receipt.clone())
+    );
+    assert_eq!(
+        sibling_handle
+            .blobs()
+            .get("keep")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"keep"
+    );
+}
+
 #[test]
 fn works_without_a_tokio_runtime() {
     let dir = tempfile::tempdir().unwrap();

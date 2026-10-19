@@ -294,6 +294,15 @@ backend and external owner stage completes.
 Unknown adapters return `Unsupported(ScopePurge)` before erasing data.
 `ScopePurge` advertises native scope admission and reset support;
 `AtomicScopePurge` additionally promises one atomic all-port operation.
+A custom `ScopePurge` implementation must explicitly opt in to generation
+validation before CompositeStorage can rely on its generation check. Full
+binding validation is a separate opt-in that also checks a native writer fence.
+This distinction lets composite blob reads reject retired generations while
+retaining the existing fenced-read contract; writes still enforce their fence.
+Both trait defaults are unsupported for compatibility with older custom ports;
+advertising purge alone does not prove that a handle rejects retired
+generations. A composite refuses purge capability if its record or blob half
+cannot validate the required generation binding.
 A stable operation identity makes retries idempotent and its receipt survives
 the erased data. `PurgeMode::Quiescent` is a trusted host assertion that every
 writer has been stopped and drained; it is never a model-selectable option.
@@ -313,8 +322,10 @@ Generation zero is the legacy handle default. On memory and SQLite, every data
 read and mutation, including empty operations and schema
 declarations, validates its issued generation under the same native
 lock/transaction as the data access. SQLite reads pin generation and data in
-one deferred read transaction. Retired handles cannot read replacement data. Old handles therefore fail
-`Fenced` after reset, even if the operation would otherwise change nothing.
+one deferred read transaction. Retired handles cannot read replacement data.
+Revoked generations fail with `ScopeGenerationRejected`, even if the operation
+would otherwise change nothing; an actual stale native lease guard continues
+to fail with `Fenced`.
 Hosts persist the returned generation in authoritative profile state before
 reopening through `for_scope_generation` or
 `for_scope_fenced_generation`. Generations come from trusted
@@ -326,9 +337,26 @@ revive the old generation.
 A fenced purge checks and holds the native guard through the operation. The
 guard's scope must differ from the erased scope, including when the guard is
 in another scope. A stale guard changes nothing.
-Memory and SQLite support this natively. File, Mongo GridFS, S3 and composite
-storage do not currently advertise atomic all-port purge; they must not turn
-an unsupported native guarantee into an unfenced best-effort success.
+Memory and SQLite support this natively. File purge is durable but staged
+across filesystem entries and makes no crash-atomicity claim. CompositeStorage
+uses a durable coordinator in the record backend and stages records and blob
+deletion separately; it never advertises AtomicScopePurge. Its coordinator
+collection must already be present and compatible when the record backend is
+opened through ExistingSchema. Trusted bootstrap prepares that internal
+collection; restricted use validates it and refuses if it is missing, without
+creating or repairing schema. Nested compositions reserve deterministic
+internal coordinator scopes, which public scope constructors and enumeration
+hide.
+
+S3 advertises ScopePurge only when a signer is installed. It enumerates every
+object version and delete marker beneath the exact generation prefix and
+deletes each VersionId. AWS permissions must include `s3:ListBucketVersions`
+for the bucket and `s3:DeleteObjectVersion` for the scoped object keys. A
+signer-less S3 backend or a custom blob driver without generation isolation
+withholds the composite capability before record or blob mutation. File,
+Mongo GridFS, S3 and composite storage do not advertise atomic all-port purge;
+they must not turn an unsupported native guarantee into an unfenced
+best-effort success.
 
 Reset invalidates application query caches, old version preconditions, stream
 cursors, import receipts and scoped secret providers. Shared declaration caches

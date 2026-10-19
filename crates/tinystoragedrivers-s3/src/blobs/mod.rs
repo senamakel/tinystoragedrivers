@@ -15,8 +15,8 @@ use object_store::{
 };
 use tinystoragedrivers_core::{
     Blob, BlobBackend, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability,
-    ErrorKind, Result, Scope, StorageError, async_trait, validate_blob_key, validate_user_blob_key,
-    validate_user_blob_prefix,
+    ErrorKind, Result, Scope, ScopeGeneration, StorageError, async_trait, validate_blob_key,
+    validate_user_blob_key, validate_user_blob_prefix,
 };
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
@@ -27,6 +27,20 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// User metadata holding a blob's expiry as epoch milliseconds. S3 prefixes it
 /// with `x-amz-meta-` on the wire.
 const EXPIRES_AT: &str = "tsd-expires-at-ms";
+mod versions;
+
+fn hex_scope(scope: &Scope) -> String {
+    scope
+        .as_str()
+        .bytes()
+        .flat_map(|byte| {
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 15)]),
+            ]
+        })
+        .collect()
+}
 
 /// Milliseconds since the Unix epoch.
 fn system_clock() -> u64 {
@@ -141,6 +155,12 @@ impl S3Config {
 }
 
 /// One connected S3 client shared by all tenant blob handles.
+///
+/// Generation zero stays in the legacy `scopes/<hex-scope>/` root. Purged
+/// generations use the sibling `scope-generations/<hex-scope>/<generation>/`
+/// root, so a valid legacy blob key cannot overlap a later generation. Scope
+/// enumeration covers both roots; a write already in flight during purge can
+/// leave an inaccessible old-generation object for a later orphan sweep.
 #[derive(Debug)]
 pub struct S3Storage {
     store: Arc<dyn ObjectStore>,
@@ -179,26 +199,129 @@ impl S3Storage {
             prefix: prefix.trim_matches('/').to_owned(),
         })
     }
+
+    fn scoped_prefix(&self, scope: &Scope, generation: ScopeGeneration) -> String {
+        let tenant = hex_scope(scope);
+        let root = if self.prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.prefix)
+        };
+        // Keep generation roots beside the legacy root. Nesting them below
+        // `scopes/<scope>/` would collide with legal legacy keys such as g/1/x.
+        if generation == ScopeGeneration(0) {
+            format!("{root}scopes/{tenant}/")
+        } else {
+            format!("{root}scope-generations/{tenant}/{}/", generation.0)
+        }
+    }
+
+    async fn purge_prefix(&self, prefix: &str) -> Result<()> {
+        versions::purge_prefix(self.signer.as_ref(), prefix).await
+    }
 }
 
+#[async_trait]
 impl BlobBackend for S3Storage {
     fn capabilities(&self) -> Capabilities {
-        let caps = Capabilities::none()
+        let mut caps = Capabilities::none()
             .with(Capability::StreamingBlobs)
             .with(Capability::BlobTtl);
         if self.signer.is_some() {
-            caps.with(Capability::PresignedUrls)
-        } else {
-            caps
+            caps = caps
+                .with(Capability::PresignedUrls)
+                .with(Capability::ScopePurge);
         }
+        caps.with(Capability::ScopeEnumeration)
     }
     fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
-        Ok(Arc::new(S3Blobs::with_store(
+        self.for_scope_generation(scope, ScopeGeneration(0))
+    }
+    fn supports_generation_purge(&self) -> bool {
+        self.signer.is_some()
+    }
+    fn for_scope_generation(
+        &self,
+        scope: &Scope,
+        generation: ScopeGeneration,
+    ) -> Result<Arc<dyn BlobStore>> {
+        Ok(Arc::new(S3Blobs::with_prefix(
             self.store.clone(),
             self.signer.clone(),
-            &self.prefix,
-            scope,
+            self.scoped_prefix(scope, generation),
         )?))
+    }
+    async fn purge_scope(&self, scope: &Scope) -> Result<()> {
+        let tenant = hex_scope(scope);
+        let root = if self.prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.prefix)
+        };
+        self.purge_prefix(&format!("{root}scopes/{tenant}/"))
+            .await?;
+        self.purge_prefix(&format!("{root}scope-generations/{tenant}/"))
+            .await
+    }
+    async fn purge_scope_generation(
+        &self,
+        scope: &Scope,
+        generation: ScopeGeneration,
+    ) -> Result<()> {
+        let prefix = self.scoped_prefix(scope, generation);
+        self.purge_prefix(&prefix).await
+    }
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        let mut found = std::collections::BTreeSet::new();
+        let base = if self.prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.prefix)
+        };
+        for root in [
+            format!("{base}scopes/"),
+            format!("{base}scope-generations/"),
+        ] {
+            let keys = if self.signer.is_some() {
+                versions::list_keys(self.signer.as_ref(), &root).await?
+            } else {
+                let path = Path::parse(root.trim_end_matches('/'))
+                    .map_err(|_| StorageError::invalid_input("invalid scope prefix"))?;
+                let mut objects = self.store.list(Some(&path));
+                let mut keys = Vec::new();
+                while let Some(object) = objects.try_next().await.map_err(map_error)? {
+                    keys.push(object.location.to_string());
+                }
+                keys
+            };
+            for key in keys {
+                let Some(rest) = key.strip_prefix(&root) else {
+                    continue;
+                };
+                let Some((encoded, _)) = rest.split_once('/') else {
+                    continue;
+                };
+                if encoded.len() % 2 != 0 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    continue;
+                }
+                let Ok(bytes) = (0..encoded.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&encoded[i..i + 2], 16))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                else {
+                    continue;
+                };
+                let Ok(text) = String::from_utf8(bytes) else {
+                    continue;
+                };
+                if text.starts_with(prefix)
+                    && let Ok(scope) = Scope::new(text)
+                {
+                    found.insert(scope);
+                }
+            }
+        }
+        Ok(found.into_iter().collect())
     }
 }
 
@@ -227,30 +350,27 @@ impl S3Blobs {
         prefix: &str,
         scope: &Scope,
     ) -> Result<Self> {
-        let prefix = prefix.trim_matches('/');
-        if !prefix.is_empty() {
-            validate_blob_key(prefix)?;
+        let root = prefix.trim_matches('/');
+        if !root.is_empty() {
+            validate_blob_key(root)?;
         }
-        // Hex encodes every UTF-8 byte, including slash, percent and colon. The
-        // fixed separators therefore cannot be introduced by a tenant name.
-        let tenant: String = scope
-            .as_str()
-            .bytes()
-            .flat_map(|byte| {
-                [
-                    char::from(HEX[usize::from(byte >> 4)]),
-                    char::from(HEX[usize::from(byte & 15)]),
-                ]
-            })
-            .collect();
         let prefix = format!(
-            "{}scopes/{tenant}/",
-            if prefix.is_empty() {
+            "{}scopes/{}/",
+            if root.is_empty() {
                 String::new()
             } else {
-                format!("{prefix}/")
-            }
+                format!("{root}/")
+            },
+            hex_scope(scope)
         );
+        Self::with_prefix(store, signer, prefix)
+    }
+
+    fn with_prefix(
+        store: Arc<dyn ObjectStore>,
+        signer: Option<Arc<dyn Signer>>,
+        prefix: String,
+    ) -> Result<Self> {
         if prefix.len() >= 1024 {
             return Err(StorageError::invalid_input(
                 "s3 tenant prefix leaves no room for a blob key",

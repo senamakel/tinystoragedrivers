@@ -21,6 +21,31 @@ impl std::fmt::Debug for MemoryPurge {
 
 #[async_trait]
 impl ScopePurge for MemoryPurge {
+    fn supports_binding_validation(&self) -> bool {
+        true
+    }
+
+    fn supports_generation_validation(&self) -> bool {
+        true
+    }
+
+    async fn validate_generation(&self) -> Result<()> {
+        self.db
+            .lock()?
+            .check_generation(self.scope.as_str(), self.generation)
+    }
+
+    async fn validate_binding(&self) -> Result<()> {
+        let state = self.db.lock()?;
+        let now = if self.fence.is_some() {
+            (self.clock)()
+        } else {
+            0
+        };
+        MemoryDb::guard(&state, self.fence.as_deref(), now)?;
+        state.check_generation(self.scope.as_str(), self.generation)
+    }
+
     async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
         request.validate()?;
         if self
