@@ -65,4 +65,4 @@ mod scopes;
 mod streams;
 mod translate;
 
-pub use backend::MongoStorage;
+pub use backend::{MongoOpenOptions, MongoStorage};

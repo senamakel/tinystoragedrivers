@@ -127,7 +127,9 @@ async fn live_required_capabilities_open_on_a_replica_set() {
         .ok()
         .filter(|url| !url.is_empty())
     else {
-        eprintln!("live_required_capabilities_open_on_a_replica_set: TSD_MONGO_URL is not set; skipping");
+        eprintln!(
+            "live_required_capabilities_open_on_a_replica_set: TSD_MONGO_URL is not set; skipping"
+        );
         return;
     };
     let backend = MongoStorage::connect_with_options(
@@ -149,7 +151,9 @@ async fn live_standalone_reports_reduced_capabilities_and_refuses_requirements()
         .ok()
         .filter(|url| !url.is_empty())
     else {
-        eprintln!("live_standalone_reports_reduced_capabilities_and_refuses_requirements: TSD_MONGO_STANDALONE_URL is not set; skipping");
+        eprintln!(
+            "live_standalone_reports_reduced_capabilities_and_refuses_requirements: TSD_MONGO_STANDALONE_URL is not set; skipping"
+        );
         return;
     };
     let backend = MongoStorage::connect(&url, "tsd_test").await.unwrap();

@@ -67,13 +67,28 @@ fn mongo_url_options_are_removed_without_disturbing_driver_options() {
     else {
         panic!("expected a MongoDB configuration")
     };
-    assert_eq!(uri, "mongodb://user:secret@host/db?retryWrites=true&appName=tsd");
+    assert_eq!(
+        uri,
+        "mongodb://user:secret@host/db?retryWrites=true&appName=tsd"
+    );
     assert!(*require_fencing);
     assert!(*require_transactions);
     assert_eq!(
         config.to_string(),
         "mongodb://user:***@host/db?retryWrites=true&appName=tsd&require_fencing=true&require_transactions=true"
     );
+
+    let options_only = StorageConfig::parse("mongodb://host/db?require_fencing=false").unwrap();
+    let StorageConfig::MongoDb {
+        uri,
+        require_fencing,
+        ..
+    } = options_only
+    else {
+        panic!("expected a MongoDB configuration")
+    };
+    assert_eq!(uri, "mongodb://host/db");
+    assert!(!require_fencing);
 }
 
 #[test]
@@ -254,18 +269,25 @@ async fn live_mongodb_url_enforces_required_capabilities() {
         .ok()
         .filter(|uri| !uri.is_empty())
     else {
-        eprintln!("live_mongodb_url_enforces_required_capabilities: TSD_MONGO_URL is not set; skipping");
+        eprintln!(
+            "live_mongodb_url_enforces_required_capabilities: TSD_MONGO_URL is not set; skipping"
+        );
         return;
     };
     let separator = if uri.contains('?') { '&' } else { '?' };
-    let url = format!(
-        "{uri}{separator}require_fencing=true&require_transactions=true&retryWrites=true"
-    );
+    let url =
+        format!("{uri}{separator}require_fencing=true&require_transactions=true&retryWrites=true");
     let backend = open(&StorageConfig::parse(&url).unwrap()).await.unwrap();
-    assert!(backend.capabilities().contains(tinystoragedrivers_core::Capability::Fencing));
-    assert!(backend
-        .capabilities()
-        .contains(tinystoragedrivers_core::Capability::Transactions));
+    assert!(
+        backend
+            .capabilities()
+            .contains(tinystoragedrivers_core::Capability::Fencing)
+    );
+    assert!(
+        backend
+            .capabilities()
+            .contains(tinystoragedrivers_core::Capability::Transactions)
+    );
 }
 
 #[cfg(feature = "mongodb")]
@@ -275,12 +297,17 @@ async fn live_mongodb_url_refuses_missing_standalone_requirements() {
         .ok()
         .filter(|uri| !uri.is_empty())
     else {
-        eprintln!("live_mongodb_url_refuses_missing_standalone_requirements: TSD_MONGO_STANDALONE_URL is not set; skipping");
+        eprintln!(
+            "live_mongodb_url_refuses_missing_standalone_requirements: TSD_MONGO_STANDALONE_URL is not set; skipping"
+        );
         return;
     };
     let separator = if uri.contains('?') { '&' } else { '?' };
     for (requirement, capability) in [
-        ("require_fencing=true", tinystoragedrivers_core::Capability::Fencing),
+        (
+            "require_fencing=true",
+            tinystoragedrivers_core::Capability::Fencing,
+        ),
         (
             "require_transactions=true",
             tinystoragedrivers_core::Capability::Transactions,

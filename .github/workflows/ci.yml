@@ -277,6 +277,29 @@ jobs:
       - name: Test the facade's mongodb feature
         run: cargo test -p tinystoragedrivers --features mongodb
 
+  mongodb-standalone:
+    name: MongoDB standalone capabilities
+    runs-on: ubuntu-latest
+    env:
+      TSD_MONGO_STANDALONE_URL: mongodb://localhost:27018/tsd_test?directConnection=true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Start standalone MongoDB
+        run: .github/scripts/start-mongo-standalone.sh 27018
+
+      - name: Assert standalone capabilities and typed open refusals
+        run: cargo test --locked -p tinystoragedrivers-mongodb --all-features backend::tests::live_standalone_reports_reduced_capabilities_and_refuses_requirements -- --exact
+
+      - name: Assert MongoDB URL capability requirements
+        run: cargo test --locked -p tinystoragedrivers --features mongodb config::tests::live_mongodb_url_refuses_missing_standalone_requirements -- --exact
+
   s3:
     name: S3-compatible blob driver
     runs-on: ubuntu-latest
