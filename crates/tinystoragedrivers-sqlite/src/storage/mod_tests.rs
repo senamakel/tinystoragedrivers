@@ -521,6 +521,106 @@ async fn historical_reset_receipts_survive_reopen_in_each_path_layout() {
 }
 
 #[tokio::test]
+async fn purge_refuses_a_fence_guard_inside_the_scope_it_would_erase() {
+    use tinystoragedrivers_core::{ErrorKind, Fence, PurgeMode, PurgeRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("self-guarded-purge").unwrap();
+    let plain = storage.for_scope(&scope).unwrap();
+    plain
+        .documents()
+        .put(
+            "records",
+            "keep",
+            json!({"alive": true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    let fence = Fence::epoch(scope.clone(), "leases", "holder", "epoch", 1);
+    let fenced = storage.for_scope_fenced(&scope, &fence).unwrap();
+
+    assert_eq!(
+        fenced
+            .purge(&PurgeRequest {
+                operation_id: "self-guarded-reset".into(),
+                mode: PurgeMode::Atomic,
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert!(
+        plain
+            .documents()
+            .get("records", "keep")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn purge_refuses_generation_overflow_without_erasing_current_data() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest, ScopeGeneration};
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("overflow-reset").unwrap();
+    let base = storage.for_scope(&scope).unwrap();
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} (scope, generation, operation) VALUES (?1, ?2, ?3)",
+                    crate::sql::ident(&storage.tables.admissions)
+                ),
+                rusqlite::params![scope.as_str(), i64::MAX, "near_overflow"],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let current = storage
+        .for_scope_generation(&scope, ScopeGeneration(i64::MAX as u64))
+        .unwrap();
+    current
+        .documents()
+        .put(
+            "records",
+            "keep",
+            json!({"alive": true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        current
+            .purge(&PurgeRequest {
+                operation_id: "overflow-reset".into(),
+                mode: PurgeMode::Atomic,
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Backend
+    );
+    assert!(
+        current
+            .documents()
+            .get("records", "keep")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    drop(base);
+}
+
+#[tokio::test]
 async fn upgrading_receipt_schema_preserves_the_last_completed_reset() {
     use tinystoragedrivers_core::{PurgeMode, PurgeRequest};
     let dir = tempfile::tempdir().unwrap();
@@ -846,6 +946,38 @@ async fn corrupt_or_exhausted_scope_generation_never_erases_data() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn sqlite_purge_validators_track_current_and_revoked_generations() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("explicit-purge-validation").unwrap();
+    let old = storage.for_scope(&scope).unwrap();
+    old.validate_purge_generation().await.unwrap();
+    old.validate_purge_binding().await.unwrap();
+    let receipt = old
+        .purge(&PurgeRequest {
+            operation_id: "validate-reset".into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        old.validate_purge_generation().await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        old.validate_purge_binding().await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    let current = storage
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    current.validate_purge_generation().await.unwrap();
+    current.validate_purge_binding().await.unwrap();
 }
 
 #[tokio::test]
