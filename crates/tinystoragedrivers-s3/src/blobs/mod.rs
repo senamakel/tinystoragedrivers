@@ -724,6 +724,11 @@ impl BlobStore for S3Blobs {
                 written_at_ms: written_at(&result.attributes),
             });
         }
+        if has_more && items.is_empty() {
+            return Err(StorageError::backend(
+                "blob listing changed while building a sweep page",
+            ));
+        }
         let next_after = if has_more {
             items.last().map(|item| item.meta.key.clone())
         } else {
