@@ -142,6 +142,33 @@ fn default_policy_is_read_only_and_product_reservations_are_host_supplied() {
 }
 
 #[test]
+fn secret_presence_reports_only_grants_that_include_secrets() {
+    let empty = StorageGrant::from_needs(StorageNeeds::default(), &GrantPolicy::default()).unwrap();
+    assert!(!empty.has_secrets());
+
+    let collections = [collection()];
+    let streams = ["events/"];
+    let blobs = ["attachments/"];
+    for needs in [
+        StorageNeeds {
+            collections: &collections,
+            ..StorageNeeds::default()
+        },
+        StorageNeeds {
+            stream_prefixes: &streams,
+            ..StorageNeeds::default()
+        },
+        StorageNeeds {
+            blob_prefixes: &blobs,
+            ..StorageNeeds::default()
+        },
+    ] {
+        let grant = StorageGrant::from_needs(needs, &GrantPolicy::default()).unwrap();
+        assert!(!grant.has_secrets());
+    }
+}
+
+#[test]
 fn rejects_reserved_names_duplicate_specs_and_malformed_prefixes() {
     for name in ["_tsd_internal", "tsd.migrations"] {
         let specs = [CollectionSpec {
