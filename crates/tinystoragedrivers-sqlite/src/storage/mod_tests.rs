@@ -200,13 +200,13 @@ async fn orphan_sweep_reclaims_expired_rows_without_counting_them_as_live_delete
         .await
         .unwrap();
     assert_eq!(removed, 0);
-    assert!(
+    assert_eq!(
         blobs
             .list_sweep_page("sweep/", None, 10)
             .await
             .unwrap()
-            .items
-            .is_empty()
+            .items,
+        [] as [tinystoragedrivers_core::BlobSweepEntry; 0]
     );
 }
 

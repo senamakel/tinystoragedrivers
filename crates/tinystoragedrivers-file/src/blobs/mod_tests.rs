@@ -1,6 +1,5 @@
 //! Blob edge cases: sidecars without bytes, collisions, unreadable data.
 
-use serde_json::json;
 use tinystoragedrivers_core::{ErrorKind, StorageBackend};
 
 use super::*;
