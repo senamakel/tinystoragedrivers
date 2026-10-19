@@ -85,6 +85,7 @@ impl ScopePurge for MemoryPurge {
         state.tombstones.retain(|key, _| retain(key));
         state.streams.retain(|key, _| retain(key));
         state.blobs.retain(|key, _| retain(key));
+        state.blob_written_ms.retain(|key, _| retain(key));
         state.admissions.insert(
             self.scope.as_str().to_owned(),
             (generation, request.operation_id.clone()),

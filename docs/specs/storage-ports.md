@@ -174,6 +174,16 @@ removes everything below a directory (the root is refused). They are provided
 methods built on `list`/`put`/`delete`, so every driver, the S3 driver and the
 bus client answer them identically.
 
+**Orphan sweep.** Drivers may report `BlobSweep` when they provide bounded,
+key-ordered physical metadata pages with trustworthy write times, including
+objects hidden from reads by expiry. `sweep_unreferenced(prefix,
+older_than, is_referenced)` uses an exclusive epoch-millisecond cutoff;
+missing ages are retained. It stops on listing, reference-check or delete
+errors, while earlier deletions remain applied. The reference check and delete
+are not atomic, so the host must coordinate writers and cleanup for immutable
+keys and choose a grace period longer than its maximum write-to-reference
+delay. See the [blob port notes](../../crates/tinystoragedrivers-core/src/blob/README.md).
+
 ### `StorageBackend` and `Scope`
 
 - `for_scope(scope)` returns handles bound to one tenant. No port method takes

@@ -456,6 +456,7 @@ async fn fenced_composite_blobs_allow_reads_but_refuse_every_mutation() {
     let blobs = FencedBlobs(scope.blobs().clone());
     assert_eq!(blobs.max_key_len(), scope.blobs().max_key_len());
     assert!(!blobs.capabilities().contains(Capability::PresignedUrls));
+    assert!(!blobs.capabilities().contains(Capability::BlobSweep));
     assert_eq!(
         blobs.get("existing").await.unwrap().unwrap().bytes,
         [1, 2, 3]

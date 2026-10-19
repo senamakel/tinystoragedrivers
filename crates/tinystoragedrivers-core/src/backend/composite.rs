@@ -220,11 +220,13 @@ impl StorageBackend for CompositeStorage {
             .without(Capability::ScopeEnumeration)
             .without(Capability::PresignedUrls)
             .without(Capability::StreamingBlobs)
-            .without(Capability::BlobTtl);
+            .without(Capability::BlobTtl)
+            .without(Capability::BlobSweep);
         for cap in [
             Capability::StreamingBlobs,
             Capability::PresignedUrls,
             Capability::BlobTtl,
+            Capability::BlobSweep,
         ] {
             if self.blobs.capabilities().contains(cap) {
                 caps = caps.with(cap);

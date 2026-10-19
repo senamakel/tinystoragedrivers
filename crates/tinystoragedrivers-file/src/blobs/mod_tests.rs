@@ -1,6 +1,5 @@
 //! Blob edge cases: sidecars without bytes, collisions, unreadable data.
 
-use serde_json::json;
 use tinystoragedrivers_core::{ErrorKind, StorageBackend};
 
 use super::*;
@@ -29,10 +28,32 @@ async fn stores_the_bytes_verbatim_with_a_sidecar() {
     let (data, meta) = files(&storage, "docs/Report.PDF");
     assert_eq!(std::fs::read(&data).unwrap(), b"%PDF");
     let sidecar: serde_json::Value = serde_json::from_slice(&std::fs::read(meta).unwrap()).unwrap();
-    assert_eq!(
-        sidecar,
-        json!({"key": "docs/Report.PDF", "content_type": "application/pdf"})
-    );
+    assert_eq!(sidecar["key"], "docs/Report.PDF");
+    assert_eq!(sidecar["content_type"], "application/pdf");
+    assert!(sidecar["written_at_ms"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn legacy_sidecars_without_write_time_are_retained_by_orphan_cleanup() {
+    let (_dir, storage, blobs) = open();
+    blobs.put("legacy/blob", vec![1], None).await.unwrap();
+    let (_, sidecar_path) = files(&storage, "legacy/blob");
+    let mut sidecar: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap()).unwrap();
+    sidecar.as_object_mut().unwrap().remove("written_at_ms");
+    std::fs::write(&sidecar_path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+
+    let removed = tinystoragedrivers_core::sweep_unreferenced(
+        blobs.as_ref(),
+        "legacy/",
+        u64::MAX,
+        |_| async { Ok(false) },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(removed, 0);
+    assert!(blobs.head("legacy/blob").await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -97,6 +118,7 @@ fn a_missing_data_file_has_no_meta() {
         key: "k".into(),
         content_type: None,
         expires_at_ms: None,
+        written_at_ms: None,
     };
     assert!(
         meta(&dir.path().join("missing"), sidecar.clone())
@@ -160,6 +182,7 @@ async fn an_expiring_blob_records_its_deadline_and_vanishes_at_it() {
     let sidecar: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
     assert_eq!(sidecar["expires_at_ms"], 10_250);
+    assert_eq!(sidecar["written_at_ms"], 10_000);
 
     now.store(10_249, Ordering::SeqCst);
     assert_eq!(blobs.get("k").await.unwrap().unwrap().bytes, [1, 2, 3]);

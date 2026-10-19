@@ -9,7 +9,7 @@
 //! docs(scope, coll, id, version, schema, created_ms, updated_ms, expires_ms, deleted, body)
 //! doc_fields(scope, coll, id, path, kind, value)    declared fields, see crate::fields
 //! streams(scope, name, seq, body)            stream_heads(scope, name, base, len, sealed)
-//! blobs(scope, key, content_type, size, sha256, expires_ms, bytes)
+//! blobs(scope, key, content_type, size, sha256, expires_ms, written_ms, bytes)
 //! fts                                         FTS5, searchable collections only
 //! meta(key, value)                            `layout` = 2
 //! _tsd_collections, _tsd_scope_admissions, _tsd_purge_receipts
@@ -222,6 +222,7 @@ impl Tables {
                  size INTEGER NOT NULL,
                  sha256 BLOB NOT NULL,
                  expires_ms INTEGER,
+                 written_ms INTEGER,
                  bytes BLOB NOT NULL,
                  PRIMARY KEY (scope, key)
              ) WITHOUT ROWID"
@@ -353,6 +354,13 @@ impl Tables {
     /// Indexes that live beside the tables rather than in a collection spec.
     fn finish(&self, conn: &Connection) -> Result<()> {
         self.add_head_times(conn)?;
+        if !upgrade::has_column(conn, &self.blobs, "written_ms")? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {} ADD COLUMN written_ms INTEGER",
+                ident(&self.blobs)
+            ))
+            .map_err(during("add blob write times"))?;
+        }
         // Lets a lifetime write find lapsed blobs without reading every one.
         conn.execute_batch(&format!(
             "CREATE INDEX IF NOT EXISTS {} ON {} (expires_ms) WHERE expires_ms IS NOT NULL",
@@ -403,7 +411,11 @@ impl Tables {
                 .map_err(during("inspect existing schema"))?;
             let stored =
                 stored.ok_or_else(|| StorageError::not_found("driver table does not exist"))?;
-            if normalize(&stored) != normalize(&expected) {
+            let legacy_blobs = name == self.blobs
+                && !upgrade::has_column(conn, &self.blobs, "written_ms")?
+                && normalize(&stored).replace("WRITTEN_MSINTEGER,", "")
+                    == normalize(&expected).replace("WRITTEN_MSINTEGER,", "");
+            if normalize(&stored) != normalize(&expected) && !legacy_blobs {
                 return Err(StorageError::invalid_input(
                     "existing driver table has incompatible schema",
                 ));
@@ -415,6 +427,10 @@ impl Tables {
                 "existing driver tables are not layout 2",
             )),
         }
+    }
+
+    pub(crate) fn blob_write_times(&self, conn: &Connection) -> Result<bool> {
+        upgrade::has_column(conn, &self.blobs, "written_ms")
     }
 }
 

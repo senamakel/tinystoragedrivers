@@ -2,6 +2,51 @@
 
 use super::*;
 
+#[derive(Debug)]
+struct TestSweepListing {
+    error: bool,
+    items: Vec<BlobSweepEntry>,
+}
+
+#[async_trait::async_trait]
+impl BlobStore for TestSweepListing {
+    async fn put(&self, _: &str, _: Vec<u8>, _: Option<&str>) -> Result<BlobMeta> {
+        Err(StorageError::unsupported(Capability::BlobSweep, "unused"))
+    }
+
+    async fn get(&self, _: &str) -> Result<Option<Blob>> {
+        Ok(None)
+    }
+
+    async fn get_range(&self, _: &str, _: Range<u64>) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    async fn head(&self, _: &str) -> Result<Option<BlobMeta>> {
+        Ok(None)
+    }
+
+    async fn delete(&self, _: &str) -> Result<bool> {
+        Err(StorageError::backend(
+            "unknown-age item must not be deleted",
+        ))
+    }
+
+    async fn list(&self, _: &str) -> Result<Vec<BlobMeta>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_sweep_page(&self, _: &str, _: Option<&str>, _: usize) -> Result<BlobSweepPage> {
+        if self.error {
+            return Err(StorageError::backend("sweep listing failed"));
+        }
+        Ok(BlobSweepPage {
+            items: self.items.clone(),
+            next_after: None,
+        })
+    }
+}
+
 #[test]
 fn keys_validate() {
     assert!(validate_blob_key("uploads/2026/a.png").is_ok());
@@ -91,5 +136,184 @@ async fn default_streaming_publishes_exact_bytes_and_reads_missing_as_absent() {
             .unwrap_err()
             .kind(),
         crate::ErrorKind::Unsupported(Capability::PresignedUrls)
+    );
+}
+
+#[tokio::test]
+async fn unreferenced_sweep_observes_cutoff_reference_and_prefix() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::{MemoryStorage, Scope, StorageBackend, sweep_unreferenced};
+
+    let now = Arc::new(AtomicU64::new(100));
+    let clock = Arc::clone(&now);
+    let storage = MemoryStorage::with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let blobs = storage.for_scope(&Scope::local()).unwrap().blobs().clone();
+
+    blobs.put("orphans/old", vec![1], None).await.unwrap();
+    now.store(200, Ordering::SeqCst);
+    blobs
+        .put("orphans/referenced", vec![2], None)
+        .await
+        .unwrap();
+    blobs.put("elsewhere/old", vec![3], None).await.unwrap();
+    now.store(250, Ordering::SeqCst);
+    blobs
+        .put("orphans/cutoff-equal", vec![5], None)
+        .await
+        .unwrap();
+    now.store(300, Ordering::SeqCst);
+    blobs.put("orphans/fresh", vec![4], None).await.unwrap();
+
+    let removed = sweep_unreferenced(&*blobs, "orphans/", 250, |key| async move {
+        Ok(key == "orphans/referenced")
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(removed, 1);
+    assert!(blobs.head("orphans/old").await.unwrap().is_none());
+    assert!(blobs.head("orphans/referenced").await.unwrap().is_some());
+    assert!(blobs.head("orphans/cutoff-equal").await.unwrap().is_some());
+    assert!(blobs.head("orphans/fresh").await.unwrap().is_some());
+    assert!(blobs.head("elsewhere/old").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn unreferenced_sweep_stops_on_reference_check_error() {
+    use crate::{MemoryStorage, Scope, StorageBackend, sweep_unreferenced};
+
+    let blobs = MemoryStorage::new()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .blobs()
+        .clone();
+    blobs.put("orphans/old", vec![1], None).await.unwrap();
+
+    let error = sweep_unreferenced(&*blobs, "orphans/", u64::MAX, |_| async {
+        Err(crate::StorageError::backend("reference lookup failed"))
+    })
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind(), crate::ErrorKind::Backend);
+    assert!(blobs.head("orphans/old").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn unreferenced_sweep_fails_closed_on_listing_error() {
+    let blobs = TestSweepListing {
+        error: true,
+        items: Vec::new(),
+    };
+    let error = sweep_unreferenced(&blobs, "orphans/", u64::MAX, |_| async { Ok(false) })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::Backend);
+}
+
+#[tokio::test]
+async fn unreferenced_sweep_keeps_unknown_write_times() {
+    let blobs = TestSweepListing {
+        error: false,
+        items: vec![BlobSweepEntry {
+            meta: BlobMeta {
+                key: "orphans/unknown-age".to_owned(),
+                len: 1,
+                content_type: None,
+            },
+            written_at_ms: None,
+        }],
+    };
+    let error = sweep_unreferenced(&blobs, "orphans/", u64::MAX, |_| async {
+        panic!("unknown-age entries must not reach the reference callback")
+    })
+    .await
+    .unwrap();
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn sweep_page_validation_rejects_non_advancing_cursors() {
+    let page = BlobSweepPage {
+        items: Vec::new(),
+        next_after: Some("orphans/a".to_owned()),
+    };
+    assert_eq!(
+        validate_sweep_page("orphans/", Some("orphans/a"), 10, &page)
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Backend
+    );
+}
+
+#[tokio::test]
+async fn cleanup_pages_include_expired_physical_blobs() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::{MemoryStorage, Scope, StorageBackend};
+
+    let now = Arc::new(AtomicU64::new(10));
+    let clock = Arc::clone(&now);
+    let storage = MemoryStorage::with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let blobs = storage.for_scope(&Scope::local()).unwrap().blobs().clone();
+    blobs
+        .put_expiring("expired/physical", vec![1], None, Duration::from_millis(1))
+        .await
+        .unwrap();
+    now.store(12, Ordering::SeqCst);
+
+    assert!(blobs.get("expired/physical").await.unwrap().is_none());
+    let page = blobs.list_sweep_page("expired/", None, 8).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].meta.key, "expired/physical");
+    assert_eq!(page.items[0].written_at_ms, Some(10));
+}
+
+#[tokio::test]
+async fn deletion_error_does_not_report_a_completed_sweep() {
+    use serde_json::json;
+
+    use crate::{CollectionSpec, Fence, MemoryStorage, Precondition, Scope, StorageBackend};
+
+    let storage = MemoryStorage::new();
+    let scope = Scope::local();
+    let docs = storage.for_scope(&scope).unwrap().documents().clone();
+    docs.ensure_collection(&CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    docs.put("leases", "sweeper", json!({"epoch": 1}), Precondition::None)
+        .await
+        .unwrap();
+    let fence = Fence::epoch(scope.clone(), "leases", "sweeper", "epoch", 1);
+    let fenced = storage.for_scope_fenced(&scope, &fence).unwrap();
+    fenced
+        .blobs()
+        .put("guarded/orphan", vec![1], None)
+        .await
+        .unwrap();
+
+    let result = sweep_unreferenced(fenced.blobs().as_ref(), "guarded/", u64::MAX, move |_| {
+        let docs = docs.clone();
+        async move {
+            docs.put("leases", "sweeper", json!({"epoch": 2}), Precondition::None)
+                .await?;
+            Ok(false)
+        }
+    })
+    .await;
+
+    assert_eq!(result.unwrap_err().kind(), crate::ErrorKind::Fenced);
+    assert!(
+        storage
+            .for_scope(&scope)
+            .unwrap()
+            .blobs()
+            .head("guarded/orphan")
+            .await
+            .unwrap()
+            .is_some()
     );
 }

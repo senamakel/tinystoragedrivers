@@ -45,6 +45,7 @@ fn all_holds_every_capability() {
             Capability::StreamSeal,
             Capability::SharedAcrossProcesses,
             Capability::ConditionalSecretWrites,
+            Capability::BlobSweep,
         ]
     );
 }
@@ -95,6 +96,7 @@ fn renders_names() {
             Capability::ConditionalSecretWrites,
             "conditional_secret_writes",
         ),
+        (Capability::BlobSweep, "blob_sweep"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }

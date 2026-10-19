@@ -100,14 +100,18 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 5` (crate `tinystoragedrivers-bus`).
+Version 5 adds `Secrets.GetVersioned` and `Secrets.SetIf`; version 6 adds
+`Blobs.ListSweepPage`, which exposes bounded write-time metadata for physical
+blob cleanup without returning payloads.
+
+Contract version: `CONTRACT_VERSION = 6` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
 | --- | --- | --- |
 | `Documents` | 17, see `DOCUMENTS_SELECTORS` | private |
 | `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams`, `Seal`, `Info` | private |
-| `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities` | private |
+| `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `ListSweepPage`, `PresignGet`, `PresignPut`, `Capabilities` | private |
 | `Secrets` | `Get`, `GetVersioned`, `Set`, `SetIf`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
 
 Size limits (constants in the crate, enforced by the server before native I/O):
@@ -177,9 +181,22 @@ deletes cannot be conditional. The conformance suite asserts expiry on every
 driver that claims the capability. On the
 wire `PutBlobRequest` and `PutBlobStreamRequest` gain an optional `ttl_ms` and
 `BlobCapabilities` gains `ttl`; adding them made the contract version 3. A
-SQLite database written by an earlier release gains the `expires_at_ms` column
-on the next migrating open; a read-only `existing_schema` open refuses the old
-layout like any other schema drift.
+SQLite databases written before expiry support gain `expires_ms` on the next
+migrating open. Databases predating orphan-age metadata gain a nullable
+`written_ms` column; old rows remain age-unknown, and a restricted
+`existing_schema` handle without the column does not advertise `BlobSweep`.
+
+### Orphan cleanup metadata (version 6)
+
+`BlobCapabilities.blob_sweep` and `ListSweepPage` expose the native
+`BlobStore::list_sweep_page` contract to ordinary bus handles. Requests carry a
+key prefix, optional keyset cursor and page limit; replies include physical
+blob metadata and optional `written_at_ms`, including payloads hidden by
+expiry. A missing time is retained by cleanup callers. The selector is
+available only when the host reports `BlobSweep`; older capability replies
+default to unsupported. Contract version 5 is reserved for confidential
+secret selectors by the companion SecretCAS change, so this branch's version 6
+requires that v5 contract before integration.
 
 ### Record metadata, sealing and host-only operations (version 4)
 

@@ -1,7 +1,7 @@
 //! Admission-fenced blob wrappers used by the composite backend.
 use crate::{
-    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability, Result,
-    ScopedStorage, StorageError, async_trait,
+    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, BlobSweepPage, Capabilities, Capability,
+    Result, ScopedStorage, StorageError, async_trait,
 };
 use std::sync::Arc;
 use std::{ops::Range, time::Duration};
@@ -101,6 +101,15 @@ impl BlobStore for GenerationBlobs {
         self.admit().await?;
         self.inner.list(prefix).await
     }
+    async fn list_sweep_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobSweepPage> {
+        self.admit().await?;
+        self.inner.list_sweep_page(prefix, after, limit).await
+    }
     async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String> {
         self.admit().await?;
         self.inner.presign_get(key, ttl).await
@@ -150,6 +159,7 @@ impl BlobStore for FencedBlobs {
             .without(Capability::AtomicScopePurge)
             .without(Capability::PresignedUrls)
             .without(Capability::BlobTtl)
+            .without(Capability::BlobSweep)
     }
     async fn put(&self, _: &str, _: Vec<u8>, _: Option<&str>) -> Result<BlobMeta> {
         Err(unfenceable())

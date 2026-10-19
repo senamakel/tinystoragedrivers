@@ -30,3 +30,28 @@ plain put of the key clears any lifetime. Only handles reporting BlobTtl accept
 a lifetime; the default refuses with Unsupported(BlobTtl). Reclaiming an expired
 blob's storage is the driver's choice, so callers rely only on its being
 invisible.
+
+## Orphan cleanup
+
+`sweep_unreferenced` pages through physical blob metadata below a key prefix,
+then asks the host whether each old key is referenced before deleting it.
+`older_than` is an exclusive epoch-millisecond cutoff: a blob is eligible
+only when its trustworthy `written_at_ms` is strictly less than the cutoff.
+Unknown legacy timestamps are retained. Pages are bounded and key ordered;
+listing, reference-check, or delete errors stop the sweep and return an error.
+Earlier successful deletions remain deleted, so an error can mean partial
+progress and callers can safely retry after repairing the failure.
+The returned count includes only deletes that reported a visible blob removed.
+A driver may reclaim an expired physical object while returning `false`
+because it was already invisible under `BlobStore::delete`; that reclamation is
+not counted.
+
+The cleanup listing includes physical blobs hidden from ordinary reads by an
+expired lifetime. Drivers that cannot provide bounded pages and trustworthy
+write times must not advertise `BlobSweep`. A sweep does not atomically bind a
+reference check to deletion, and it cannot detect a concurrent overwrite of an
+immutable key. Hosts must coordinate writers and sweepers so keys cannot be
+replaced or referenced between the callback and deletion. The grace period
+must also exceed the maximum delay between a blob write and its document
+reference becoming durable; it cannot protect an indefinitely interrupted
+write.

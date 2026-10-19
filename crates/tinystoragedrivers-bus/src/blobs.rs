@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// Blobs object name under [`crate::STORAGE_INTERFACE`].
 pub const BLOBS_OBJECT: &str = "Blobs";
 /// Finite selector set; servers must reject every other selector.
-pub const BLOBS_SELECTORS: [&str; 11] = [
+pub const BLOBS_SELECTORS: [&str; 12] = [
     "Put",
     "PutStream",
     "Get",
@@ -28,6 +28,7 @@ pub const BLOBS_SELECTORS: [&str; 11] = [
     "Head",
     "Delete",
     "List",
+    "ListSweepPage",
     "PresignGet",
     "PresignPut",
     "Capabilities",
@@ -126,6 +127,43 @@ pub struct ListBlobsRequest {
     #[serde(default)]
     pub prefix: String,
 }
+
+/// One keyset-paged listing request for cleanup metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListBlobSweepPageRequest {
+    /// Literal key prefix.
+    #[serde(default)]
+    pub prefix: String,
+    /// The last key from the preceding page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// Maximum number of entries to return.
+    pub limit: usize,
+}
+
+/// Physical blob metadata used by a bounded orphan sweep.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobSweepInfo {
+    /// Ordinary blob metadata.
+    pub info: BlobInfo,
+    /// Time the current bytes were written, in epoch milliseconds. Missing
+    /// timestamps must be retained by cleanup callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_at_ms: Option<u64>,
+}
+
+/// A bounded page of physical blobs, including objects hidden by expiry.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobSweepPage {
+    /// Entries in increasing key order.
+    pub items: Vec<BlobSweepInfo>,
+    /// Last key when another page may exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
+}
 /// Request a bearer URL; only when the backend reports `PresignedUrls`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -156,6 +194,9 @@ pub struct BlobCapabilities {
     /// Whether writes may carry `ttl_ms` (native blob expiry).
     #[serde(default)]
     pub ttl: bool,
+    /// Whether bounded physical cleanup pages have trustworthy write times.
+    #[serde(default)]
+    pub blob_sweep: bool,
     /// Maximum logical key length in UTF-8 bytes.
     pub max_key_len: usize,
 }

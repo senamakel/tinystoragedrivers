@@ -16,6 +16,7 @@
 
 use crate::storage::Fencing;
 
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -25,16 +26,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, ScopeGeneration,
-    StorageError, clamp_range, is_reserved_blob_key, validate_blob_key, validate_user_blob_key,
-    validate_user_blob_prefix,
+    Blob, BlobMeta, BlobStore, BlobSweepEntry, BlobSweepPage, Capabilities, Capability, Result,
+    Scope, ScopeGeneration, StorageError, clamp_range, is_reserved_blob_key, validate_blob_key,
+    validate_sweep_page_request, validate_user_blob_key, validate_user_blob_prefix,
 };
 
 use crate::documents::guard;
 use crate::encode::file_stem;
 use crate::fsio::{
-    files_with_suffix, io_error, open_read, read_json, read_optional, remove_optional,
-    write_atomic, write_json,
+    files_with_suffix, for_each_file_with_suffix, io_error, open_read, read_json, read_optional,
+    remove_optional, write_atomic, write_json,
 };
 use crate::storage::Db;
 
@@ -49,6 +50,9 @@ struct Sidecar {
     /// The instant the blob stops existing; absent for a permanent blob.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expires_at_ms: Option<u64>,
+    /// The write time; absent in legacy sidecars and unsafe to sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    written_at_ms: Option<u64>,
 }
 
 impl Sidecar {
@@ -241,6 +245,7 @@ fn store_in(
         key: key.to_owned(),
         content_type,
         expires_at_ms,
+        written_at_ms: Some(paths.now),
     };
     write_json(&paths.meta, &sidecar)?;
     Ok(BlobMeta {
@@ -331,7 +336,9 @@ impl BlobStore for FileBlobs {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none().with(Capability::BlobTtl)
+        Capabilities::none()
+            .with(Capability::BlobTtl)
+            .with(Capability::BlobSweep)
     }
 
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
@@ -423,6 +430,64 @@ impl BlobStore for FileBlobs {
                 }
                 out.sort_by(|a, b| a.key.cmp(&b.key));
                 Ok(out)
+            })
+            .await
+    }
+
+    async fn list_sweep_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobSweepPage> {
+        validate_sweep_page_request(prefix, after, limit)?;
+        let (scope, prefix, after) = (
+            self.scope.clone(),
+            prefix.to_owned(),
+            after.map(str::to_owned),
+        );
+        self.db
+            .run(move |db| {
+                let dir = Self::dir(db, &scope);
+                let mut candidates = BTreeMap::new();
+                for_each_file_with_suffix(&dir, META_SUFFIX, |path| {
+                    let Some(sidecar) = read_json::<Sidecar>(&path)? else {
+                        return Ok(());
+                    };
+                    if !sidecar.key.starts_with(&prefix)
+                        || is_reserved_blob_key(&sidecar.key)
+                        || after
+                            .as_deref()
+                            .is_some_and(|after| sidecar.key.as_str() <= after)
+                    {
+                        return Ok(());
+                    }
+                    let written_at_ms = sidecar.written_at_ms;
+                    let data = dir.join(file_stem(&sidecar.key));
+                    let Some(meta) = meta(&data, sidecar)? else {
+                        return Ok(());
+                    };
+                    candidates.insert(
+                        meta.key.clone(),
+                        BlobSweepEntry {
+                            meta,
+                            written_at_ms,
+                        },
+                    );
+                    if candidates.len() > limit + 1 {
+                        candidates.pop_last();
+                    }
+                    Ok(())
+                })?;
+                let has_more = candidates.len() > limit;
+                let entries: Vec<_> = candidates.into_values().take(limit).collect();
+                let next_after = has_more
+                    .then(|| entries.last().map(|entry| entry.meta.key.clone()))
+                    .flatten();
+                Ok(BlobSweepPage {
+                    items: entries,
+                    next_after,
+                })
             })
             .await
     }

@@ -48,6 +48,7 @@ pub struct SqliteStorage {
     tables: Arc<Tables>,
     clock: Clock,
     existing: bool,
+    blob_sweep_supported: bool,
 }
 
 impl fmt::Debug for SqliteStorage {
@@ -121,12 +122,17 @@ impl SqliteStorage {
         let db = Db::open_read_only(&file)?;
         let tables = Arc::new(Tables::new());
         let validate = Arc::clone(&tables);
-        db.run_now(move |conn| validate.validate(conn))?;
+        let blob_sweep_supported = db.run_now(move |conn| {
+            validate
+                .validate(conn)
+                .and_then(|()| validate.blob_write_times(conn))
+        })?;
         Ok(Self {
             db,
             tables,
             clock: Arc::new(system_clock),
             existing: true,
+            blob_sweep_supported,
         })
     }
 
@@ -140,6 +146,7 @@ impl SqliteStorage {
             tables,
             clock,
             existing: false,
+            blob_sweep_supported: true,
         })
     }
 
@@ -201,6 +208,7 @@ impl SqliteStorage {
                     scope.clone(),
                     Arc::clone(&self.clock),
                     fencing.cloned(),
+                    self.blob_sweep_supported,
                 )
                 .with_generation(generation),
             ),
@@ -232,7 +240,12 @@ impl StorageBackend for SqliteStorage {
     }
 
     fn capabilities(&self) -> Capabilities {
-        capabilities(self.db.is_read_only())
+        let caps = capabilities(self.db.is_read_only());
+        if self.blob_sweep_supported {
+            caps.with(tinystoragedrivers_core::Capability::BlobSweep)
+        } else {
+            caps
+        }
     }
 
     fn supports_scope_purge_binding_validation(&self) -> bool {
@@ -256,9 +269,13 @@ impl StorageBackend for SqliteStorage {
 
     fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {
         let inspect = Arc::clone(&self.tables);
-        self.db.run_now(move |conn| inspect.validate(conn))?;
+        let blob_sweep_supported = self.db.run_now(move |conn| {
+            inspect.validate(conn)?;
+            inspect.blob_write_times(conn)
+        })?;
         let mut storage = self.clone();
         storage.existing = true;
+        storage.blob_sweep_supported = blob_sweep_supported;
         Ok(Arc::new(storage))
     }
 

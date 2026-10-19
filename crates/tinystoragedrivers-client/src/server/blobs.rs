@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tinystoragedrivers_bus as wire;
 use tinystoragedrivers_bus::{MAX_INLINE_BLOB_BYTES, MAX_PAGE_ITEMS, MAX_PRESIGN_TTL_SECS};
-use tinystoragedrivers_core::{BlobMeta, Capability};
+use tinystoragedrivers_core::{BlobMeta, BlobSweepPage, Capability};
 use tokio::io::{AsyncRead, ReadBuf};
 
 use super::{Reply, StorageServer, decode, encode, invalid, native};
@@ -17,6 +17,20 @@ pub(crate) fn info(meta: BlobMeta) -> wire::BlobInfo {
         key: meta.key,
         len: meta.len,
         content_type: meta.content_type,
+    }
+}
+
+fn sweep_info(page: BlobSweepPage) -> wire::BlobSweepPage {
+    wire::BlobSweepPage {
+        items: page
+            .items
+            .into_iter()
+            .map(|entry| wire::BlobSweepInfo {
+                info: info(entry.meta),
+                written_at_ms: entry.written_at_ms,
+            })
+            .collect(),
+        next_after: page.next_after,
     }
 }
 
@@ -110,6 +124,15 @@ impl StorageServer {
                 }
                 encode(&listed.into_iter().map(info).collect::<Vec<_>>())
             }
+            "ListSweepPage" => {
+                let r: wire::ListBlobSweepPageRequest = decode(request)?;
+                let page = native(
+                    blobs
+                        .list_sweep_page(&r.prefix, r.after.as_deref(), r.limit)
+                        .await,
+                )?;
+                encode(&sweep_info(page))
+            }
             "PresignGet" | "PresignPut" => {
                 let r: wire::PresignRequest = decode(request)?;
                 if r.ttl_secs == 0 || r.ttl_secs > MAX_PRESIGN_TTL_SECS {
@@ -130,6 +153,7 @@ impl StorageServer {
                 encode(&wire::BlobCapabilities {
                     presigned_urls: blobs.capabilities().contains(Capability::PresignedUrls),
                     ttl: blobs.capabilities().contains(Capability::BlobTtl),
+                    blob_sweep: blobs.capabilities().contains(Capability::BlobSweep),
                     max_key_len: blobs.max_key_len(),
                 })
             }

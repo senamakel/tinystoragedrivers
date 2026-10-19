@@ -40,6 +40,7 @@ fn blob_messages_roundtrip() {
     let caps = BlobCapabilities {
         presigned_urls: true,
         ttl: true,
+        blob_sweep: true,
         max_key_len: 1024,
     };
     let wire = serde_json::to_value(caps).unwrap();
@@ -65,9 +66,38 @@ fn blob_requests_reject_authority_selectors_and_hide_urls() {
 #[test]
 fn blob_selectors_are_fixed() {
     assert_eq!(BLOBS_OBJECT, "Blobs");
-    assert_eq!(BLOBS_SELECTORS.len(), 11);
+    assert_eq!(BLOBS_SELECTORS.len(), 12);
     assert!(is_blobs_selector("GetRange"));
+    assert!(is_blobs_selector("ListSweepPage"));
     assert!(!is_blobs_selector("Arbitrary"));
+}
+
+#[test]
+fn sweep_pages_roundtrip_and_leave_unknown_ages_explicit() {
+    let request = ListBlobSweepPageRequest {
+        prefix: "attachments/".into(),
+        after: Some("attachments/a".into()),
+        limit: 8,
+    };
+    let request_wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ListBlobSweepPageRequest>(request_wire).unwrap(),
+        request
+    );
+    let page = BlobSweepPage {
+        items: vec![BlobSweepInfo {
+            info: BlobInfo {
+                key: "attachments/b".into(),
+                len: 3,
+                content_type: None,
+            },
+            written_at_ms: None,
+        }],
+        next_after: None,
+    };
+    let wire = serde_json::to_value(&page).unwrap();
+    assert!(wire["items"][0].get("written_at_ms").is_none());
+    assert_eq!(serde_json::from_value::<BlobSweepPage>(wire).unwrap(), page);
 }
 
 #[test]

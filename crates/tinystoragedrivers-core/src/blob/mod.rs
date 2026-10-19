@@ -38,6 +38,29 @@ pub struct BlobMeta {
     pub content_type: Option<String>,
 }
 
+/// A blob entry from a bounded sweep listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobSweepEntry {
+    /// The blob's key, size and content type.
+    pub meta: BlobMeta,
+    /// When the current blob contents were written, in milliseconds since the
+    /// Unix epoch. `None` means the backend cannot establish a trustworthy age.
+    pub written_at_ms: Option<u64>,
+}
+
+/// One bounded page of physical blobs, including blobs hidden by an expired
+/// lifetime so cleanup can still reclaim their stored bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobSweepPage {
+    /// Entries in strictly increasing key order.
+    pub items: Vec<BlobSweepEntry>,
+    /// The last key when another page may exist, otherwise `None`.
+    pub next_after: Option<String>,
+}
+
+/// Maximum number of entries in one blob sweep page.
+pub const MAX_BLOB_SWEEP_PAGE_ITEMS: usize = 1_000;
+
 /// A blob's metadata and bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Blob {
@@ -265,6 +288,33 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// A backend error.
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>>;
 
+    /// Page through physical blobs whose key starts with `prefix`.
+    ///
+    /// Unlike [`list`](Self::list), this cleanup listing also includes blobs
+    /// hidden from reads by an expired lifetime. Results are ordered by key;
+    /// pass the previous page's `next_after` to continue. A missing write time
+    /// is unknown and must be retained by the generic sweep.
+    ///
+    /// Drivers must implement this with bounded backend pages. The default
+    /// fails closed instead of materializing [`list`](Self::list).
+    ///
+    /// # Errors
+    ///
+    /// Invalid prefix, cursor or page size, unsupported cleanup listing, or a
+    /// backend error.
+    async fn list_sweep_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobSweepPage> {
+        let _ = (prefix, after, limit);
+        Err(StorageError::unsupported(
+            Capability::BlobSweep,
+            "this blob driver cannot page cleanup metadata",
+        ))
+    }
+
     /// Reclaim every blob of this scope whose lifetime has passed and return
     /// how many went, for a periodic sweeper.
     ///
@@ -340,6 +390,124 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         }
         Ok(removed)
     }
+}
+
+/// Delete old blobs under `prefix` that the host confirms are unreferenced.
+///
+/// `older_than` is an exclusive Unix-epoch millisecond cutoff. Callers
+/// normally compute it as the current time minus their write-to-document grace
+/// period. The reference callback receives owned keys so it can perform async
+/// lookups without borrowing the page. Objects with unknown write times are
+/// retained. Pages are bounded and processed in key order; an error stops the
+/// sweep, though earlier pages may already have been deleted.
+///
+/// The result counts deletes that reported a visible blob removed. A backend
+/// may also reclaim a physical object that has expired while reporting `false`
+/// under the existing [`BlobStore::delete`] contract; such reclamation is not
+/// included in the count.
+///
+/// The check and delete are not atomic. Hosts must use immutable blob keys or
+/// coordinate writers and sweeping so a key cannot be replaced or referenced
+/// between the reference check and delete. The grace period protects an
+/// interrupted write only when it exceeds the maximum write-to-document delay.
+///
+/// # Errors
+///
+/// Invalid listing data, unsupported paging, a listing or deletion error, or
+/// an error from the host's reference callback.
+pub async fn sweep_unreferenced<F, Fut>(
+    blobs: &dyn BlobStore,
+    prefix: &str,
+    older_than: u64,
+    mut is_referenced: F,
+) -> Result<u64>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
+    validate_user_blob_prefix(prefix)?;
+    let mut after: Option<String> = None;
+    let mut removed = 0_u64;
+    loop {
+        let page = blobs
+            .list_sweep_page(prefix, after.as_deref(), MAX_BLOB_SWEEP_PAGE_ITEMS)
+            .await?;
+        validate_sweep_page(prefix, after.as_deref(), MAX_BLOB_SWEEP_PAGE_ITEMS, &page)?;
+        for entry in page.items {
+            let Some(written_at_ms) = entry.written_at_ms else {
+                continue;
+            };
+            if written_at_ms >= older_than || is_referenced(entry.meta.key.clone()).await? {
+                continue;
+            }
+            if blobs.delete(&entry.meta.key).await? {
+                removed = removed.saturating_add(1);
+            }
+        }
+        let Some(next_after) = page.next_after else {
+            return Ok(removed);
+        };
+        after = Some(next_after);
+    }
+}
+
+fn validate_sweep_page(
+    prefix: &str,
+    after: Option<&str>,
+    limit: usize,
+    page: &BlobSweepPage,
+) -> Result<()> {
+    if page.items.len() > limit {
+        return Err(StorageError::backend("blob sweep page exceeds its limit"));
+    }
+    let mut previous = after;
+    for entry in &page.items {
+        let key = entry.meta.key.as_str();
+        if !key.starts_with(prefix)
+            || validate_user_blob_key(key).is_err()
+            || previous.is_some_and(|previous| key <= previous)
+        {
+            return Err(StorageError::backend("blob sweep page keys are invalid"));
+        }
+        previous = Some(key);
+    }
+    if let Some(next_after) = &page.next_after
+        && (page
+            .items
+            .last()
+            .is_none_or(|entry| entry.meta.key != *next_after)
+            || after.is_some_and(|after| next_after.as_str() <= after))
+    {
+        return Err(StorageError::backend(
+            "blob sweep page cursor did not advance",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the shared bounds and cursor rules for a cleanup page request.
+/// Drivers should call this before querying their own pagination mechanism.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` when the prefix, cursor, or requested page size is
+/// outside the blob cleanup contract.
+pub fn validate_sweep_page_request(prefix: &str, after: Option<&str>, limit: usize) -> Result<()> {
+    validate_user_blob_prefix(prefix)?;
+    if !(1..=MAX_BLOB_SWEEP_PAGE_ITEMS).contains(&limit) {
+        return Err(StorageError::invalid_input(
+            "blob sweep page size is outside the supported range",
+        ));
+    }
+    if let Some(after) = after {
+        validate_user_blob_key(after)?;
+        if !after.starts_with(prefix) {
+            return Err(StorageError::invalid_input(
+                "blob sweep cursor is outside the requested prefix",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Validate a blob key: 1 to [`MAX_BLOB_KEY_LEN`] bytes, no NUL, no empty,

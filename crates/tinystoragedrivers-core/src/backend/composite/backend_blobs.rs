@@ -7,8 +7,8 @@
 //! physical name is treated as a collision and is never claimed or deleted.
 use super::BlobBackend;
 use crate::{
-    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability, Precondition,
-    Result, Scope, ScopeGeneration, StorageBackend, StorageError, async_trait,
+    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, BlobSweepPage, Capabilities, Capability,
+    Precondition, Result, Scope, ScopeGeneration, StorageBackend, StorageError, async_trait,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -174,6 +174,7 @@ impl BlobBackend for BackendBlobs {
             Capability::StreamingBlobs,
             Capability::PresignedUrls,
             Capability::BlobTtl,
+            Capability::BlobSweep,
         ] {
             if source.contains(cap) {
                 caps = caps.with(cap);
@@ -475,6 +476,20 @@ impl BlobStore for GenerationNamespaceBlobs {
             return Ok(Vec::new());
         }
         self.inner.list(prefix).await
+    }
+    async fn list_sweep_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobSweepPage> {
+        if !self.validate_claim().await? {
+            return Ok(BlobSweepPage {
+                items: Vec::new(),
+                next_after: None,
+            });
+        }
+        self.inner.list_sweep_page(prefix, after, limit).await
     }
     async fn sweep_expired(&self) -> Result<u64> {
         if !self.validate_claim().await? {

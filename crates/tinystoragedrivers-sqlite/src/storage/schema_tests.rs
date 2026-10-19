@@ -232,6 +232,35 @@ async fn existing_schema_reopens_files_without_initializing_tables() {
 }
 
 #[tokio::test]
+async fn existing_schema_without_blob_write_times_does_not_advertise_sweeping() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute_batch("ALTER TABLE blobs DROP COLUMN written_ms")
+                .map_err(crate::error::during("remove blob timestamp column"))
+        })
+        .unwrap();
+
+    let existing = storage.existing_schema().unwrap();
+    assert!(
+        !existing
+            .capabilities()
+            .contains(tinystoragedrivers_core::Capability::BlobSweep)
+    );
+    let blobs = existing.for_scope(&Scope::local()).unwrap().blobs().clone();
+    assert_eq!(
+        blobs
+            .list_sweep_page("", None, 10)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(tinystoragedrivers_core::Capability::BlobSweep)
+    );
+}
+
+#[tokio::test]
 async fn existing_schema_reports_corrupt_declaration_with_source() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();

@@ -63,6 +63,7 @@ pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::ExistingSchema)
     .with(Capability::CollectionValidation)
     .with(Capability::BlobTtl)
+    .with(Capability::BlobSweep)
     .with(Capability::ScopeEnumeration)
     .with(Capability::ScopePurge)
     .with(Capability::StreamSeal);

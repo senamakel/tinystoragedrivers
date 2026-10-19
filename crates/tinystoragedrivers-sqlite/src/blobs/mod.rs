@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Capabilities, Capability, Clock, Result, Scope, async_trait,
-    clamp_range, is_reserved_blob_key, validate_user_blob_key, validate_user_blob_prefix,
+    Blob, BlobMeta, BlobStore, BlobSweepEntry, BlobSweepPage, Capabilities, Capability, Clock,
+    Result, Scope, StorageError, async_trait, clamp_range, is_reserved_blob_key,
+    validate_sweep_page_request, validate_user_blob_key, validate_user_blob_prefix,
 };
 
 use crate::connection::Db;
@@ -27,6 +28,7 @@ pub struct SqliteBlobs {
     clock: Clock,
     /// Checked inside every write's transaction, when set.
     fencing: Option<Arc<Fencing>>,
+    sweep_supported: bool,
 }
 
 impl fmt::Debug for SqliteBlobs {
@@ -45,6 +47,7 @@ impl SqliteBlobs {
         scope: Scope,
         clock: Clock,
         fencing: Option<Arc<Fencing>>,
+        sweep_supported: bool,
     ) -> Self {
         Self {
             db,
@@ -53,6 +56,7 @@ impl SqliteBlobs {
             generation: tinystoragedrivers_core::ScopeGeneration::default(),
             clock,
             fencing,
+            sweep_supported,
         }
     }
 
@@ -128,9 +132,9 @@ impl SqliteBlobs {
     ) -> Result<BlobMeta> {
         validate_user_blob_key(key)?;
         let sql = format!(
-            "INSERT INTO {} (scope, key, content_type, size, sha256, bytes, expires_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO {} (scope, key, content_type, size, sha256, bytes, expires_ms, written_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT (scope, key) DO UPDATE SET content_type = excluded.content_type, size = excluded.size,
-                 sha256 = excluded.sha256, bytes = excluded.bytes, expires_ms = excluded.expires_ms",
+                 sha256 = excluded.sha256, bytes = excluded.bytes, expires_ms = excluded.expires_ms, written_ms = excluded.written_ms",
             self.table()
         );
         let sweep = format!(
@@ -163,7 +167,8 @@ impl SqliteBlobs {
                     i64::try_from(bytes.len()).unwrap_or(i64::MAX),
                     digest(&bytes),
                     bytes,
-                    expires_at
+                    expires_at,
+                    now
                 ],
             )
             .map_err(during("put blob"))
@@ -209,7 +214,76 @@ impl BlobStore for SqliteBlobs {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none().with(Capability::BlobTtl)
+        let capabilities = Capabilities::none().with(Capability::BlobTtl);
+        if self.sweep_supported {
+            capabilities.with(Capability::BlobSweep)
+        } else {
+            capabilities
+        }
+    }
+
+    async fn list_sweep_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobSweepPage> {
+        validate_sweep_page_request(prefix, after, limit)?;
+        if !self.sweep_supported {
+            return Err(StorageError::unsupported(
+                Capability::BlobSweep,
+                "legacy schema has no blob write times",
+            ));
+        }
+        let sql = format!(
+            "SELECT key, size, content_type, written_ms FROM {} WHERE scope = ?1 AND substr(key, 1, length(?2)) = ?2 AND (?3 IS NULL OR key > ?3) AND substr(key, 1, length(?4)) <> ?4 ORDER BY key LIMIT ?5",
+            self.table()
+        );
+        let page_limit = limit;
+        let (scope, prefix, after, sql_limit) = (
+            self.scope.clone(),
+            prefix.to_owned(),
+            after.map(str::to_owned),
+            i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX),
+        );
+        let reserved = tinystoragedrivers_core::SEALED_BLOB_PREFIX;
+        let rows = self
+            .read(move |conn| {
+                let mut statement = conn
+                    .prepare(&sql)
+                    .map_err(during("prepare blob sweep page"))?;
+                let rows = statement
+                    .query_map(
+                        params![scope.as_str(), prefix, after, reserved, sql_limit],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(during("query blob sweep page"))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(during("read blob sweep page"))
+            })
+            .await?;
+        let has_more = rows.len() > page_limit;
+        let items: Vec<_> = rows
+            .into_iter()
+            .take(page_limit)
+            .map(|(key, size, content_type, written)| BlobSweepEntry {
+                meta: meta(key, size, content_type),
+                written_at_ms: written.and_then(|value| u64::try_from(value).ok()),
+            })
+            .collect();
+        let next_after = if has_more {
+            items.last().map(|item| item.meta.key.clone())
+        } else {
+            None
+        };
+        Ok(BlobSweepPage { items, next_after })
     }
 
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {

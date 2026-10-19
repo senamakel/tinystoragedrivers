@@ -1,6 +1,7 @@
 //! Scoped S3 blobs, with bounded multipart writes and incremental reads.
 
 use std::{
+    collections::BTreeMap,
     ops::Range,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,9 +15,10 @@ use object_store::{
     aws::AmazonS3Builder, path::Path, signer::Signer,
 };
 use tinystoragedrivers_core::{
-    Blob, BlobBackend, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability,
-    ErrorKind, Result, Scope, ScopeGeneration, StorageError, async_trait, validate_blob_key,
-    validate_user_blob_key, validate_user_blob_prefix,
+    Blob, BlobBackend, BlobMeta, BlobReader, BlobStore, BlobStream, BlobSweepEntry, BlobSweepPage,
+    Capabilities, Capability, ErrorKind, Result, Scope, ScopeGeneration, StorageError, async_trait,
+    validate_blob_key, validate_sweep_page_request, validate_user_blob_key,
+    validate_user_blob_prefix,
 };
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
@@ -27,6 +29,8 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// User metadata holding a blob's expiry as epoch milliseconds. S3 prefixes it
 /// with `x-amz-meta-` on the wire.
 const EXPIRES_AT: &str = "tsd-expires-at-ms";
+/// Exact write time as epoch milliseconds; legacy objects without it are kept.
+const WRITTEN_AT: &str = "tsd-written-at-ms";
 mod versions;
 
 fn hex_scope(scope: &Scope) -> String {
@@ -226,7 +230,8 @@ impl BlobBackend for S3Storage {
     fn capabilities(&self) -> Capabilities {
         let mut caps = Capabilities::none()
             .with(Capability::StreamingBlobs)
-            .with(Capability::BlobTtl);
+            .with(Capability::BlobTtl)
+            .with(Capability::BlobSweep);
         if self.signer.is_some() {
             caps = caps
                 .with(Capability::PresignedUrls)
@@ -479,7 +484,11 @@ impl S3Blobs {
     }
 }
 
-fn attributes(content_type: Option<&str>, expires_at: Option<u64>) -> Attributes {
+fn attributes(
+    content_type: Option<&str>,
+    expires_at: Option<u64>,
+    written_at_ms: u64,
+) -> Attributes {
     let mut attributes = Attributes::default();
     if let Some(value) = content_type {
         attributes.insert(Attribute::ContentType, value.to_owned().into());
@@ -490,7 +499,17 @@ fn attributes(content_type: Option<&str>, expires_at: Option<u64>) -> Attributes
             at.to_string().into(),
         );
     }
+    attributes.insert(
+        Attribute::Metadata(WRITTEN_AT.into()),
+        written_at_ms.to_string().into(),
+    );
     attributes
+}
+
+fn written_at(attributes: &Attributes) -> Option<u64> {
+    attributes
+        .get(&Attribute::Metadata(WRITTEN_AT.into()))
+        .and_then(|value| value.as_ref().parse::<u64>().ok())
 }
 
 /// Whether the object these attributes came from has outlived its lifetime.
@@ -572,10 +591,11 @@ impl S3Blobs {
         ttl: Option<Duration>,
     ) -> Result<BlobMeta> {
         let path = self.path(key)?;
+        let written_at_ms = (self.clock)();
         let expires_at = ttl.map(|ttl| {
-            (self.clock)().saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+            written_at_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
         });
-        let attrs = attributes(content_type, expires_at);
+        let attrs = attributes(content_type, expires_at, written_at_ms);
         if len <= PART_SIZE as u64 {
             let mut data = Vec::new();
             (&mut reader)
@@ -658,6 +678,65 @@ impl S3Blobs {
 
 #[async_trait]
 impl BlobStore for S3Blobs {
+    async fn list_sweep_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobSweepPage> {
+        validate_sweep_page_request(prefix, after, limit)?;
+        let root = Path::parse(format!("{}{prefix}", self.prefix))
+            .map_err(|_| StorageError::invalid_input("invalid scope prefix"))?;
+        let mut objects = self.store.list(Some(&root));
+        // ObjectStore does not promise listing order. Keep only the smallest
+        // limit+1 entries while streaming the backend listing.
+        let mut selected: BTreeMap<String, Path> = BTreeMap::new();
+        while let Some(object) = objects.try_next().await.map_err(map_error)? {
+            let full_key = object.location.as_ref();
+            let Some(key) = full_key.strip_prefix(&self.prefix) else {
+                continue;
+            };
+            if !key.starts_with(prefix)
+                || after.is_some_and(|cursor| key <= cursor)
+                || validate_user_blob_key(key).is_err()
+            {
+                continue;
+            }
+            selected
+                .entry(key.to_owned())
+                .or_insert_with(|| object.location.clone());
+            while selected.len() > limit.saturating_add(1) {
+                if let Some(last) = selected.keys().next_back().cloned() {
+                    selected.remove(&last);
+                }
+            }
+        }
+        let has_more = selected.len() > limit;
+        let mut items = Vec::with_capacity(limit);
+        for (key, path) in selected.into_iter().take(limit) {
+            let result = match self.head_object(&path).await {
+                Ok(result) => result,
+                Err(object_store::Error::NotFound { .. }) => continue,
+                Err(error) => return Err(map_error(error)),
+            };
+            items.push(BlobSweepEntry {
+                meta: metadata(&key, result.meta.size as u64, &result.attributes),
+                written_at_ms: written_at(&result.attributes),
+            });
+        }
+        if has_more && items.is_empty() {
+            return Err(StorageError::backend(
+                "blob listing changed while building a sweep page",
+            ));
+        }
+        let next_after = if has_more {
+            items.last().map(|item| item.meta.key.clone())
+        } else {
+            None
+        };
+        Ok(BlobSweepPage { items, next_after })
+    }
+
     async fn sweep_expired(&self) -> Result<u64> {
         S3Blobs::sweep_expired(self).await
     }
@@ -668,7 +747,8 @@ impl BlobStore for S3Blobs {
     fn capabilities(&self) -> Capabilities {
         let caps = Capabilities::none()
             .with(Capability::StreamingBlobs)
-            .with(Capability::BlobTtl);
+            .with(Capability::BlobTtl)
+            .with(Capability::BlobSweep);
         if self.signer.is_some() {
             caps.with(Capability::PresignedUrls)
         } else {
