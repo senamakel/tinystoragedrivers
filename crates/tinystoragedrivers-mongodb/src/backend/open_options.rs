@@ -23,14 +23,14 @@ impl MongoOpenOptions {
         }
     }
 
-    /// Require `Capability::Fencing` from the connected deployment.
+    /// Require [`Capability::Fencing`] from the connected deployment.
     #[must_use]
     pub const fn require_fencing(mut self) -> Self {
         self.require_fencing = true;
         self
     }
 
-    /// Require `Capability::Transactions` from the connected deployment.
+    /// Require [`Capability::Transactions`] from the connected deployment.
     #[must_use]
     pub const fn require_transactions(mut self) -> Self {
         self.require_transactions = true;

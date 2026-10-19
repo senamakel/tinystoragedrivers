@@ -57,13 +57,16 @@ impl StorageConfig {
     /// Accepted forms: `memory`; `sqlite:<path>`; a bare path (absolute, or
     /// starting with `./` or `../`), read as SQLite;
     /// `mongodb://…/<database>` and `mongodb+srv://…/<database>`;
-    /// `file:<dir>`.
+    /// `file:<dir>`. MongoDB URLs also accept the host options
+    /// `require_fencing=true|false` and
+    /// `require_transactions=true|false`; these are removed before the MongoDB
+    /// driver parses the connection string.
     ///
     /// # Errors
     ///
     /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) for an
-    /// empty or unrecognized URL, an empty path, or a `MongoDB` URI without a
-    /// database name.
+    /// empty or unrecognized URL, an empty path, a `MongoDB` URI without a
+    /// database name, or a repeated or invalid MongoDB host option.
     pub fn parse(url: &str) -> Result<Self> {
         let url = url.trim();
         if url.is_empty() {
