@@ -2,10 +2,20 @@
 
 use super::*;
 use serde_json::json;
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::path::Path;
 use tinystoragedrivers_core::{
     Capability, CollectionSpec, ErrorKind, Precondition, PurgeMode, PurgeRequest, Scope,
     ScopedStorage, StorageBackend,
 };
+
+fn directory_entries(path: &Path) -> BTreeSet<OsString> {
+    std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect()
+}
 
 async fn assert_read_only_purge_is_unavailable(storage: &SqliteStorage, ports: &ScopedStorage) {
     assert!(!storage.capabilities().contains(Capability::ScopePurge));
@@ -147,4 +157,48 @@ fn existing_read_only_open_does_not_initialize_an_old_schema() {
     let error = SqliteStorage::open_existing_read_only(&database).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::NotFound);
     assert_eq!(std::fs::read(&database).unwrap(), before);
+}
+
+#[tokio::test]
+async fn existing_read_only_open_does_not_create_wal_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("storage");
+    let database = path.join(ROOT_FILE);
+    let storage = SqliteStorage::open(&path).unwrap();
+    let ports = storage.for_scope(&Scope::local()).unwrap();
+    ports
+        .documents()
+        .ensure_collection(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    ports
+        .documents()
+        .put("notes", "kept", json!({"value": 1}), Precondition::Absent)
+        .await
+        .unwrap();
+    drop(ports);
+    drop(storage);
+
+    let database_before = std::fs::read(&database).unwrap();
+    let entries_before = directory_entries(&path);
+    assert_eq!(entries_before, BTreeSet::from([OsString::from(ROOT_FILE)]));
+
+    let read_only = SqliteStorage::open_existing_read_only(&path).unwrap();
+    let ports = read_only.for_scope(&Scope::local()).unwrap();
+    assert_eq!(
+        ports
+            .documents()
+            .get("notes", "kept")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        json!({"value": 1})
+    );
+    assert_eq!(directory_entries(&path), entries_before);
+    drop(ports);
+    drop(read_only);
+
+    assert_eq!(directory_entries(&path), entries_before);
+    assert_eq!(std::fs::read(&database).unwrap(), database_before);
 }
