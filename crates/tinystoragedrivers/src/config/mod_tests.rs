@@ -128,6 +128,39 @@ fn composite_mongodb_records_keep_capability_requirements_and_driver_options() {
     );
 }
 
+#[test]
+fn composite_display_keeps_the_blob_option_before_the_url_fragment() {
+    let cases = [
+        (
+            "sqlite:data?keep=1&blobs=memory#record-fragment",
+            "sqlite:data?keep=1&blobs=memory#record-fragment",
+        ),
+        (
+            "sqlite:data?blobs=memory#record-fragment",
+            "sqlite:data?blobs=memory#record-fragment",
+        ),
+        (
+            "sqlite:data?blobs=memory#fragment?with-question-mark",
+            "sqlite:data?blobs=memory#fragment?with-question-mark",
+        ),
+        (
+            "sqlite:data?keep=1&blobs=file%3A%2Ftmp%2Fblobs%23object%3Fname#record-fragment",
+            "sqlite:data?keep=1&blobs=file%3A%2Ftmp%2Fblobs%23object%3Fname#record-fragment",
+        ),
+    ];
+
+    for (url, expected) in cases {
+        let config = StorageConfig::parse(url).unwrap();
+        assert_eq!(config.driver(), "composite", "{url}");
+        assert_eq!(config.to_string(), expected, "{url}");
+        assert_eq!(
+            StorageConfig::parse(&config.to_string()).unwrap(),
+            config,
+            "{url}"
+        );
+    }
+}
+
 #[cfg(feature = "s3")]
 #[test]
 fn parses_an_encoded_s3_blob_backend_without_connecting() {

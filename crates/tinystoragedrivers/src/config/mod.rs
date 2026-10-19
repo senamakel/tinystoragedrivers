@@ -433,16 +433,22 @@ impl fmt::Display for StorageConfig {
             }
             Self::File { dir } => write!(f, "file:{}", dir.display()),
             Self::Composite { records, blobs } => {
-                let separator = if records.to_string().contains('?') {
-                    '&'
-                } else {
-                    '?'
-                };
+                let rendered_records = records.to_string();
+                let (records_url, fragment) = rendered_records
+                    .split_once('#')
+                    .map_or((rendered_records.as_str(), None), |(url, fragment)| {
+                        (url, Some(fragment))
+                    });
+                let separator = if records_url.contains('?') { '&' } else { '?' };
                 write!(
                     f,
-                    "{records}{separator}blobs={}",
+                    "{records_url}{separator}blobs={}",
                     encode_query_component(&blobs.to_string())
-                )
+                )?;
+                if let Some(fragment) = fragment {
+                    write!(f, "#{fragment}")?;
+                }
+                Ok(())
             }
         }
     }
