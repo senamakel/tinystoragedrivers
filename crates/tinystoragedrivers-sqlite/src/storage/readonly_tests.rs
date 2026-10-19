@@ -160,7 +160,7 @@ fn existing_read_only_open_does_not_initialize_an_old_schema() {
 }
 
 #[tokio::test]
-async fn existing_read_only_open_does_not_create_wal_sidecars() {
+async fn existing_read_only_open_preserves_database_and_only_creates_wal_coordination_files() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("storage");
     let database = path.join(ROOT_FILE);
@@ -195,10 +195,65 @@ async fn existing_read_only_open_does_not_create_wal_sidecars() {
             .doc,
         json!({"value": 1})
     );
-    assert_eq!(directory_entries(&path), entries_before);
+    let expected_entries = BTreeSet::from([
+        OsString::from(ROOT_FILE),
+        OsString::from(format!("{ROOT_FILE}-shm")),
+        OsString::from(format!("{ROOT_FILE}-wal")),
+    ]);
+    assert_eq!(directory_entries(&path), expected_entries);
     drop(ports);
     drop(read_only);
 
-    assert_eq!(directory_entries(&path), entries_before);
+    assert!(directory_entries(&path).is_subset(&expected_entries));
+    assert_eq!(std::fs::read(&database).unwrap(), database_before);
+}
+
+#[tokio::test]
+async fn existing_read_only_open_reads_committed_wal_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("storage");
+    let database = path.join(ROOT_FILE);
+    let writer = SqliteStorage::open(&path).unwrap();
+    let writer_ports = writer.for_scope(&Scope::local()).unwrap();
+    writer_ports
+        .documents()
+        .ensure_collection(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    writer_ports
+        .documents()
+        .put("notes", "first", json!({"value": 1}), Precondition::Absent)
+        .await
+        .unwrap();
+
+    let database_before = std::fs::read(&database).unwrap();
+    let read_only = SqliteStorage::open_existing_read_only(&path).unwrap();
+    let reader_ports = read_only.for_scope(&Scope::local()).unwrap();
+    assert_eq!(
+        reader_ports
+            .documents()
+            .get("notes", "first")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        json!({"value": 1})
+    );
+
+    writer_ports
+        .documents()
+        .put("notes", "second", json!({"value": 2}), Precondition::Absent)
+        .await
+        .unwrap();
+    assert_eq!(
+        reader_ports
+            .documents()
+            .get("notes", "second")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        json!({"value": 2})
+    );
     assert_eq!(std::fs::read(&database).unwrap(), database_before);
 }

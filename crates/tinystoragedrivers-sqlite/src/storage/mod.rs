@@ -91,15 +91,20 @@ impl SqliteStorage {
         Self::assemble(&file, Arc::new(system_clock))
     }
 
-    /// Open an existing database for reads without creating files, changing
-    /// SQLite pragmas, or preparing or migrating its schema.
+    /// Open an existing database for reads without creating the database or
+    /// its parent directory, applying write-oriented SQLite pragmas, or
+    /// preparing or migrating its schema.
+    ///
+    /// SQLite may create or update `-wal` and `-shm` coordination files while
+    /// opening a WAL database. Those files can remain after this handle closes.
     ///
     /// The path rules match [`Self::open`]: a `.db` or `.sqlite` path names a
     /// file; any other path names a directory containing `storage.db`. The
     /// database's TSD table layout is validated as-is. Returned document
     /// handles also refuse schema declarations, and writes through any storage
     /// port or [`SqliteNative`] connection fail because SQLite opened the file
-    /// with read-only flags.
+    /// with read-only flags. This does not prevent SQLite from maintaining WAL
+    /// coordination files when needed to read committed WAL data.
     ///
     /// # Errors
     ///

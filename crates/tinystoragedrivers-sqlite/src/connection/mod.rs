@@ -97,7 +97,9 @@ impl Db {
         Self::open_with_mode(&normalize(path)?, false)
     }
 
-    /// Open an existing database without creating files or changing its schema.
+    /// Open an existing database without creating the database or changing
+    /// its schema. SQLite may create or update WAL coordination files when
+    /// needed to read the database.
     pub(crate) fn open_read_only(path: &Path) -> Result<Arc<Self>> {
         Self::open_with_mode(&normalize_existing(path)?, true)
     }
