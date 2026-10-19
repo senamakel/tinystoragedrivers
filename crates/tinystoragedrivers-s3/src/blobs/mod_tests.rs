@@ -1,7 +1,117 @@
 //! Scoped blob conformance and multipart publication guarantees.
 
 use super::*;
+use futures_util::stream::BoxStream;
+use object_store::{CopyOptions, GetOptions, PutOptions};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tinystoragedrivers_core::{MemoryStorage, ScopeGeneration, ScopedStorage, StorageBackend};
+
+#[derive(Debug)]
+struct MissingSweepHeads {
+    inner: object_store::memory::InMemory,
+    disappear: AtomicBool,
+}
+
+impl std::fmt::Display for MissingSweepHeads {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("missing-sweep-heads")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for MissingSweepHeads {
+    async fn put_opts(
+        &self,
+        path: &Path,
+        data: object_store::PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(path, data, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        path: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(path, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        path: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        if self.disappear.load(Ordering::SeqCst)
+            && (path.as_ref().ends_with("/orphans/a") || path.as_ref().ends_with("/orphans/b"))
+        {
+            return Err(object_store::Error::NotFound {
+                path: path.to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "test object removed")
+                    .into(),
+            });
+        }
+        self.inner.get_opts(path, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&Path>,
+    ) -> BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+#[tokio::test]
+async fn sweep_page_does_not_report_eof_when_all_selected_heads_disappear() {
+    let objects = Arc::new(MissingSweepHeads {
+        inner: object_store::memory::InMemory::new(),
+        disappear: AtomicBool::new(false),
+    });
+    let blobs = S3Blobs::with_store(
+        objects.clone(),
+        None,
+        "test",
+        &Scope::new("sweep-head-race").unwrap(),
+    )
+    .unwrap();
+    for key in ["orphans/a", "orphans/b", "orphans/c"] {
+        blobs.put(key, vec![1], None).await.unwrap();
+    }
+
+    // The backend LIST already selected a first page of two keys. Simulate
+    // those objects being removed before its HEAD metadata requests.
+    objects.disappear.store(true, Ordering::SeqCst);
+    let error = blobs
+        .list_sweep_page("orphans/", None, 2)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+    assert!(blobs.head("orphans/c").await.unwrap().is_some());
+}
 
 #[derive(Debug)]
 struct Composite {
