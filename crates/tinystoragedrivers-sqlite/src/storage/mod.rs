@@ -122,12 +122,17 @@ impl SqliteStorage {
         let db = Db::open_read_only(&file)?;
         let tables = Arc::new(Tables::new());
         let validate = Arc::clone(&tables);
-        db.run_now(move |conn| validate.validate(conn))?;
+        let blob_sweep_supported = db.run_now(move |conn| {
+            validate
+                .validate(conn)
+                .and_then(|()| validate.blob_write_times(conn))
+        })?;
         Ok(Self {
             db,
             tables,
             clock: Arc::new(system_clock),
             existing: true,
+            blob_sweep_supported,
         })
     }
 
