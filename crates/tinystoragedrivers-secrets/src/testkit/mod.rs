@@ -18,6 +18,7 @@
 )]
 
 mod document;
+mod versioned;
 
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -31,6 +32,7 @@ use tinystoragedrivers_core::ErrorKind;
 use crate::store::{MAX_SECRET_NAME_LEN, SecretStore};
 
 pub use document::document_secrets_conformance;
+pub use versioned::versioned_secrets_conformance;
 
 /// Run every check against `store`.
 ///
@@ -195,12 +197,20 @@ async fn invalid_names(store: &dyn SecretStore) {
     for bad in ["", "nul\0byte", "line\nbreak", too_long.as_str()] {
         expect_invalid(store.get(bad).await, "get must reject an invalid name");
         expect_invalid(
+            store.get_versioned(bad).await,
+            "get_versioned must reject an invalid name",
+        );
+        expect_invalid(
             store.set(bad, b"v").await,
             "set must reject an invalid name",
         );
         expect_invalid(
             store.delete(bad).await,
             "delete must reject an invalid name",
+        );
+        expect_invalid(
+            store.set_if(bad, b"v", crate::Precondition::Absent).await,
+            "set_if must reject an invalid name",
         );
     }
     // Checked whether or not the store can enumerate: an invalid prefix is

@@ -38,7 +38,9 @@ behind the `secrets` feature, and `keyring` adds the OS store.
 | Method | Contract |
 | --- | --- |
 | `get(name)` | The value, or `None` when absent. Wrapped in `Zeroizing`. |
+| `get_versioned(name)` | The value and opaque `SecretVersion` from one snapshot, or `None` when absent. |
 | `set(name, bytes)` | Store, replacing any previous value. |
+| `set_if(name, bytes, condition)` | Store only if `Precondition::Absent` or the observed `Precondition::Version` still holds; stale conditions are `Conflict`. Returns the revision for its committed write. |
 | `delete(name)` | Remove; report whether it existed. |
 | `list(prefix)` | Names starting with `prefix`, sorted. `""` lists every secret. |
 | `enumerable()` | Whether `list` works. Default `true`. |
@@ -63,6 +65,23 @@ Errors:
 - A locked or denied store, and transient I/O, are `Unavailable`.
 - A store that cannot enumerate fails `list` with `Backend`.
 - Messages never contain key bytes, plaintext or secret names.
+
+Versioned writes:
+- `SecretVersion` is an opaque, redacted 256-bit token, not the document
+  driver's monotonically increasing `Version`. It binds the secret name and
+  storage domain to the stored encrypted representation. Handles for the same
+  persistent store share a domain; independent stores do not. Rewriting identical
+  plaintext and deleting/recreating a secret both produce a different token.
+- `DocumentSecrets` includes scope, collection, name, native document revision
+  and ciphertext in the token. `set_if` re-reads and checks that token, then
+  uses the document store's native version precondition for the atomic write.
+- `EncryptedFileSecrets` binds the stable file path and hashes the name and exact encrypted `secrets.enc`
+  snapshot while holding the existing cross-process lock. Since the file is one
+  encrypted map, writing any entry invalidates tokens for every entry. This
+  conservative conflict avoids a new file format or version sidecar.
+- `MemorySecrets` keeps per-name generations, including tombstones, under its
+  mutex. Keyring stores do not support these methods and return typed
+  `Unsupported(ConditionalSecretWrites)` errors.
 
 ## Formats
 

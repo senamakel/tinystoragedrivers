@@ -44,6 +44,59 @@ async fn port_conformance_passes_through_the_bus_client() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn concurrent_secret_creates_through_the_bus_have_one_winner() {
+    let rig = rig(Admission::Confidential).await;
+    let first_client = rig.bus.secrets();
+    let second_bus = BusStorage::connect(rig.loopback.clone(), Scope::local())
+        .await
+        .unwrap();
+    let second_client = second_bus.secrets();
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let mut writers = Vec::new();
+    for (secrets, value) in [
+        (first_client.clone(), b"first".as_slice()),
+        (second_client, b"second".as_slice()),
+    ] {
+        let barrier = barrier.clone();
+        writers.push(tokio::spawn(async move {
+            barrier.wait().await;
+            secrets
+                .set_if(
+                    "bus/race",
+                    value,
+                    tinystoragedrivers_secrets::Precondition::Absent,
+                )
+                .await
+        }));
+    }
+    barrier.wait().await;
+    let mut successes = 0;
+    let mut conflicts = 0;
+    let mut winning_version = None;
+    for writer in writers {
+        match writer.await.unwrap() {
+            Ok(version) => {
+                successes += 1;
+                winning_version = Some(version);
+            }
+            Err(error) if matches!(error.kind(), tinystoragedrivers_core::ErrorKind::Conflict) => {
+                conflicts += 1
+            }
+            Err(error) => panic!("unexpected secret CAS error: {error:?}"),
+        }
+    }
+    assert_eq!((successes, conflicts), (1, 1));
+    let found = first_client
+        .get_versioned("bus/race")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(found.0.as_slice() == b"first" || found.0.as_slice() == b"second");
+    assert_eq!(Some(found.1), winning_version);
+    assert!(!format!("{found:?}").contains("first"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_blob_over_the_frame_cap_moves_over_a_stream() {
     let rig = rig(Admission::Private).await;
     let blobs = rig.storage.blobs();

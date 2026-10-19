@@ -12,7 +12,7 @@ use tinystoragedrivers_core::ErrorKind;
 
 use crate::crypto::hex_decode;
 use crate::crypto::tests::{OPENHUMAN_SECRETS_ENC_HEX, fixture_key};
-use crate::testkit::secrets_conformance;
+use crate::testkit::{secrets_conformance, versioned_secrets_conformance};
 
 /// A fresh directory under the target dir's temp area, removed on drop.
 pub(super) struct TempDir(pub(super) PathBuf);
@@ -90,8 +90,200 @@ async fn passes_the_secrets_conformance_suite() {
     let dir = TempDir::new("conformance");
     let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key().unwrap());
     secrets_conformance(&store).await;
+    versioned_secrets_conformance(&store).await;
     assert_eq!(store.backend_name(), "encrypted_file");
     assert_eq!(store.path(), dir.0.join("secrets.enc"));
+}
+
+#[tokio::test]
+async fn independent_file_handles_have_atomic_versioned_writes() {
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    let dir = TempDir::new("cas-independent-handles");
+    let key = crypto::generate_key().unwrap();
+    let first = EncryptedFileSecrets::new(&dir.0, key.clone());
+    let second = EncryptedFileSecrets::new(&dir.0, key);
+    first
+        .set_if("shared", b"initial", crate::Precondition::Absent)
+        .await
+        .unwrap();
+    let (_, first_version) = first.get_versioned("shared").await.unwrap().unwrap();
+    let (_, second_version) = second.get_versioned("shared").await.unwrap().unwrap();
+    assert_eq!(first_version, second_version);
+    let version = first_version;
+
+    let barrier = Arc::new(Barrier::new(2));
+    let first_barrier = Arc::clone(&barrier);
+    let first_write = async {
+        first_barrier.wait().await;
+        first
+            .set_if(
+                "shared",
+                b"writer-a",
+                crate::Precondition::Version(version.clone()),
+            )
+            .await
+    };
+    let second_write = async {
+        barrier.wait().await;
+        second
+            .set_if("shared", b"writer-b", crate::Precondition::Version(version))
+            .await
+    };
+    let (first_result, second_result) = tokio::join!(first_write, second_write);
+    assert_eq!(
+        first_result.is_ok() as usize + second_result.is_ok() as usize,
+        1
+    );
+    let loser = first_result.err().or_else(|| second_result.err()).unwrap();
+    assert_eq!(loser.kind(), ErrorKind::Conflict);
+    let current = first.get("shared").await.unwrap().unwrap();
+    assert!(current.as_slice() == b"writer-a" || current.as_slice() == b"writer-b");
+}
+
+#[tokio::test]
+async fn another_file_entry_write_invalidates_the_snapshot_version() {
+    let dir = TempDir::new("cas-whole-file-version");
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key());
+    store.set("target", b"before").await.unwrap();
+    let (_, version) = store
+        .get_versioned("target")
+        .await
+        .unwrap()
+        .expect("target exists");
+    store.set("unrelated", b"other").await.unwrap();
+    let error = store
+        .set_if("target", b"after", crate::Precondition::Version(version))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+}
+
+#[tokio::test]
+async fn copied_encrypted_files_have_distinct_version_domains() {
+    let first_dir = TempDir::new("cas-file-domain-a");
+    let second_dir = TempDir::new("cas-file-domain-b");
+    let key = fixture_key();
+    let first = EncryptedFileSecrets::new(&first_dir.0, key.clone());
+    first.set("shared", b"same").await.unwrap();
+    fs::copy(first.path(), second_dir.0.join("secrets.enc")).unwrap();
+    let second = EncryptedFileSecrets::new(&second_dir.0, key);
+    let (_, first_version) = first.get_versioned("shared").await.unwrap().unwrap();
+    let (_, second_version) = second.get_versioned("shared").await.unwrap().unwrap();
+    assert_ne!(first_version, second_version);
+    let error = second
+        .set_if(
+            "shared",
+            b"wrong-domain",
+            crate::Precondition::Version(first_version),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+}
+
+#[tokio::test]
+async fn independent_processes_have_atomic_versioned_writes() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::{Command, Stdio};
+
+    let dir = TempDir::new("cas-independent-processes");
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key());
+    store.set("shared", b"initial").await.unwrap();
+
+    let worker = || {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("file::tests::file_cas_process_worker")
+            .arg("--nocapture")
+            .env("TSD_SECRET_CAS_PROCESS_DIR", &dir.0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        (child, stdout)
+    };
+    let (mut first, mut first_output) = worker();
+    let (mut second, mut second_output) = worker();
+
+    fn wait_until_ready(output: &mut BufReader<std::process::ChildStdout>) {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert!(
+                output.read_line(&mut line).unwrap() > 0,
+                "worker exited before ready"
+            );
+            if line.trim() == "READY" {
+                return;
+            }
+        }
+    }
+    wait_until_ready(&mut first_output);
+    wait_until_ready(&mut second_output);
+    for child in [&mut first, &mut second] {
+        child.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
+        child.stdin.as_mut().unwrap().flush().unwrap();
+    }
+
+    fn result(output: &mut BufReader<std::process::ChildStdout>) -> String {
+        let mut text = String::new();
+        output.read_to_string(&mut text).unwrap();
+        text.lines()
+            .find_map(|line| line.strip_prefix("CAS_RESULT:"))
+            .expect("worker reports its compare-and-set result")
+            .to_owned()
+    }
+    let first_result = result(&mut first_output);
+    let second_result = result(&mut second_output);
+    assert!(first.wait().unwrap().success());
+    assert!(second.wait().unwrap().success());
+    assert_eq!(
+        [first_result.as_str(), second_result.as_str()]
+            .into_iter()
+            .filter(|result| *result == "won")
+            .count(),
+        1,
+        "exactly one process must win"
+    );
+    assert_eq!(
+        [first_result.as_str(), second_result.as_str()]
+            .into_iter()
+            .filter(|result| *result == "conflict")
+            .count(),
+        1,
+        "the losing process must receive a conflict"
+    );
+}
+
+#[tokio::test]
+async fn file_cas_process_worker() {
+    let Ok(dir) = std::env::var("TSD_SECRET_CAS_PROCESS_DIR") else {
+        return;
+    };
+    use std::io::{Read, Write};
+
+    let store = EncryptedFileSecrets::new(dir, fixture_key());
+    let (_, version) = store
+        .get_versioned("shared")
+        .await
+        .unwrap()
+        .expect("the parent seeded the shared secret");
+    println!("READY");
+    std::io::stdout().flush().unwrap();
+    let mut start = [0; 3];
+    std::io::stdin().read_exact(&mut start).unwrap();
+    let result = store
+        .set_if("shared", b"child", crate::Precondition::Version(version))
+        .await;
+    match result {
+        Ok(_) => println!("CAS_RESULT:won"),
+        Err(error) if error.kind() == ErrorKind::Conflict => println!("CAS_RESULT:conflict"),
+        Err(error) => panic!("unexpected conditional write error: {error}"),
+    }
 }
 
 #[tokio::test]
