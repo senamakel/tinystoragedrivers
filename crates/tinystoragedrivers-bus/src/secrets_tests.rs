@@ -66,6 +66,11 @@ fn secret_debug_output_is_redacted() {
         format!("{:?}", conditional.condition),
         "Version(SecretRevision(..))"
     );
+    assert_eq!(
+        format!("{:?}", SecretRevision([7; 32])),
+        "SecretRevision(..)"
+    );
+    assert_eq!(format!("{:?}", SecretPrecondition::Absent), "Absent");
 }
 
 #[test]
