@@ -28,6 +28,23 @@ fn a_closed_file_reopens_fresh() {
 }
 
 #[test]
+fn read_only_and_writable_handles_use_separate_connections() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared.db");
+    let writable = Db::open(&path).unwrap();
+    let read_only = Db::open_read_only(&path).unwrap();
+    assert!(!Arc::ptr_eq(&writable, &read_only));
+    let error = read_only
+        .run_now(|conn| {
+            conn.execute("CREATE TABLE forbidden (id INTEGER)", [])
+                .map(|_| ())
+                .map_err(during("read-only test"))
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+}
+
+#[test]
 fn creates_missing_directories_and_uses_wal() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(&dir.path().join("nested/deeper/w.db")).unwrap();

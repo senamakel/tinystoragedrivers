@@ -39,8 +39,8 @@ use crate::storage::Clock;
 use ops::Ctx;
 
 /// What this driver supports.
-pub(crate) fn capabilities() -> Capabilities {
-    Capabilities::none()
+pub(crate) fn capabilities(read_only: bool) -> Capabilities {
+    let capabilities = Capabilities::none()
         .with(Capability::FullText)
         .with(Capability::Transactions)
         .with(Capability::ValidatedBatch)
@@ -57,7 +57,14 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::ScopeEnumeration)
         .with(Capability::StreamSeal)
         .with(Capability::RecordMetadata)
-        .with(Capability::SharedAcrossProcesses)
+        .with(Capability::SharedAcrossProcesses);
+    if read_only {
+        capabilities
+            .without(Capability::ScopePurge)
+            .without(Capability::AtomicScopePurge)
+    } else {
+        capabilities
+    }
 }
 
 /// SQLite documents bound to one scope.
@@ -191,7 +198,7 @@ fn parse_cursor(collection: &str, scope: &Scope, query: &Query) -> Result<Option
 #[async_trait]
 impl DocumentStore for SqliteDocuments {
     fn capabilities(&self) -> Capabilities {
-        capabilities()
+        capabilities(self.db.is_read_only())
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
