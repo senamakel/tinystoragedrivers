@@ -9,9 +9,15 @@ use crate::document::{
 use crate::error::{ErrorKind, Result, StorageError};
 use crate::filter::{Filter, ID_FIELD, SCHEMA_FIELD, Sort};
 
-use super::compose::Registry;
+#[cfg(any(test, doc))]
+use super::Registry;
+#[cfg(any(test, doc))]
+use super::Step;
+use super::TransformExecutor;
+use super::compose::PreparedRegistry;
 use super::migrations::{Migrations, Progress, migrations_spec, step_key};
-use super::types::{Expiry, Owner, SourceRecord, Step, StepBody, StepFn, TargetRecord};
+use super::prepared::{PreparedBody as StepBody, PreparedStep, Transform};
+use super::types::{Expiry, Owner, SourceRecord, StepFn, TargetRecord};
 use super::{runner_blobs, runner_streams};
 
 /// How [`Registry::migrate`] runs.
@@ -66,7 +72,7 @@ pub struct MigrationReport {
     pub already_done: usize,
 }
 
-impl Registry {
+impl PreparedRegistry {
     /// Run every pending step over `storage`'s scope, in schema order and step
     /// order, then open the migrated collections for writes.
     ///
@@ -126,10 +132,11 @@ impl Registry {
     /// [`ErrorKind::InvalidInput`] for a zero batch size or a step that emits
     /// a record for a collection its owner does not declare; whatever the step
     /// function or the document store returns otherwise.
-    pub async fn migrate(
+    pub(super) async fn migrate(
         &self,
         storage: &ScopedStorage,
         options: &MigrateOptions,
+        executor: Option<&dyn TransformExecutor>,
     ) -> Result<MigrationReport> {
         if options.batch_size == 0 {
             return Err(StorageError::invalid_input(
@@ -143,10 +150,10 @@ impl Registry {
         let mut plan = Vec::new();
         let mut remaining: HashMap<&str, usize> = HashMap::new();
         for (owner, step) in self.steps() {
-            let key = step_key(owner.as_str(), step.item, step.id)?;
+            let key = step_key(owner.as_str(), &step.item, &step.id)?;
             let progress = migrations.load(&key).await?;
             if !progress.as_ref().is_some_and(|found| found.done) {
-                *remaining.entry(step.item).or_default() += 1;
+                *remaining.entry(&step.item).or_default() += 1;
             }
             plan.push((owner, step, key, progress));
         }
@@ -171,6 +178,7 @@ impl Registry {
                         owner,
                         step,
                         run,
+                        executor,
                         docs,
                         batch_size: options.batch_size,
                     }
@@ -180,6 +188,7 @@ impl Registry {
                 StepBody::Streams(run) => {
                     let context = Context {
                         storage,
+                        executor,
                         owner,
                         step,
                         migrations: &migrations,
@@ -191,6 +200,7 @@ impl Registry {
                 StepBody::Blobs(run) => {
                     let context = Context {
                         storage,
+                        executor,
                         owner,
                         step,
                         migrations: &migrations,
@@ -202,14 +212,14 @@ impl Registry {
             };
             report.ran.push(StepReport {
                 owner: owner.to_string(),
-                item: step.item.to_owned(),
-                step: step.id.to_owned(),
+                item: step.item.clone(),
+                step: step.id.clone(),
                 written,
             });
-            if let Some(left) = remaining.get_mut(step.item) {
+            if let Some(left) = remaining.get_mut(step.item.as_str()) {
                 *left -= 1;
                 if *left == 0 {
-                    self.mark_ready(storage.scope(), step.item);
+                    self.mark_ready(storage.scope(), &step.item);
                 }
             }
         }
@@ -221,17 +231,19 @@ impl Registry {
 pub(super) struct Context<'a> {
     pub(super) storage: &'a ScopedStorage,
     pub(super) owner: &'a Owner,
-    pub(super) step: &'a Step,
+    pub(super) step: &'a PreparedStep,
+    pub(super) executor: Option<&'a dyn TransformExecutor>,
     pub(super) migrations: &'a Migrations,
     pub(super) key: &'a crate::Key,
     pub(super) batch_size: usize,
 }
 
 struct StepRun<'a> {
-    registry: &'a Registry,
+    registry: &'a PreparedRegistry,
     owner: &'a Owner,
-    step: &'a Step,
-    run: &'a StepFn,
+    step: &'a PreparedStep,
+    run: &'a Transform<StepFn>,
+    executor: Option<&'a dyn TransformExecutor>,
     docs: &'a std::sync::Arc<dyn DocumentStore>,
     batch_size: usize,
 }
@@ -255,7 +267,7 @@ impl StepRun<'_> {
         }
         let mut progress = progress.unwrap_or_else(|| Progress {
             owner: self.owner.to_string(),
-            step: self.step.id.to_owned(),
+            step: self.step.id.clone(),
             from: self.step.from,
             to: self.step.to,
             cursor: None,
@@ -297,6 +309,24 @@ impl StepRun<'_> {
         Ok(progress.written)
     }
 
+    async fn map_records(&self, records: Vec<SourceRecord>) -> Result<Vec<TargetRecord>> {
+        match self.run {
+            Transform::Local(run) => run(records),
+            Transform::External(descriptor) => {
+                super::executor::required(self.executor)?
+                    .documents(
+                        self.owner,
+                        super::DocumentsTransformRequest {
+                            operation: descriptor.operation.clone(),
+                            version: descriptor.version,
+                            records,
+                        },
+                    )
+                    .await
+            }
+        }
+    }
+
     async fn write_batch(&self, items: Vec<crate::Versioned<serde_json::Value>>) -> Result<u64> {
         let versions: HashMap<String, Version> = items
             .iter()
@@ -315,7 +345,7 @@ impl StepRun<'_> {
                 meta: item.meta,
             })
             .collect();
-        let outputs = (self.run)(records)?;
+        let outputs = self.map_records(records).await?;
         // Validate every output before writing any, so a bad step leaves the
         // batch untouched.
         let schemas = outputs
@@ -406,11 +436,11 @@ impl StepRun<'_> {
     async fn remove_replaced(&self, id: &str, version: Version) -> Result<()> {
         match self
             .docs
-            .delete(self.step.item, id, Precondition::Version(version))
+            .delete(&self.step.item, id, Precondition::Version(version))
             .await
         {
             Err(error) if error.kind() == ErrorKind::Conflict => {
-                if self.docs.get(self.step.item, id).await?.is_some() {
+                if self.docs.get(&self.step.item, id).await?.is_some() {
                     return Err(error);
                 }
                 Ok(())

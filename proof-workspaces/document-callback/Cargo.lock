@@ -1037,10 +1037,19 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
+ "tinystoragedrivers-schema",
  "tokio",
  "ulid",
  "zstd",
+]
+
+[[package]]
+name = "tinystoragedrivers-schema"
+version = "1.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

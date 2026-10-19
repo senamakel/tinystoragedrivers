@@ -24,6 +24,7 @@ use crate::capabilities::{Capabilities, Capability};
 use crate::document::DocumentStore;
 use crate::error::{Result, StorageError};
 use crate::fence::Fence;
+use crate::queue::{DocumentQueue, QueueStore};
 use crate::scope::Scope;
 use crate::stream::StreamStore;
 
@@ -46,6 +47,41 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
 
     /// Optional abilities every handle from this backend has.
     fn capabilities(&self) -> Capabilities;
+
+    /// Whether scope-purge handles can validate their bound generation and
+    /// native fence before a composite driver admits access to independent
+    /// ports. Defaults to false for compatibility with existing backends.
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        false
+    }
+
+    /// Whether scope handles can validate native generation admission
+    /// independently of an optional writer fence.
+    fn supports_scope_purge_generation_validation(&self) -> bool {
+        false
+    }
+
+    /// Number of composite record layers above the native storage owner.
+    #[doc(hidden)]
+    fn composite_depth(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    /// Open an internal composite coordinator scope without composing its
+    /// blob ports or applying public-scope admission rules.
+    #[doc(hidden)]
+    fn for_composite_internal_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
+        if scope.as_str() != "__tsd_composite_purge_coordinator"
+            && !scope
+                .as_str()
+                .starts_with("__tsd_composite_purge_coordinator/")
+        {
+            return Err(StorageError::invalid_input(
+                "invalid internal composite storage scope",
+            ));
+        }
+        self.for_scope(scope)
+    }
 
     /// Return native handles that use existing schema without declaring or repairing it.
     ///
@@ -257,11 +293,14 @@ pub struct ScopedStorage {
     documents: Arc<dyn DocumentStore>,
     streams: Arc<dyn StreamStore>,
     blobs: Arc<dyn BlobStore>,
+    queues: Arc<dyn QueueStore>,
     purge: Option<Arc<dyn ScopePurge>>,
 }
 
 impl ScopedStorage {
-    /// Assemble handles a driver opened for `scope`.
+    /// Assemble handles a driver opened for `scope`. The queue port defaults
+    /// to a [`DocumentQueue`] over `documents`; [`with_queues`](Self::with_queues)
+    /// replaces it.
     #[must_use]
     pub fn new(
         scope: Scope,
@@ -270,14 +309,26 @@ impl ScopedStorage {
         streams: Arc<dyn StreamStore>,
         blobs: Arc<dyn BlobStore>,
     ) -> Self {
+        let queues: Arc<dyn QueueStore> = Arc::new(DocumentQueue::new(&documents));
         Self {
             scope,
             driver,
             documents,
             streams,
             blobs,
+            queues,
             purge: None,
         }
+    }
+
+    /// Serve the queue port from `queues` instead of the default
+    /// [`DocumentQueue`] over the document port: a broker such as `RabbitMQ`,
+    /// or a bus client's queue object. The caller binds `queues` to the same
+    /// scope as the other handles.
+    #[must_use]
+    pub fn with_queues(mut self, queues: Arc<dyn QueueStore>) -> Self {
+        self.queues = queues;
+        self
     }
 
     /// Attach the driver's native scope reset port.
@@ -322,6 +373,45 @@ impl ScopedStorage {
         }
     }
 
+    /// Check that this handle's native generation and fence are still admitted.
+    ///
+    /// # Errors
+    /// Unsupported without a native purge port, or a stale/pending binding.
+    #[doc(hidden)]
+    pub async fn validate_purge_binding(&self) -> Result<()> {
+        match &self.purge {
+            Some(port) => port.validate_binding().await,
+            None => Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "this driver cannot validate a scope purge binding",
+            )),
+        }
+    }
+
+    /// Check native generation admission without checking a writer fence.
+    #[doc(hidden)]
+    pub async fn validate_purge_generation(&self) -> Result<()> {
+        match &self.purge {
+            Some(port) => port.validate_generation().await,
+            None => Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "this driver cannot validate a scope generation",
+            )),
+        }
+    }
+
+    pub(crate) fn supports_purge_generation_validation(&self) -> bool {
+        self.purge
+            .as_ref()
+            .is_some_and(|purge| purge.supports_generation_validation())
+    }
+
+    pub(crate) fn supports_purge_binding_validation(&self) -> bool {
+        self.purge
+            .as_ref()
+            .is_some_and(|purge| purge.supports_binding_validation())
+    }
+
     /// The scope every handle is bound to.
     #[must_use]
     pub fn scope(&self) -> &Scope {
@@ -350,6 +440,14 @@ impl ScopedStorage {
     #[must_use]
     pub fn blobs(&self) -> &Arc<dyn BlobStore> {
         &self.blobs
+    }
+
+    /// The queue port: a [`DocumentQueue`] over [`documents`](Self::documents)
+    /// unless the handles were built [`with_queues`](Self::with_queues). Every
+    /// call returns the same handle, so specs it caches are shared.
+    #[must_use]
+    pub fn queues(&self) -> &Arc<dyn QueueStore> {
+        &self.queues
     }
 }
 

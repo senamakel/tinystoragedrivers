@@ -381,6 +381,8 @@ fn capability_names_round_trip_without_host_only_entries() {
     // trigger vacuum or list other tenants. The metadata and seal calls it may use.
     assert!(!names.contains(&"maintenance".to_owned()));
     assert!(!names.contains(&"scope_enumeration".to_owned()));
+    assert!(!names.contains(&"shared_across_processes".to_owned()));
+    assert!(!names.contains(&"cross_process_cas".to_owned()));
     assert!(names.contains(&"record_metadata".to_owned()));
     assert!(names.contains(&"stream_seal".to_owned()));
     let parsed = capabilities_of(&names);

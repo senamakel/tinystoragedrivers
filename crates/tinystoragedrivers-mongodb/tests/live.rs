@@ -18,6 +18,23 @@ async fn live_conformance_on_a_replica_set() {
 }
 
 #[tokio::test]
+async fn live_independent_connections_share_one_database() {
+    let Some(url) = support::url() else {
+        return skip("live_independent_connections_share_one_database");
+    };
+    let database = support::url_database(&url);
+    conformance::run_shared(|| {
+        let (url, database) = (url.clone(), database.clone());
+        async move {
+            tinystoragedrivers_mongodb::MongoStorage::connect(&url, &database)
+                .await
+                .expect("TSD_MONGO_URL is set but the server cannot be reached")
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn live_conformance_without_transactions() {
     let Some(backend) = connect().await else {
         return skip("live_conformance_without_transactions");

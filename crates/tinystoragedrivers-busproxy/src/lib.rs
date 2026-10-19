@@ -11,10 +11,12 @@
 //!   in bounded chunks, watch invalidations as signals. [`connect_storage`]
 //!   is the one call a module makes to obtain its
 //!   [`BusStorage`](tinystoragedrivers_client::BusStorage).
-//! * **Host side.** [`serve`] registers the four objects on the host's
+//! * **Host side.** [`serve`] registers the five objects on the host's
 //!   connection and hands every call, with the broker-authenticated sender, to
 //!   a [`StorageEndpoint`]. [`PerCallerEndpoint`] is the ready-made endpoint
-//!   that binds each caller to its own `StorageServer`.
+//!   that binds each caller to its own `StorageServer`; a host that builds
+//!   that server `with_queue_manifest` serves exactly the queues its manifest
+//!   declares.
 //!
 //! ```no_run
 //! # async fn module(connection: tinybus::Connection) -> tinystoragedrivers_core::Result<()> {

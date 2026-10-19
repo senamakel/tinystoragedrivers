@@ -456,3 +456,105 @@ async fn sealed_state_comes_from_the_stream_backend_not_the_blob_handle() {
     assert!(is_sealed(&storage, "harness.journal/a").await);
     assert_eq!(read_all(&storage, "harness.journal/a").await.len(), 5);
 }
+
+/// Uses the existing failing append fixture to exercise the external async
+/// mapping site with output counts different from source counts.
+#[tokio::test]
+async fn external_expanding_stream_resumes_by_emitted_offset() {
+    use crate::schema::{
+        BlobTransformOutput, BlobTransformRequest, BoxFuture, DocumentsTransformRequest,
+        SchemaDeclaration, StepDeclaration, StreamTransformOutput, StreamTransformRequest,
+        TargetRecord, TransformDescriptor, TransformExecutor, TransformKind,
+    };
+    struct Expand;
+    impl TransformExecutor for Expand {
+        fn documents<'a>(
+            &'a self,
+            _: &'a Owner,
+            _: DocumentsTransformRequest,
+        ) -> BoxFuture<'a, Result<Vec<TargetRecord>>> {
+            unreachable!()
+        }
+        fn blob<'a>(
+            &'a self,
+            _: &'a Owner,
+            _: BlobTransformRequest,
+        ) -> BoxFuture<'a, Result<Option<BlobTransformOutput>>> {
+            unreachable!()
+        }
+        fn stream<'a>(
+            &'a self,
+            _: &'a Owner,
+            request: StreamTransformRequest,
+        ) -> BoxFuture<'a, Result<Option<StreamTransformOutput>>> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                Ok(Some(StreamTransformOutput {
+                    target: request.source.replace(LEGACY, "harness.journal/"),
+                    entries: request
+                        .entries
+                        .into_iter()
+                        .flat_map(|v| [v.clone(), v])
+                        .collect(),
+                }))
+            })
+        }
+    }
+    fn external() -> crate::schema::ComposedRegistry {
+        Registry::compose_with_declarations(
+            [],
+            [SchemaDeclaration {
+                owner: Owner::new("harness").unwrap(),
+                items: Schema::new(Owner::new("harness").unwrap())
+                    .stream("harness.journal", ScopeClass::Tenant)
+                    .items,
+                steps: vec![StepDeclaration {
+                    id: "expand".into(),
+                    item: "harness.journal".into(),
+                    from: 1,
+                    to: 2,
+                    source: Some(LEGACY.into()),
+                    transform: TransformDescriptor {
+                        operation: "expand".into(),
+                        version: 1,
+                        kind: TransformKind::Stream,
+                    },
+                }],
+            }],
+        )
+        .unwrap()
+    }
+    let (storage, flaky) = flaky_storage();
+    seed(&storage, "a", 5).await;
+    storage.streams().seal(&format!("{LEGACY}a")).await.unwrap();
+    let options = MigrateOptions::new().batch_size(2);
+    flaky.appends_left.store(3, Ordering::SeqCst);
+    let registry = external();
+    assert!(
+        registry
+            .migrate_with_executor(&storage, &options, &Expand)
+            .await
+            .is_err()
+    );
+    assert_eq!(storage.streams().len("harness.journal/a").await.unwrap(), 6);
+    assert_eq!(
+        storage.streams().len(&format!("{LEGACY}a")).await.unwrap(),
+        5
+    );
+    assert!(registry.check_ready("harness.journal").is_err());
+    drop(registry);
+    flaky.appends_left.store(usize::MAX, Ordering::SeqCst);
+    let registry = external();
+    assert_eq!(
+        registry
+            .migrate_with_executor(&storage, &options, &Expand)
+            .await
+            .unwrap()
+            .ran[0]
+            .written,
+        10
+    );
+    assert_eq!(read_all(&storage, "harness.journal/a").await.len(), 10);
+    assert!(is_sealed(&storage, "harness.journal/a").await);
+    assert_eq!(storage.streams().streams(LEGACY).await.unwrap().len(), 0);
+}

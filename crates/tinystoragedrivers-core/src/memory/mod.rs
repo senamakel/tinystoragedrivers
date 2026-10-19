@@ -226,7 +226,9 @@ impl StorageBackend for MemoryStorage {
         let capabilities = Capabilities::all()
             .without(crate::Capability::Watch)
             .without(crate::Capability::PresignedUrls)
-            .without(crate::Capability::StreamingBlobs);
+            .without(crate::Capability::StreamingBlobs)
+            .without(crate::Capability::SharedAcrossProcesses)
+            .without(crate::Capability::CrossProcessCas);
         #[cfg(feature = "test-util")]
         let capabilities = if self.native_watch {
             capabilities.with(crate::Capability::Watch)
@@ -234,6 +236,14 @@ impl StorageBackend for MemoryStorage {
             capabilities
         };
         capabilities
+    }
+
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        true
+    }
+
+    fn supports_scope_purge_generation_validation(&self) -> bool {
+        true
     }
 
     async fn prepare_schema(&self) -> Result<()> {

@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schemas/queues.schema.json",
+  "version": 1,
+  "queues": [
+    {
+      "name": "inbound.ingress",
+      "description": "Raw inbound events, written before the platform is acknowledged. The 30-day dedupe window rejects platform redeliveries across restarts.",
+      "owner": "tinyeventqueues",
+      "max_attempts": 8,
+      "dedupe_window_ms": 2592000000,
+      "visibility_ms": 30000
+    },
+    {
+      "name": "inbound.interactive",
+      "description": "Direct messages, mentions and web chat: delivered at once, one turn per conversation.",
+      "owner": "tinyeventqueues",
+      "max_attempts": 5,
+      "visibility_ms": 300000
+    },
+    {
+      "name": "inbound.digest",
+      "description": "Overflow and low-salience events, summarised into one turn per tick.",
+      "owner": "tinyeventqueues",
+      "max_attempts": 3,
+      "visibility_ms": 600000
+    }
+  ]
+}

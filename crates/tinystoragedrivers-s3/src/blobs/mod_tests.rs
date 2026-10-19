@@ -1,7 +1,7 @@
 //! Scoped blob conformance and multipart publication guarantees.
 
 use super::*;
-use tinystoragedrivers_core::{MemoryStorage, ScopedStorage, StorageBackend};
+use tinystoragedrivers_core::{MemoryStorage, ScopeGeneration, ScopedStorage, StorageBackend};
 
 #[derive(Debug)]
 struct Composite {
@@ -13,8 +13,21 @@ impl StorageBackend for Composite {
     fn driver(&self) -> &'static str {
         "test-composite"
     }
+    fn document_driver(&self) -> &'static str {
+        self.documents.document_driver()
+    }
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none()
+        self.documents
+            .capabilities()
+            .iter()
+            .filter(|capability| {
+                matches!(
+                    capability,
+                    tinystoragedrivers_core::Capability::SharedAcrossProcesses
+                        | tinystoragedrivers_core::Capability::CrossProcessCas
+                )
+            })
+            .fold(Capabilities::none(), Capabilities::with)
     }
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
         let local = self.documents.for_scope(scope)?;
@@ -43,7 +56,10 @@ async fn blob_contract_and_scope_isolation() {
         documents: Arc::new(MemoryStorage::new()),
         objects: Arc::new(object_store::memory::InMemory::new()),
     };
-    tinystoragedrivers_core::conformance::run(&backend, false).await;
+    tinystoragedrivers_core::conformance::run_with_process_capabilities(
+        &backend, false, false, false,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -59,6 +75,123 @@ async fn tenant_path_characters_cannot_alias_another_scope() {
     assert_eq!(b.get("x").await.unwrap().unwrap().bytes, [2]);
     assert_eq!(c.get("bob/x").await.unwrap().unwrap().bytes, [3]);
     assert_eq!(a.list("").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unsigned_object_store_keeps_enumeration_but_withholds_physical_purge() {
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let backend = S3Storage::with_store(objects, None, "test").unwrap();
+    let target = Scope::new("u:purge-target").unwrap();
+    let sibling = Scope::new("u:purge-sibling").unwrap();
+    backend
+        .for_scope(&target)
+        .unwrap()
+        .put("one", vec![1], None)
+        .await
+        .unwrap();
+    backend
+        .for_scope(&target)
+        .unwrap()
+        .put("two", vec![2], None)
+        .await
+        .unwrap();
+    backend
+        .for_scope(&sibling)
+        .unwrap()
+        .put("one", vec![3], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.scopes("u:purge-").await.unwrap(),
+        [sibling.clone(), target.clone()]
+    );
+    assert!(!backend.capabilities().contains(Capability::ScopePurge));
+    assert_eq!(
+        backend.purge_scope(&target).await.unwrap_err().kind(),
+        tinystoragedrivers_core::ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    let target_list = backend.for_scope(&target).unwrap().list("").await.unwrap();
+    assert_eq!(target_list.len(), 2);
+    assert!(
+        backend
+            .for_scope(&target)
+            .unwrap()
+            .head("one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        backend
+            .for_scope(&sibling)
+            .unwrap()
+            .list("")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn unsigned_object_store_does_not_advertise_generation_purge() {
+    let backend = S3Storage::with_store(
+        Arc::new(object_store::memory::InMemory::new()),
+        None,
+        "test",
+    )
+    .unwrap();
+    assert!(!backend.supports_generation_purge());
+    assert!(!backend.capabilities().contains(Capability::ScopePurge));
+}
+
+#[tokio::test]
+async fn purge_removes_only_one_physical_generation_and_enumerates_both_roots() {
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let backend = S3Storage::with_store(objects, None, "test").unwrap();
+    let scope = Scope::new("u:generation-isolation").unwrap();
+    let legacy = backend
+        .for_scope_generation(&scope, ScopeGeneration(0))
+        .unwrap();
+    legacy.put("g/1/foo", vec![1], None).await.unwrap();
+    let next = backend
+        .for_scope_generation(&scope, ScopeGeneration(1))
+        .unwrap();
+    next.put("g/1/foo", vec![2], None).await.unwrap();
+    assert_eq!(
+        backend.scopes("u:generation-").await.unwrap(),
+        std::slice::from_ref(&scope)
+    );
+
+    assert_eq!(
+        backend
+            .purge_scope_generation(&scope, ScopeGeneration(0))
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_core::ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+
+    assert_eq!(legacy.list("").await.unwrap().len(), 1);
+    assert_eq!(next.get("g/1/foo").await.unwrap().unwrap().bytes, [2]);
+    assert_eq!(backend.scopes("u:generation-").await.unwrap(), [scope]);
+}
+
+#[tokio::test]
+async fn scope_enumeration_ignores_malformed_utf8_hex_segments() {
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    objects
+        .put(
+            &object_store::path::Path::from("test/scopes/a-é-a/blob"),
+            bytes::Bytes::from_static(b"x").into(),
+        )
+        .await
+        .unwrap();
+    let backend = S3Storage::with_store(objects, None, "test").unwrap();
+    assert_eq!(
+        backend.scopes("").await.unwrap(),
+        [] as [tinystoragedrivers_core::Scope; 0]
+    );
 }
 
 #[tokio::test]

@@ -27,20 +27,21 @@ use crate::key::Key;
 use crate::stream::StreamStore;
 
 use super::migrations::Progress;
+use super::prepared::Transform;
 use super::runner::Context;
 use super::types::StreamStepFn;
 
 pub(super) async fn run(
     context: &Context<'_>,
-    run: &StreamStepFn,
+    run: &Transform<StreamStepFn>,
     progress: Option<Progress>,
 ) -> Result<u64> {
     let step = context.step;
-    let prefix = step.source.unwrap_or_default();
+    let prefix = step.source.as_deref().unwrap_or_default();
     let streams = context.storage.streams();
     let mut progress = progress.unwrap_or_else(|| Progress {
         owner: context.owner.to_string(),
-        step: step.id.to_owned(),
+        step: step.id.clone(),
         from: step.from,
         to: step.to,
         cursor: None,
@@ -57,13 +58,37 @@ pub(super) async fn run(
 }
 
 /// Move one source stream; returns the entries its target ends up holding.
-async fn migrate_stream(context: &Context<'_>, run: &StreamStepFn, source: &str) -> Result<u64> {
+async fn migrate_stream(
+    context: &Context<'_>,
+    run: &Transform<StreamStepFn>,
+    source: &str,
+) -> Result<u64> {
     let step = context.step;
     let streams = context.storage.streams();
     let entries = read_all(streams.as_ref(), source, context.batch_size).await?;
     let sealed = is_sealed(streams.as_ref(), source).await?;
-    let source_key = Key::of([context.owner.as_str(), step.item, step.id, source])?;
-    let Some((target, values)) = run(source.to_owned(), entries)? else {
+    let source_key = Key::of([
+        context.owner.as_str(),
+        step.item.as_str(),
+        step.id.as_str(),
+        source,
+    ])?;
+    let output = match run {
+        Transform::Local(run) => run(source.to_owned(), entries)?,
+        Transform::External(descriptor) => super::executor::required(context.executor)?
+            .stream(
+                context.owner,
+                super::StreamTransformRequest {
+                    operation: descriptor.operation.clone(),
+                    version: descriptor.version,
+                    source: source.to_owned(),
+                    entries,
+                },
+            )
+            .await?
+            .map(|out| (out.target, out.entries)),
+    };
+    let Some((target, values)) = output else {
         streams.delete_stream(source).await?;
         delete_progress(context, &source_key).await?;
         return Ok(0);
@@ -95,7 +120,7 @@ async fn migrate_stream(context: &Context<'_>, run: &StreamStepFn, source: &str)
     }
     let mut progress = recorded.unwrap_or_else(|| Progress {
         owner: context.owner.to_string(),
-        step: step.id.to_owned(),
+        step: step.id.clone(),
         from: step.from,
         to: step.to,
         cursor: Some(target.clone()),
@@ -119,7 +144,7 @@ async fn migrate_stream(context: &Context<'_>, run: &StreamStepFn, source: &str)
         streams
             .append_batch_if_offset(&target, have, batch)
             .await
-            .map_err(|error| competing_runner(error, step.id, step.item, &target))?;
+            .map_err(|error| competing_runner(error, &step.id, &step.item, &target))?;
         have += added;
         progress.written = have;
         context.migrations.save(&source_key, &progress).await?;
@@ -154,7 +179,7 @@ fn competing_runner(error: StorageError, step: &str, item: &str, target: &str) -
 
 /// The target must be the item itself or live under `item/`.
 fn check_target(context: &Context<'_>, target: &str) -> Result<()> {
-    let item = context.step.item;
+    let item = context.step.item.as_str();
     let inside = target == item
         || target
             .strip_prefix(item)

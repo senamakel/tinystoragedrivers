@@ -550,6 +550,7 @@ async fn unsupported_guarantees_never_close_admission_or_erase_data() {
         .unwrap();
     let fence = tinystoragedrivers_core::Fence::epoch(guard, "reset_guards", "lease", "epoch", 1);
     let native = backend.for_scope_fenced(&scope, &fence).unwrap();
+    native.validate_purge_generation().await.unwrap();
     assert_eq!(
         native.purge(&request).await.unwrap_err().kind(),
         ErrorKind::Unsupported(Capability::Fencing)
@@ -579,6 +580,15 @@ async fn unsupported_guarantees_never_close_admission_or_erase_data() {
     );
     let disabled = backend.without_transactions();
     let unsupported = port(&disabled, &scope);
+    assert!(!unsupported.supports_generation_validation());
+    assert_eq!(
+        unsupported.validate_generation().await.unwrap_err().kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    assert_eq!(
+        unsupported.validate_binding().await.unwrap_err().kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
+    );
     assert_eq!(
         unsupported.purge(&request).await.unwrap_err().kind(),
         ErrorKind::Unsupported(Capability::ScopePurge)

@@ -118,6 +118,41 @@ impl std::fmt::Debug for SqlitePurge {
 }
 #[async_trait]
 impl ScopePurge for SqlitePurge {
+    fn supports_binding_validation(&self) -> bool {
+        true
+    }
+
+    fn supports_generation_validation(&self) -> bool {
+        true
+    }
+
+    async fn validate_generation(&self) -> Result<()> {
+        let tables = Arc::clone(&self.tables);
+        let scope = self.scope.clone();
+        let generation = self.generation;
+        self.db
+            .run(move |conn| {
+                fence::write(conn, None, &tables, |tx| {
+                    check(tx, &tables, scope.as_str(), generation)
+                })
+            })
+            .await
+    }
+
+    async fn validate_binding(&self) -> Result<()> {
+        let tables = Arc::clone(&self.tables);
+        let scope = self.scope.clone();
+        let generation = self.generation;
+        let fencing = self.fencing.clone();
+        self.db
+            .run(move |conn| {
+                fence::write(conn, fencing.as_deref(), &tables, |tx| {
+                    check(tx, &tables, scope.as_str(), generation)
+                })
+            })
+            .await
+    }
+
     async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
         request.validate()?;
         if self

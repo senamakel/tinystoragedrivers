@@ -13,20 +13,21 @@
 use crate::error::{Result, StorageError};
 
 use super::migrations::Progress;
+use super::prepared::Transform;
 use super::runner::Context;
 use super::types::BlobStepFn;
 
 pub(super) async fn run(
     context: &Context<'_>,
-    run: &BlobStepFn,
+    run: &Transform<BlobStepFn>,
     progress: Option<Progress>,
 ) -> Result<u64> {
     let step = context.step;
-    let prefix = step.source.unwrap_or_default();
+    let prefix = step.source.as_deref().unwrap_or_default();
     let blobs = context.storage.blobs();
     let mut progress = progress.unwrap_or_else(|| Progress {
         owner: context.owner.to_string(),
-        step: step.id.to_owned(),
+        step: step.id.clone(),
         from: step.from,
         to: step.to,
         cursor: None,
@@ -38,9 +39,23 @@ pub(super) async fn run(
         let Some(blob) = blobs.get(&listed.key).await? else {
             continue;
         };
-        if let Some((target, content_type, bytes)) =
-            run(listed.key.clone(), blob.meta.content_type, blob.bytes)?
-        {
+        let output = match run {
+            Transform::Local(run) => run(listed.key.clone(), blob.meta.content_type, blob.bytes)?,
+            Transform::External(descriptor) => super::executor::required(context.executor)?
+                .blob(
+                    context.owner,
+                    super::BlobTransformRequest {
+                        operation: descriptor.operation.clone(),
+                        version: descriptor.version,
+                        source: listed.key.clone(),
+                        content_type: blob.meta.content_type,
+                        bytes: blob.bytes,
+                    },
+                )
+                .await?
+                .map(|out| (out.target, out.content_type, out.bytes)),
+        };
+        if let Some((target, content_type, bytes)) = output {
             check_target(context, &target)?;
             write_target(context, &target, bytes, content_type).await?;
             progress.written += 1;
@@ -79,7 +94,7 @@ async fn write_target(
 
 /// The target key must lie under the item's prefix.
 fn check_target(context: &Context<'_>, target: &str) -> Result<()> {
-    let item = context.step.item;
+    let item = context.step.item.as_str();
     if !target.starts_with(item) {
         return Err(StorageError::invalid_input(format!(
             "step `{}` of `{item}` mapped a blob to `{target}`, which is not under `{item}`",

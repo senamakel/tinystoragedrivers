@@ -12,7 +12,7 @@ async fn composite_config_selects_independent_persistent_ports() {
     one.blobs().put("x", vec![1], None).await.unwrap();
     let two = backend.for_scope(&Scope::new("other").unwrap()).unwrap();
     assert!(two.blobs().get("x").await.unwrap().is_none());
-    crate::conformance::run(backend.as_ref(), false).await;
+    crate::conformance::run_with_process_capabilities(backend.as_ref(), false, false, false).await;
 }
 
 #[test]

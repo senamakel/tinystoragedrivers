@@ -1,0 +1,31 @@
+[package]
+name = "tinystoragedrivers-fence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lease ownership and fenced storage composition for tinystoragedrivers."
+readme = "README.md"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tinystoragedrivers-core = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+fs2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync", "time"] }
+
+[features]
+default = []
+file = ["dep:fs2"]
+
+[lints]
+workspace = true

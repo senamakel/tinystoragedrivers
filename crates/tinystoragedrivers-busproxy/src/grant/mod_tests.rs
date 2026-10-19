@@ -40,6 +40,35 @@ fn grant(writable: bool) -> StorageGrant {
     .unwrap()
 }
 
+fn empty_grant() -> StorageGrant {
+    StorageGrant::from_needs(StorageNeeds::default(), &GrantPolicy::default()).unwrap()
+}
+
+#[test]
+fn queues_are_denied_without_declared_queue_needs() {
+    for grant in [grant(true), empty_grant()] {
+        for selector in tinystoragedrivers_bus::QUEUES_SELECTORS {
+            assert_eq!(
+                grant.authorize(Object::Queues, selector, &serde_json::Value::Null),
+                Err(Denied::Object),
+                "Queues.{selector} must not forward without a queue grant",
+            );
+        }
+    }
+}
+
+#[test]
+fn unsupported_queue_selectors_remain_malformed() {
+    let grant = grant(true);
+    for selector in ["Capabilities", "MadeUp"] {
+        assert_eq!(
+            grant.authorize(Object::Queues, selector, &serde_json::Value::Null),
+            Err(Denied::Malformed),
+            "unknown Queues.{selector} must not be treated as an ungranted selector",
+        );
+    }
+}
+
 #[test]
 fn needs_are_copied_and_the_complete_collection_spec_is_preserved() {
     let grant = {
@@ -407,6 +436,8 @@ fn selector_write_classification_is_complete_and_seal_is_a_write() {
             Object::Streams => &tinystoragedrivers_bus::STREAMS_SELECTORS,
             Object::Blobs => &tinystoragedrivers_bus::BLOBS_SELECTORS,
             Object::Secrets => &tinystoragedrivers_bus::SECRETS_SELECTORS,
+            // Queue selectors are tested separately as deny-all until needs exist.
+            Object::Queues => &[],
         };
         for selector in selectors {
             let classified = is_write(object, selector).unwrap();

@@ -68,7 +68,10 @@ One storage is one database file. The path decides which:
 Every handle on the same file within one process shares one connection. Writes
 use immediate transactions. Other processes are serialized by WAL plus a
 5-second busy timeout. Contention that outlasts the timeout returns a retryable
-`Unavailable` error.
+`Unavailable` error. SQLite's file locks coordinate independent processes, and
+its immediate transactions make version preconditions atomic across them. The
+backend reports `Capability::SharedAcrossProcesses` and
+`Capability::CrossProcessCas`.
 
 A fenced handle (`for_scope_fenced`) checks its guard in the same database.
 The guard check and target document, stream or blob mutation run in one

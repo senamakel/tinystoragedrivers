@@ -121,6 +121,30 @@ async fn connect_rejects_bad_input_without_echoing_it() {
     assert!(!malformed.to_string().contains("s3cret"), "{malformed}");
 }
 
+#[tokio::test]
+async fn scoped_documents_declare_cross_process_capabilities() {
+    let client = Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=10")
+        .await
+        .unwrap();
+    let storage = MongoStorage {
+        shared: Arc::new(Shared::new(
+            client.clone(),
+            client.database("capability_regression"),
+            Arc::new(|| 0),
+            true,
+            true,
+        )),
+    };
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    let documents = scoped.documents();
+    let backend_capabilities = storage.capabilities();
+    let capabilities = documents.capabilities();
+    assert!(backend_capabilities.contains(Capability::SharedAcrossProcesses));
+    assert!(backend_capabilities.contains(Capability::CrossProcessCas));
+    assert!(capabilities.contains(Capability::SharedAcrossProcesses));
+    assert!(capabilities.contains(Capability::CrossProcessCas));
+}
+
 // Live checks of what the driver stores. They read and plant raw documents,
 // so they live here, beside the private layout, rather than in `tests/`.
 

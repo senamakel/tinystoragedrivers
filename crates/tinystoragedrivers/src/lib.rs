@@ -29,6 +29,14 @@
 //! | `file:<dir>` | JSON, JSONL and raw files under a directory | `file` |
 //! | `mongodb://…/<db>`, `mongodb+srv://…/<db>` | MongoDB, every record scoped to its tenant | `mongodb` |
 //!
+//! # Queues
+//!
+//! Every scope has a [`QueueStore`] at [`ScopedStorage::queues`]: by default
+//! durable queues in its own documents. [`QueueConfig`] and [`open_queues`]
+//! move them to a broker with a separate queue URL (`amqp://…`, feature
+//! `rabbitmq`) and declare them from a
+//! [`QueueManifest`](queue::QueueManifest) file.
+//!
 //! # Secrets
 //!
 //! With the `secrets` feature, [`secrets`] is the `tinystoragedrivers-secrets`
@@ -42,9 +50,11 @@
 
 mod blobs;
 mod config;
+mod queues;
 pub use blobs::{BlobConfig, open_blobs, open_composite};
+pub use queues::{QueueConfig, open_queues};
 
-pub use config::{StorageConfig, open};
+pub use config::{StorageConfig, open, redact_url};
 pub use tinystoragedrivers_core::*;
 /// The SQLite driver, including raw access for owners that keep their own
 /// tables.
@@ -59,6 +69,10 @@ pub use tinystoragedrivers_secrets as secrets;
 /// clock, transactions turned off, expiry sweeps).
 #[cfg(feature = "mongodb")]
 pub use tinystoragedrivers_mongodb::MongoStorage;
+
+/// The `RabbitMQ` queue backend (feature `rabbitmq`).
+#[cfg(feature = "rabbitmq")]
+pub use tinystoragedrivers_rabbitmq::RabbitQueues;
 
 /// The S3-compatible scoped blob driver (feature s3).
 #[cfg(feature = "s3")]

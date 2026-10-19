@@ -7,7 +7,15 @@ all-features = true
 [advisories]
 # Fail on any crate with a security advisory or an unmaintained warning.
 # Add an entry here only with a comment explaining the exposure and the plan.
-ignore = []
+# zip 2.x reaches the graph only through `tinybus` (module archive reading,
+# `default-features = false`). The three advisories concern
+# `ZipArchive::extract` / `ZipStreamReader::extract`, which neither tinybus nor
+# this repository calls. Remove them when tinybus moves to zip >= 9.
+ignore = [
+    { id = "RUSTSEC-2026-0367", reason = "zip extract() only; no caller in tinybus or tsd" },
+    { id = "RUSTSEC-2026-0368", reason = "zip extract() only; no caller in tinybus or tsd" },
+    { id = "RUSTSEC-2026-0369", reason = "zip extract() only; no caller in tinybus or tsd" },
+]
 
 [licenses]
 # Licenses accepted for this crate and its dependencies. Keep GPL-3.0-only for

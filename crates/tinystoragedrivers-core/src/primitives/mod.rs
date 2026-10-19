@@ -36,7 +36,7 @@ use crate::error::Result;
 
 pub use counters::Counters;
 pub use kv::Kv;
-pub use leases::{Lease, Leases};
+pub use leases::{Acquire, Acquisition, Lease, LeaseRecord, Leases};
 pub use repo::{Repo, RetryPolicy};
 
 /// The lease collection.

@@ -107,3 +107,11 @@ async fn a_failed_check_still_removes_what_the_suite_wrote() {
 fn prefixes_are_unique_per_call() {
     assert_ne!(unique_prefix(), unique_prefix());
 }
+
+#[tokio::test]
+async fn document_secrets_pass_on_the_memory_backend() {
+    use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
+
+    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    document_secrets_conformance(&storage).await;
+}

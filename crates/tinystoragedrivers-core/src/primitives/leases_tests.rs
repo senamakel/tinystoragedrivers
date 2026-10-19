@@ -338,3 +338,336 @@ async fn a_stale_tenure_cannot_renew_or_release_the_new_one() {
     assert_eq!(renewed.epoch, 2);
     assert!(rig.leases.release("host", "p1", "a", 2).await.unwrap());
 }
+
+fn request(holder: &str, held_epoch: Option<u64>) -> Acquire<'_> {
+    Acquire {
+        owner: "host",
+        key: "p1",
+        holder,
+        ttl_ms: 100,
+        endpoint: Some("http://node-a:7788"),
+        held_epoch,
+    }
+}
+
+fn granted(outcome: Acquisition) -> (Lease, bool) {
+    match outcome {
+        Acquisition::Granted {
+            lease,
+            previous_unclean,
+        } => (lease, previous_unclean),
+        Acquisition::Held(record) => panic!("expected a grant, held by {record:?}"),
+    }
+}
+
+#[tokio::test]
+async fn acquire_with_records_the_endpoint_and_a_fresh_key_is_clean() {
+    let rig = rig();
+    let (lease, unclean) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    assert_eq!((lease.epoch, unclean), (1, false));
+    assert_eq!(lease.endpoint.as_deref(), Some("http://node-a:7788"));
+    let record = rig.leases.inspect("host", "p1").await.unwrap().unwrap();
+    assert_eq!(record.endpoint.as_deref(), Some("http://node-a:7788"));
+    assert!(record.is_live(1_050) && !record.released);
+    // Renewing keeps the endpoint.
+    let renewed = rig
+        .leases
+        .renew("host", "p1", "a", 1, 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(renewed.endpoint.as_deref(), Some("http://node-a:7788"));
+}
+
+#[tokio::test]
+async fn acquire_with_reports_the_live_record_of_another_holder() {
+    let rig = rig();
+    granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    match rig.leases.acquire_with(request("b", None)).await.unwrap() {
+        Acquisition::Held(record) => {
+            assert_eq!((record.holder.as_str(), record.epoch), ("a", 1));
+            assert_eq!(record.endpoint.as_deref(), Some("http://node-a:7788"));
+        }
+        other @ Acquisition::Granted { .. } => panic!("must be held: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_release_is_a_distinct_state_from_expiry_and_hands_over_clean() {
+    let rig = rig();
+    let (lease, _) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    assert!(
+        rig.leases
+            .release("host", "p1", "a", lease.epoch)
+            .await
+            .unwrap()
+    );
+    let record = rig.leases.inspect("host", "p1").await.unwrap().unwrap();
+    assert!(record.released && !record.is_live(1_000));
+    assert!(rig.leases.current("host", "p1").await.unwrap().is_none());
+    let (next, unclean) = granted(rig.leases.acquire_with(request("b", None)).await.unwrap());
+    assert_eq!((next.epoch, unclean), (2, false));
+
+    // An abandoned lease is expired, not released.
+    rig.now.store(2_000, Ordering::SeqCst);
+    let record = rig.leases.inspect("host", "p1").await.unwrap().unwrap();
+    assert!(!record.released && !record.is_live(2_000));
+    let (after, unclean) = granted(rig.leases.acquire_with(request("c", None)).await.unwrap());
+    assert_eq!((after.epoch, unclean), (3, true));
+}
+
+#[tokio::test]
+async fn the_same_holder_reenters_only_with_the_epoch_it_holds() {
+    let rig = rig();
+    let (first, _) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    // Same instance, still live: the epoch stays and it is clean.
+    rig.now.store(1_050, Ordering::SeqCst);
+    let (again, unclean) = granted(
+        rig.leases
+            .acquire_with(request("a", Some(first.epoch)))
+            .await
+            .unwrap(),
+    );
+    assert_eq!((again.epoch, unclean, again.expires_ms), (1, false, 1_150));
+}
+
+#[tokio::test]
+async fn a_live_record_left_by_a_dead_incarnation_is_taken_over_and_fenced() {
+    let scope = Scope::local();
+    let backend = MemoryStorage::new();
+    let storage = backend.for_scope(&scope).unwrap();
+    let now = Arc::new(AtomicU64::new(1_000));
+    let clock = Arc::clone(&now);
+    let leases =
+        Leases::new(storage.documents()).with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let (old, _) = granted(leases.acquire_with(request("a", None)).await.unwrap());
+    let fenced = backend
+        .for_scope_fenced(&scope, &old.fence(&scope))
+        .unwrap();
+    // A new incarnation with the same holder id, record still live.
+    now.store(1_010, Ordering::SeqCst);
+    let (successor_lease, unclean) =
+        granted(leases.acquire_with(request("a", None)).await.unwrap());
+    assert_eq!((successor_lease.epoch, unclean), (2, true));
+    // The old incarnation can neither renew nor release the new tenure.
+    assert!(
+        leases
+            .renew("host", "p1", "a", old.epoch, 100)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!leases.release("host", "p1", "a", old.epoch).await.unwrap());
+    // And its fence is dead.
+    let error = fenced
+        .documents()
+        .put(
+            "work",
+            "w",
+            serde_json::json!({"n": 1}),
+            crate::Precondition::None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Fenced);
+}
+
+#[tokio::test]
+async fn compact_drops_only_the_named_tenure() {
+    let rig = rig();
+    let (first, _) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    rig.now.store(2_000, Ordering::SeqCst);
+    let (second, _) = granted(rig.leases.acquire_with(request("b", None)).await.unwrap());
+    // The earlier tenure's token no longer matches: nothing is removed.
+    assert!(
+        !rig.leases
+            .compact("host", "p1", "a", first.epoch)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !rig.leases
+            .compact("host", "p1", "b", first.epoch)
+            .await
+            .unwrap()
+    );
+    assert!(rig.leases.inspect("host", "p1").await.unwrap().is_some());
+    assert!(
+        rig.leases
+            .compact("host", "p1", "b", second.epoch)
+            .await
+            .unwrap()
+    );
+    assert!(rig.leases.inspect("host", "p1").await.unwrap().is_none());
+    assert!(
+        !rig.leases
+            .compact("host", "p1", "b", second.epoch)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_compacted_tenure_is_fenced_out() {
+    let rig = rig();
+    let scope = rig.storage.scope().clone();
+    let backend = MemoryStorage::new();
+    let storage = backend.for_scope(&scope).unwrap();
+    let leases = Leases::new(storage.documents()).with_clock(Arc::new(|| 1_000));
+    let a = leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    let fenced = backend.for_scope_fenced(&scope, &a.fence(&scope)).unwrap();
+    assert!(leases.compact("host", "p1", "a", a.epoch).await.unwrap());
+    let error = fenced
+        .documents()
+        .put(
+            "work",
+            "w",
+            serde_json::json!({"n": 1}),
+            crate::Precondition::None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Fenced);
+}
+
+#[tokio::test]
+async fn a_stale_held_epoch_cannot_evict_the_live_replacement() {
+    let rig = rig();
+    granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    rig.now.store(1_010, Ordering::SeqCst);
+    let (replacement, _) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    assert_eq!(replacement.epoch, 2);
+    // A paused older incarnation still believes it holds epoch 1.
+    match rig
+        .leases
+        .acquire_with(request("a", Some(1)))
+        .await
+        .unwrap()
+    {
+        Acquisition::Held(record) => assert_eq!(record.epoch, 2),
+        other @ Acquisition::Granted { .. } => panic!("a stale actor must not win: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_same_holder_call_that_loses_the_swap_is_refused_not_re_taken() {
+    use std::sync::atomic::AtomicBool;
+
+    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let rival = Leases::new(storage.documents()).with_clock(Arc::new(|| 1_000));
+    let injected = Arc::new(AtomicBool::new(false));
+    let handle = tokio::runtime::Handle::current();
+    let leases = Leases::new(storage.documents())
+        .with_retry(RetryPolicy::immediate())
+        .with_clock({
+            let (rival, injected) = (rival.clone(), Arc::clone(&injected));
+            Arc::new(move || {
+                // On the first attempt, after it read "absent", a competing
+                // call of the same holder lands its write.
+                if !injected.swap(true, Ordering::SeqCst) {
+                    tokio::task::block_in_place(|| {
+                        handle.block_on(rival.acquire_with(request("a", None)))
+                    })
+                    .unwrap();
+                }
+                1_000
+            })
+        });
+    match leases.acquire_with(request("a", None)).await.unwrap() {
+        Acquisition::Held(record) => assert_eq!((record.holder.as_str(), record.epoch), ("a", 1)),
+        other @ Acquisition::Granted { .. } => panic!("the loser must not re-take: {other:?}"),
+    }
+    let stored = rival.inspect("host", "p1").await.unwrap().unwrap();
+    assert_eq!(stored.epoch, 1, "the winner's grant stands");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_swap_is_a_race_even_when_the_winner_wrote_an_identical_body() {
+    use std::sync::atomic::AtomicBool;
+
+    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let rival = Leases::new(storage.documents()).with_clock(Arc::new(|| 1_000));
+    granted(rival.acquire_with(request("a", None)).await.unwrap());
+    let injected = Arc::new(AtomicBool::new(false));
+    let handle = tokio::runtime::Handle::current();
+    let leases = Leases::new(storage.documents())
+        .with_retry(RetryPolicy::immediate())
+        .with_clock({
+            let (rival, injected) = (rival.clone(), Arc::clone(&injected));
+            Arc::new(move || {
+                // After the first attempt read the live epoch-1 record, the
+                // running instance re-enters it with the very same body.
+                if !injected.swap(true, Ordering::SeqCst) {
+                    tokio::task::block_in_place(|| {
+                        handle.block_on(rival.acquire_with(request("a", Some(1))))
+                    })
+                    .unwrap();
+                }
+                1_000
+            })
+        });
+    match leases.acquire_with(request("a", None)).await.unwrap() {
+        Acquisition::Held(record) => assert_eq!(record.epoch, 1),
+        other @ Acquisition::Granted { .. } => panic!("must not evict the winner: {other:?}"),
+    }
+}
+
+#[test]
+fn the_body_wire_format_is_pinned() {
+    let full = Body {
+        holder: "a".into(),
+        epoch: 3,
+        expires_ms: 9,
+        endpoint: Some("http://n".into()),
+        released: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&full).unwrap(),
+        serde_json::json!({
+            "holder": "a", "epoch": 3, "expires_ms": 9,
+            "endpoint": "http://n", "released": true
+        })
+    );
+    // Optional fields are absent, not null or false, when unused.
+    let bare = Body {
+        endpoint: None,
+        released: false,
+        ..full
+    };
+    assert_eq!(
+        serde_json::to_value(&bare).unwrap(),
+        serde_json::json!({"holder": "a", "epoch": 3, "expires_ms": 9})
+    );
+    // A record written before these fields existed still decodes.
+    let legacy: Body =
+        serde_json::from_value(serde_json::json!({"holder": "a", "epoch": 3, "expires_ms": 9}))
+            .unwrap();
+    assert_eq!(legacy, bare);
+}
+
+#[tokio::test]
+async fn the_holder_fence_checks_epoch_holder_and_release() {
+    let rig = rig();
+    let scope = rig.storage.scope().clone();
+    let a = rig
+        .leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    let fence = a.holder_fence(&scope);
+    assert_eq!(fence.collection(), LEASES);
+    assert_eq!(fence.id(), a.fence(&scope).id());
+    assert!(fence.validate().is_ok());
+    assert_ne!(fence.filter(), a.fence(&scope).filter());
+    assert_eq!(
+        fence.filter(),
+        &Filter::eq("epoch", 1_u64)
+            .and(Filter::eq("holder", "a"))
+            .and(Filter::exists("released", false))
+    );
+}

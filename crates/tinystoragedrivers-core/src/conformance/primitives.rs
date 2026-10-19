@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{ok, unique};
 use crate::backend::ScopedStorage;
-use crate::primitives::{self, Counters, Kv, Leases, Repo, RetryPolicy};
+use crate::primitives::{self, Acquire, Acquisition, Counters, Kv, Leases, Repo, RetryPolicy};
 
 /// Increments each task performs in the counter and update races.
 const ROUNDS: u64 = 100;
@@ -17,6 +17,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
     ok(primitives::ensure(storage).await, "primitives ensure twice");
     counters(storage).await;
     leases(storage).await;
+    lease_cluster_features(storage).await;
     updates(storage).await;
     kv(storage).await;
 }
@@ -143,6 +144,152 @@ async fn leases(storage: &ScopedStorage) {
     assert_eq!(renewed.epoch, last_epoch, "renew must keep the epoch");
 }
 
+fn lease_request<'a>(owner: &'a str, holder: &'a str, held_epoch: Option<u64>) -> Acquire<'a> {
+    Acquire {
+        owner,
+        key: "k",
+        holder,
+        ttl_ms: 100,
+        endpoint: Some("http://node:1"),
+        held_epoch,
+    }
+}
+
+fn lease_grant(outcome: Acquisition) -> (crate::Lease, bool) {
+    match outcome {
+        Acquisition::Granted {
+            lease,
+            previous_unclean,
+        } => (lease, previous_unclean),
+        Acquisition::Held(record) => panic!("expected a grant, held by {record:?}"),
+    }
+}
+
+/// Endpoint, released versus expired, unclean takeover and compaction behave
+/// the same on every driver. Time is injected so expiry needs no sleeping.
+async fn lease_cluster_features(storage: &ScopedStorage) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let owner = unique("lease_cf");
+    let now = Arc::new(AtomicU64::new(1_000_000));
+    let clock = Arc::clone(&now);
+    let leases = Leases::new(storage.documents())
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)))
+        .with_retry(contended());
+    // Fresh key: epoch 1, clean, endpoint recorded and kept across a renew.
+    let (a1, unclean) = lease_grant(ok(
+        leases.acquire_with(lease_request(&owner, "a", None)).await,
+        "acquire a",
+    ));
+    assert_eq!((a1.epoch, unclean), (1, false));
+    assert_eq!(a1.endpoint.as_deref(), Some("http://node:1"));
+    let renewed = ok(leases.renew(&owner, "k", "a", 1, 100).await, "renew");
+    assert_eq!(
+        renewed.expect("renew").endpoint.as_deref(),
+        Some("http://node:1")
+    );
+
+    // Another holder is refused with the live record.
+    match ok(
+        leases.acquire_with(lease_request(&owner, "b", None)).await,
+        "acquire b",
+    ) {
+        Acquisition::Held(record) => {
+            assert_eq!((record.holder.as_str(), record.epoch), ("a", 1));
+            assert_eq!(record.endpoint.as_deref(), Some("http://node:1"));
+        }
+        other @ Acquisition::Granted { .. } => panic!("live lease must hold: {other:?}"),
+    }
+
+    // Re-entrant: the same instance keeps its epoch, clean.
+    let (again, unclean) = lease_grant(ok(
+        leases
+            .acquire_with(lease_request(&owner, "a", Some(1)))
+            .await,
+        "reenter",
+    ));
+    assert_eq!((again.epoch, unclean), (1, false));
+
+    // Unclean takeover of a live record the caller does not hold.
+    let (fresh, unclean) = lease_grant(ok(
+        leases.acquire_with(lease_request(&owner, "a", None)).await,
+        "unclean takeover",
+    ));
+    assert_eq!((fresh.epoch, unclean), (2, true));
+    assert!(
+        ok(leases.renew(&owner, "k", "a", 1, 100).await, "stale renew").is_none(),
+        "the fenced-out incarnation must not renew"
+    );
+    assert!(!ok(
+        leases.release(&owner, "k", "a", 1).await,
+        "stale release"
+    ));
+
+    // A release is its own state, distinct from expiry; the next acquire is clean.
+    assert!(ok(leases.release(&owner, "k", "a", 2).await, "release"));
+    let record =
+        ok(leases.inspect(&owner, "k").await, "inspect").expect("a released record is kept");
+    assert!(record.released && !record.is_live(1_000_000));
+    let (b3, unclean) = lease_grant(ok(
+        leases.acquire_with(lease_request(&owner, "b", None)).await,
+        "after release",
+    ));
+    assert_eq!((b3.epoch, unclean), (3, false));
+
+    // An abandoned lease is expired, not released; the takeover is unclean.
+    now.store(2_000_000, Ordering::SeqCst);
+    let record = ok(leases.inspect(&owner, "k").await, "inspect").expect("kept");
+    assert!(!record.released && !record.is_live(2_000_000));
+    let (c4, unclean) = lease_grant(ok(
+        leases.acquire_with(lease_request(&owner, "c", None)).await,
+        "after expiry",
+    ));
+    assert_eq!((c4.epoch, unclean), (4, true));
+
+    lease_compaction(&leases, &owner).await;
+}
+
+/// Compaction is conditional on holder and epoch, and races have one winner.
+async fn lease_compaction(leases: &Leases, owner: &str) {
+    let record = ok(leases.inspect(owner, "k").await, "inspect").expect("kept");
+    assert_eq!(record.epoch, 4, "the unclean takeover left epoch 4");
+    assert!(
+        !ok(leases.compact(owner, "k", "c", 3).await, "wrong epoch"),
+        "a mismatched epoch must not drop the record"
+    );
+    assert!(
+        !ok(leases.compact(owner, "k", "b", 4).await, "wrong holder"),
+        "a mismatched holder must not drop the record"
+    );
+    assert!(ok(leases.inspect(owner, "k").await, "inspect").is_some());
+    assert!(ok(leases.compact(owner, "k", "c", 4).await, "compact"));
+    assert!(ok(leases.inspect(owner, "k").await, "inspect").is_none());
+    assert!(!ok(
+        leases.compact(owner, "k", "c", 4).await,
+        "compact twice"
+    ));
+
+    // Racing compactions: exactly one removes the record.
+    let (g, _) = lease_grant(ok(
+        leases.acquire_with(lease_request(owner, "d", None)).await,
+        "reacquire",
+    ));
+    let race = || {
+        let leases = leases.clone();
+        let owner = owner.to_owned();
+        let epoch = g.epoch;
+        tokio::spawn(async move { leases.compact(&owner, "k", "d", epoch).await })
+    };
+    let (x, y) = tokio::join!(race(), race());
+    let x = ok(ok(x.map_err(join_error), "task"), "compact x");
+    let y = ok(ok(y.map_err(join_error), "task"), "compact y");
+    assert!(
+        x ^ y,
+        "exactly one racing compaction must remove the record"
+    );
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Tally {
     n: u64,
@@ -206,7 +353,7 @@ async fn kv(storage: &ScopedStorage) {
 
 /// A generous budget with a short backoff: the checks assert on outcomes, so
 /// a slow driver may take many attempts but must not fail.
-fn contended() -> RetryPolicy {
+pub(super) fn contended() -> RetryPolicy {
     RetryPolicy::new(
         512,
         std::time::Duration::from_micros(200),
@@ -218,6 +365,6 @@ fn contended() -> RetryPolicy {
     clippy::needless_pass_by_value,
     reason = "used as a `map_err` callback"
 )]
-fn join_error(error: tokio::task::JoinError) -> crate::StorageError {
+pub(super) fn join_error(error: tokio::task::JoinError) -> crate::StorageError {
     crate::StorageError::backend(format!("task failed: {error}"))
 }

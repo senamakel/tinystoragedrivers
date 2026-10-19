@@ -215,6 +215,54 @@ impl<T: Serialize + DeserializeOwned + Send + Sync> Repo<T> {
             .await
     }
 
+    /// Remove a record only when `matches` accepts its current value, as one
+    /// compare-and-swap: the delete is conditional on the version `keep_if`
+    /// saw, so a writer that got in between turns it into a retry, not a
+    /// lost update. Returns whether a record was removed; `false` when the
+    /// record is absent or `matches` declined it.
+    ///
+    /// `matches` is called again on every retry, so it must be free of side
+    /// effects. After [`RetryPolicy::attempts`] lost swaps the last
+    /// [`Conflict`](ErrorKind::Conflict) is returned.
+    ///
+    /// # Errors
+    ///
+    /// A conflict past the budget, or any other read or delete error.
+    pub async fn delete_if<F>(&self, id: &str, mut matches: F) -> Result<bool>
+    where
+        F: FnMut(&T) -> bool + Send,
+    {
+        let attempts = self.retry.attempts.max(1);
+        let mut attempt = 0;
+        loop {
+            let Some(found) = self.docs.get(&self.collection, id).await? else {
+                return Ok(false);
+            };
+            let found = decode::<T>(found)?;
+            if !matches(&found.doc) {
+                return Ok(false);
+            }
+            match self
+                .docs
+                .delete(&self.collection, id, Precondition::Version(found.version))
+                .await
+            {
+                Ok(removed) => return Ok(removed),
+                Err(error) if error.kind() == ErrorKind::Conflict => {
+                    attempt += 1;
+                    if attempt >= attempts {
+                        return Err(error);
+                    }
+                    let pause = self.retry.pause(attempt - 1);
+                    if !pause.is_zero() {
+                        tokio::time::sleep(pause).await;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// One page of the records matching `query`.
     ///
     /// # Errors

@@ -213,3 +213,54 @@ fn deserializing_applies_the_id_rules() {
     assert!(serde_json::from_str::<Key>("\"a\\u0000b\"").is_err());
     assert!(serde_json::from_str::<Key>("5").is_err());
 }
+
+// Digests independently calculated with Python's hashlib.sha256 +
+// base64.b32encode(...).decode().lower().rstrip('=') on the stated escaped UTF-8.
+#[test]
+fn ascii_keys_keep_511_and_512_bytes_and_pin_the_513_byte_digest() {
+    for length in [511, 512] {
+        let raw = "a".repeat(length);
+        let actual = Key::of([raw.as_str()]).unwrap();
+        assert_eq!(actual.as_str(), raw);
+        assert_eq!(actual.split().unwrap(), [raw]);
+    }
+    assert_eq!(
+        Key::of(["a".repeat(513)]).unwrap().as_str(),
+        "~ajbfyd23bwv7huvzcfpt65zduavnrph3cu2kburrmfh5ik4brd3a"
+    );
+}
+
+#[test]
+fn unicode_key_limit_counts_utf8_bytes_at_511_512_and_513() {
+    let below = "é".repeat(255) + "a";
+    let exact = "é".repeat(256);
+    for (raw, length) in [(below, 511), (exact, 512)] {
+        assert_eq!(raw.len(), length);
+        let actual = Key::of([raw.as_str()]).unwrap();
+        assert_eq!(actual.as_str(), raw);
+        assert_eq!(actual.split().unwrap(), [raw]);
+    }
+    let over = "é".repeat(256) + "a";
+    assert_eq!(over.len(), 513);
+    assert_eq!(
+        Key::of([over]).unwrap().as_str(),
+        "~ygjl26abwbdkpdakap3p2mwcwarpcsguulbru5qo2vv6oh7rgd4q"
+    );
+}
+
+#[test]
+fn escaped_key_limit_counts_encoded_bytes_at_511_512_and_513() {
+    for (suffix, length) in [("a", 511), ("ab", 512)] {
+        let raw = "/".repeat(170) + suffix;
+        let escaped = "%2F".repeat(170) + suffix;
+        assert_eq!(escaped.len(), length);
+        let actual = Key::of([raw.as_str()]).unwrap();
+        assert_eq!(actual.as_str(), escaped);
+        assert_eq!(actual.split().unwrap(), [raw]);
+    }
+    let over = "/".repeat(170) + "abc";
+    assert_eq!(
+        Key::of([over]).unwrap().as_str(),
+        "~oiel4ergnm53dx2i6rqsj2cl2agounvhuqbsvqxsegu4nzfsr54a"
+    );
+}

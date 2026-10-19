@@ -13,6 +13,7 @@ use std::cmp::Ordering;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tinystoragedrivers_schema::validate_field_path as validate_path;
 
 use crate::document::Meta;
 use crate::error::{Result, StorageError};
@@ -327,15 +328,6 @@ impl Filter {
             Self::Not { filter } => !filter.matches_with(id, doc, meta),
         }
     }
-}
-
-fn validate_path(path: &str) -> Result<()> {
-    if path.is_empty() || path.split('.').any(str::is_empty) {
-        return Err(StorageError::invalid_input(format!(
-            "field path `{path}` is empty or has an empty segment"
-        )));
-    }
-    Ok(())
 }
 
 /// The value at `path`, treating [`ID_FIELD`] as the document id and the

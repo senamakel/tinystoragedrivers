@@ -10,7 +10,10 @@
 /// Version 4 adds record metadata (`Meta` on every returned `Versioned`,
 /// optional `schema` and `expires_ms` on `Put`) and the `Streams.Seal`
 /// selector. Both are additive; see `docs/specs/storage-bus.md`.
-pub const CONTRACT_VERSION: u32 = 4;
+///
+/// Version 5 adds the `Queues` object (`QUEUES_SELECTORS`) and
+/// [`MAX_QUEUE_MESSAGE_BYTES`].
+pub const CONTRACT_VERSION: u32 = 5;
 /// `TinyBus` frame cap. No request or reply may exceed it.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Encoded-size cap for one inline page, batch or record set (half the frame,
@@ -25,6 +28,9 @@ pub const MAX_BATCH_OPS: usize = 1_000;
 pub const MAX_INLINE_BLOB_BYTES: usize = 1024 * 1024;
 /// Chunk size of blob transfers over a `TinyBus` stream.
 pub const BLOB_STREAM_CHUNK_BYTES: usize = 512 * 1024;
+/// Largest queue message payload, as JSON text. A `Receive` reply is filled
+/// only while one more message of this size still fits the inline byte cap.
+pub const MAX_QUEUE_MESSAGE_BYTES: usize = 256 * 1024;
 /// Longest presigned URL lifetime a server may grant, in seconds.
 pub const MAX_PRESIGN_TTL_SECS: u64 = 3_600;
 

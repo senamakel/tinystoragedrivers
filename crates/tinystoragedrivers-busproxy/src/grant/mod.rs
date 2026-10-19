@@ -132,6 +132,10 @@ impl StorageGrant {
         if !is_selector(object, selector) {
             return Err(Denied::Malformed);
         }
+        if object == Object::Queues {
+            // StorageNeeds has no queue declaration, so queue access stays denied.
+            return Err(Denied::Object);
+        }
         validate_request(object, selector, request)?;
         if selector == "Capabilities" && !self.has_object(object) {
             if !request.is_null() {
@@ -144,7 +148,7 @@ impl StorageGrant {
                     "ttl": false,
                     "max_key_len": 0
                 }))),
-                Object::Streams | Object::Secrets => Err(Denied::Object),
+                Object::Streams | Object::Secrets | Object::Queues => Err(Denied::Object),
             };
         }
         if !self.has_object(object) {
@@ -162,6 +166,7 @@ impl StorageGrant {
             Object::Streams => self.streams(selector, request)?,
             Object::Blobs => self.blobs(selector, request)?,
             Object::Secrets => self.secrets(selector, request)?,
+            Object::Queues => return Err(Denied::Object),
         };
         Ok(match plan {
             Plan::Forward { target, filter, .. } => Plan::Forward {
@@ -204,6 +209,7 @@ impl StorageGrant {
             Object::Secrets => {
                 !self.secret_prefixes.is_empty() || !self.exact_secret_names.is_empty()
             }
+            Object::Queues => false,
         }
     }
 
@@ -446,6 +452,7 @@ fn is_selector(object: Object, selector: &str) -> bool {
         Object::Streams => is_streams_selector(selector),
         Object::Blobs => is_blobs_selector(selector),
         Object::Secrets => is_secrets_selector(selector),
+        Object::Queues => tinystoragedrivers_bus::is_queues_selector(selector),
     }
 }
 

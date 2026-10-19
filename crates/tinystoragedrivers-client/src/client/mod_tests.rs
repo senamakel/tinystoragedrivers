@@ -139,3 +139,26 @@ async fn a_host_without_blob_expiry_is_refused_before_any_io() {
     // The refusal came before any write.
     assert!(base.blobs().get("k").await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn queue_batches_split_at_the_op_cap_and_payloads_are_bounded() {
+    use serde_json::json;
+    use tinystoragedrivers_core::queue::NewMessage;
+
+    let bus = bus().await;
+    let queues = bus.for_scope(&Scope::local()).unwrap().queues().clone();
+    let many: Vec<_> = (0..=tinystoragedrivers_bus::MAX_BATCH_OPS)
+        .map(|i| NewMessage::new(json!(i)))
+        .collect();
+    let enqueued = queues.enqueue("many", &many).await.unwrap();
+    assert_eq!(enqueued.len(), many.len());
+    assert_eq!(queues.stats("many").await.unwrap().ready, many.len() as u64);
+
+    let huge = NewMessage::new(json!(
+        "x".repeat(tinystoragedrivers_bus::MAX_QUEUE_MESSAGE_BYTES)
+    ));
+    assert_eq!(
+        queues.enqueue("many", &[huge]).await.unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+}

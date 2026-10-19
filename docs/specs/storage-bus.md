@@ -10,7 +10,7 @@ atomicity and capability rules as native callers. `DocumentCollection1` is an
 existing confined Get/Put/Delete callback, but it is not the complete
 `StorageBackend` port. This contract defines the complete
 `ai.tinyhumans.tinystorage.Storage` object family, with Documents, Streams,
-Blobs and Secrets objects. The new Documents wire types
+Blobs, Secrets and Queues objects. The new Documents wire types
 are synchronous serde data and do not depend on native ports, an async runtime,
 or a database. The existing crate still houses the legacy TinyBus CRUD proxy
 for compatibility; moving transport adapters out of the wire crate is part of
@@ -108,7 +108,7 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 4` (crate `tinystoragedrivers-bus`).
+Contract version: `CONTRACT_VERSION = 5` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
@@ -117,6 +117,7 @@ Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 | `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams`, `Seal`, `Info` | private |
 | `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities` | private |
 | `Secrets` | `Get`, `Set`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
+| `Queues` | `Features`, `EnsureQueue`, `Enqueue`, `Receive`, `Ack`, `Nack`, `Extend`, `Stats`, `DeadLetters`, `Redrive`, `Purge` | private |
 
 Size limits (constants in the crate, enforced by the server before native I/O):
 
@@ -127,6 +128,7 @@ Size limits (constants in the crate, enforced by the server before native I/O):
 - `MAX_INLINE_BLOB_BYTES` is 1 MiB (a JSON byte array can cost 4 bytes per byte): larger blobs use `PutStream` / `GetStream`
   over a `TinyBus` stream in `BLOB_STREAM_CHUNK_BYTES` (512 KiB) chunks.
 - `MAX_PRESIGN_TTL_SECS` is 3,600.
+- `MAX_QUEUE_MESSAGE_BYTES` is 256 KiB of payload JSON text per queue message.
 
 Stream records and document bodies are inline JSON text (`*_json`), never
 native stream references. Streamed blob calls carry only metadata
@@ -225,7 +227,18 @@ Carried (additive; every new field is optional and defaulted):
   the backend has them.
 
 Host-only (no selector exists; `HOST_ONLY` in `tinystoragedrivers-client`
-keeps `maintenance` and `scope_enumeration` out of every capability list):
+keeps `maintenance`, `scope_enumeration`, `shared_across_processes` and
+`cross_process_cas` out of every capability list):
+
+- `shared_across_processes` means independently opened backends on the same
+  store observe one another's writes and agree on the compare-and-swap rules:
+  version preconditions, `Absent` creates, claims and fences arbitrate between
+  processes, so racing handles get one winner. `cross_process_cas` names that
+  conditional-write guarantee explicitly for policy that needs to query it
+  separately; it does not weaken or replace the broader shared-store contract.
+  SQLite and MongoDB declare both; memory and file declare neither. These
+  describe host-side storage coordination, so they have no bus selector and
+  are not exposed to modules.
 
 - `StorageBackend::maintain` and `checkpoint` run vacuum, WAL checkpoints and
   the seal and retention policies across the whole database. A module could
@@ -245,6 +258,37 @@ module built against version 4. This is the existing rule that contract
 changes bump `CONTRACT_VERSION`; the constant is informational and no
 handshake compares it.
 
+### Queues (version 5)
+
+The `Queues` object carries the `QueueStore` port
+([`queue-store.md`](queue-store.md)), one selector per method. Payloads are
+inline JSON text (`payload_json`); `Retry` is `{"kind":"after","delay_ms":n}`
+or `{"kind":"dead_letter","reason":"..."}`. `Features` replies
+`QueueFeaturesReply`, which `BusStorage::connect` reads once, so a
+`BusQueues` handle reports the host queue's features.
+
+- The server answers from `ScopedStorage::queues()`: a `DocumentQueue` over
+  the bound scope's documents unless the host built the storage
+  `with_queues` (a broker). Leases, delays and dedupe windows run on the
+  host's clock; a module cannot set or read it beyond the times a delivery
+  carries.
+- Limits, checked before native I/O: at most `MAX_BATCH_OPS` messages per
+  `Enqueue` (the client splits larger batches, since messages are stored
+  independently), at most `MAX_QUEUE_MESSAGE_BYTES` per payload. `Receive`
+  leases in rounds sized so one more maximal message always fits
+  `MAX_INLINE_BYTES`, so the host never takes a lease its reply cannot carry;
+  the reply may hold fewer than `max`. `DeadLetters` is clamped to
+  `MAX_PAGE_ITEMS` and cut at the inline cap.
+- **Manifest.** `StorageServer::with_queue_manifest(manifest)` makes a
+  `QueueManifest` the host's authority: the host applies it on the caller's
+  first `Queues` call, a request naming an undeclared queue is refused
+  `NotFound`, and `EnsureQueue` succeeds only with the declared spec
+  (`Conflict` otherwise). A module that applies the same manifest file
+  therefore agrees with its host. Without a manifest a caller may declare any
+  queue in its scope.
+- Compatibility: a version 5 module calls `Queues.Features` while connecting,
+  so it needs a version 5 host; a version 4 module never names the object.
+
 ## Real TinyBus transport
 
 `tinystoragedrivers-busproxy` is the `TinyBus` half that `-client` leaves out:
@@ -256,7 +300,7 @@ handshake compares it.
   `BLOB_STREAM_CHUNK_BYTES` chunks while the call is outstanding, `GetStream`
   accepts the stream the host opens on the caller, and watch invalidations
   arrive as `WatchChanged` signals.
-- **Host side.** `serve(connection, endpoint)` registers the four objects,
+- **Host side.** `serve(connection, endpoint)` registers the five objects,
   claims `ai.tinyhumans.tinystorage.Storage` and hands every call, with the
   broker-authenticated sender, to a `StorageEndpoint`. The endpoint owns the
   decisions (who the caller is, scope, grant, fence, audit);
@@ -284,7 +328,7 @@ the same path or interface never receives them.
   no-default normal/build dependency graph.
 - Every selector and message shape is pinned by wire roundtrip and unknown
   selector/field rejection tests; no message accepts scope selectors.
-- Native and module callers run the same Documents/Streams/Blobs/Secrets
+- Native and module callers run the same Documents/Streams/Blobs/Secrets/Queues
   conformance cases against one backend and observe the same committed state.
 - Authentication, grant, schema, confidentiality, fencing and size checks run
   before native I/O. Watch signals contain no payload.
