@@ -41,6 +41,10 @@ Unknown legacy timestamps are retained. Pages are bounded and key ordered;
 listing, reference-check, or delete errors stop the sweep and return an error.
 Earlier successful deletions remain deleted, so an error can mean partial
 progress and callers can safely retry after repairing the failure.
+The returned count includes only deletes that reported a visible blob removed.
+A driver may reclaim an expired physical object while returning `false`
+because it was already invisible under `BlobStore::delete`; that reclamation is
+not counted.
 
 The cleanup listing includes physical blobs hidden from ordinary reads by an
 expired lifetime. Drivers that cannot provide bounded pages and trustworthy

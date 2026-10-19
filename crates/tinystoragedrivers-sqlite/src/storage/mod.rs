@@ -143,7 +143,6 @@ impl SqliteStorage {
                     scope.clone(),
                     Arc::clone(&self.clock),
                     fencing.cloned(),
-                    self.blob_sweep_supported,
                     self.existing,
                 )
                 .with_generation(generation),
@@ -165,6 +164,7 @@ impl SqliteStorage {
                     scope.clone(),
                     Arc::clone(&self.clock),
                     fencing.cloned(),
+                    self.blob_sweep_supported,
                 )
                 .with_generation(generation),
             ),

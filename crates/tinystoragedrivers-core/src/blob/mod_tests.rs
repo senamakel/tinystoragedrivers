@@ -2,6 +2,51 @@
 
 use super::*;
 
+#[derive(Debug)]
+struct TestSweepListing {
+    error: bool,
+    items: Vec<BlobSweepEntry>,
+}
+
+#[async_trait::async_trait]
+impl BlobStore for TestSweepListing {
+    async fn put(&self, _: &str, _: Vec<u8>, _: Option<&str>) -> Result<BlobMeta> {
+        Err(StorageError::unsupported(Capability::BlobSweep, "unused"))
+    }
+
+    async fn get(&self, _: &str) -> Result<Option<Blob>> {
+        Ok(None)
+    }
+
+    async fn get_range(&self, _: &str, _: Range<u64>) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    async fn head(&self, _: &str) -> Result<Option<BlobMeta>> {
+        Ok(None)
+    }
+
+    async fn delete(&self, _: &str) -> Result<bool> {
+        Err(StorageError::backend(
+            "unknown-age item must not be deleted",
+        ))
+    }
+
+    async fn list(&self, _: &str) -> Result<Vec<BlobMeta>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_sweep_page(&self, _: &str, _: Option<&str>, _: usize) -> Result<BlobSweepPage> {
+        if self.error {
+            return Err(StorageError::backend("sweep listing failed"));
+        }
+        Ok(BlobSweepPage {
+            items: self.items.clone(),
+            next_after: None,
+        })
+    }
+}
+
 #[test]
 fn keys_validate() {
     assert!(validate_blob_key("uploads/2026/a.png").is_ok());
@@ -113,6 +158,11 @@ async fn unreferenced_sweep_observes_cutoff_reference_and_prefix() {
         .await
         .unwrap();
     blobs.put("elsewhere/old", vec![3], None).await.unwrap();
+    now.store(250, Ordering::SeqCst);
+    blobs
+        .put("orphans/cutoff-equal", vec![5], None)
+        .await
+        .unwrap();
     now.store(300, Ordering::SeqCst);
     blobs.put("orphans/fresh", vec![4], None).await.unwrap();
 
@@ -125,6 +175,7 @@ async fn unreferenced_sweep_observes_cutoff_reference_and_prefix() {
     assert_eq!(removed, 1);
     assert!(blobs.head("orphans/old").await.unwrap().is_none());
     assert!(blobs.head("orphans/referenced").await.unwrap().is_some());
+    assert!(blobs.head("orphans/cutoff-equal").await.unwrap().is_some());
     assert!(blobs.head("orphans/fresh").await.unwrap().is_some());
     assert!(blobs.head("elsewhere/old").await.unwrap().is_some());
 }
@@ -148,6 +199,53 @@ async fn unreferenced_sweep_stops_on_reference_check_error() {
 
     assert_eq!(error.kind(), crate::ErrorKind::Backend);
     assert!(blobs.head("orphans/old").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn unreferenced_sweep_fails_closed_on_listing_error() {
+    let blobs = TestSweepListing {
+        error: true,
+        items: Vec::new(),
+    };
+    let error = sweep_unreferenced(&blobs, "orphans/", u64::MAX, |_| async { Ok(false) })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::Backend);
+}
+
+#[tokio::test]
+async fn unreferenced_sweep_keeps_unknown_write_times() {
+    let blobs = TestSweepListing {
+        error: false,
+        items: vec![BlobSweepEntry {
+            meta: BlobMeta {
+                key: "orphans/unknown-age".to_owned(),
+                len: 1,
+                content_type: None,
+            },
+            written_at_ms: None,
+        }],
+    };
+    let error = sweep_unreferenced(&blobs, "orphans/", u64::MAX, |_| async {
+        panic!("unknown-age entries must not reach the reference callback")
+    })
+    .await
+    .unwrap();
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn sweep_page_validation_rejects_non_advancing_cursors() {
+    let page = BlobSweepPage {
+        items: Vec::new(),
+        next_after: Some("orphans/a".to_owned()),
+    };
+    assert_eq!(
+        validate_sweep_page("orphans/", Some("orphans/a"), 10, &page)
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Backend
+    );
 }
 
 #[tokio::test]

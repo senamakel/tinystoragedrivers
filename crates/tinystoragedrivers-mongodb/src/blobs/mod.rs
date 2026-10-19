@@ -474,7 +474,11 @@ impl BlobStore for MongoBlobs {
                 .await
                 .map_err(errors::failed("page blob sweep metadata"))?
             {
-                let key = file.filename.clone();
+                let Some(key) = file.filename.clone() else {
+                    return Err(StorageError::backend(
+                        "GridFS cleanup listing contained a file without a filename",
+                    ));
+                };
                 if previous.as_deref() == Some(key.as_str()) {
                     continue;
                 }

@@ -401,6 +401,11 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
 /// retained. Pages are bounded and processed in key order; an error stops the
 /// sweep, though earlier pages may already have been deleted.
 ///
+/// The result counts deletes that reported a visible blob removed. A backend
+/// may also reclaim a physical object that has expired while reporting `false`
+/// under the existing [`BlobStore::delete`] contract; such reclamation is not
+/// included in the count.
+///
 /// The check and delete are not atomic. Hosts must use immutable blob keys or
 /// coordinate writers and sweeping so a key cannot be replaced or referenced
 /// between the reference check and delete. The grace period protects an
@@ -482,6 +487,11 @@ fn validate_sweep_page(
 
 /// Validate the shared bounds and cursor rules for a cleanup page request.
 /// Drivers should call this before querying their own pagination mechanism.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` when the prefix, cursor, or requested page size is
+/// outside the blob cleanup contract.
 pub fn validate_sweep_page_request(prefix: &str, after: Option<&str>, limit: usize) -> Result<()> {
     validate_user_blob_prefix(prefix)?;
     if !(1..=MAX_BLOB_SWEEP_PAGE_ITEMS).contains(&limit) {

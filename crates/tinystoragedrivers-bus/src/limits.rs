@@ -11,7 +11,7 @@
 /// optional `schema` and `expires_ms` on `Put`) and the `Streams.Seal`
 /// selector. Both are additive; see `docs/specs/storage-bus.md`.
 /// Version 6 adds bounded physical blob sweep pages and their write timestamps.
-/// Version 5 is reserved by SecretCAS conditional secret writes.
+/// Version 5 is reserved by `SecretCAS` conditional secret writes.
 pub const CONTRACT_VERSION: u32 = 6;
 /// `TinyBus` frame cap. No request or reply may exceed it.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;

@@ -132,6 +132,84 @@ async fn blob_write_time_tracks_overwrites_and_survives_reopening() {
 }
 
 #[tokio::test]
+async fn orphan_sweep_keeps_legacy_rows_with_unknown_write_time() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use tinystoragedrivers_core::{Scope, StorageBackend, sweep_unreferenced};
+
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicU64::new(100));
+    let clock = Arc::clone(&now);
+    let storage = SqliteStorage::open(dir.path())
+        .unwrap()
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let scope = Scope::local();
+    let blobs = storage.for_scope(&scope).unwrap().blobs().clone();
+    blobs.put("sweep/legacy", vec![1], None).await.unwrap();
+
+    let update = format!(
+        "UPDATE {} SET written_ms = NULL WHERE scope = ?1 AND key = ?2",
+        crate::sql::ident(&storage.tables.blobs)
+    );
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute(&update, [scope.as_str(), "sweep/legacy"])?;
+            Ok(())
+        })
+        .unwrap();
+
+    let called = Arc::new(AtomicBool::new(false));
+    let callback_called = Arc::clone(&called);
+    let removed = sweep_unreferenced(&*blobs, "sweep/", u64::MAX, move |_| {
+        callback_called.store(true, Ordering::SeqCst);
+        async { Ok(false) }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(removed, 0);
+    assert!(!called.load(Ordering::SeqCst));
+    assert!(blobs.head("sweep/legacy").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn orphan_sweep_reclaims_expired_rows_without_counting_them_as_live_deletes() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tinystoragedrivers_core::{Scope, StorageBackend, sweep_unreferenced};
+
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicU64::new(100));
+    let clock = Arc::clone(&now);
+    let storage = SqliteStorage::open(dir.path())
+        .unwrap()
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let blobs = storage.for_scope(&Scope::local()).unwrap().blobs().clone();
+    blobs
+        .put_expiring("sweep/expired", vec![1], None, Duration::from_millis(1))
+        .await
+        .unwrap();
+    now.store(101, Ordering::SeqCst);
+    assert!(blobs.head("sweep/expired").await.unwrap().is_none());
+
+    let removed = sweep_unreferenced(&*blobs, "sweep/", 101, |_| async { Ok(false) })
+        .await
+        .unwrap();
+    assert_eq!(removed, 0);
+    assert!(
+        blobs
+            .list_sweep_page("sweep/", None, 10)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn expiry_follows_the_injected_clock() {
     let dir = tempfile::tempdir().unwrap();
     let now = Arc::new(AtomicU64::new(1_000));
