@@ -1,6 +1,7 @@
 //! URL parsing, redaction and driver selection.
 
 use super::*;
+use crate::BlobConfig;
 use tinystoragedrivers_core::ErrorKind;
 
 #[test]
