@@ -1,5 +1,7 @@
 //! Requirements checked while a MongoDB backend opens.
 
+use tinystoragedrivers_core::{Capability, Result, StorageError};
+
 /// Optional MongoDB capabilities a caller requires at open time.
 ///
 /// By default, MongoDB opens on any reachable deployment and reports the
@@ -33,6 +35,22 @@ impl MongoOpenOptions {
     pub const fn require_transactions(mut self) -> Self {
         self.require_transactions = true;
         self
+    }
+
+    pub(super) fn validate(self, transactions_supported: bool) -> Result<()> {
+        if self.require_fencing && !transactions_supported {
+            return Err(StorageError::unsupported(
+                Capability::Fencing,
+                "this MongoDB deployment does not provide fencing",
+            ));
+        }
+        if self.require_transactions && !transactions_supported {
+            return Err(StorageError::unsupported(
+                Capability::Transactions,
+                "this MongoDB deployment does not provide transactions",
+            ));
+        }
+        Ok(())
     }
 }
 

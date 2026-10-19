@@ -296,18 +296,7 @@ impl MongoStorage {
             .await
             .map_err(errors::failed("reach the server"))?;
         let supports_transactions = supports_transactions(&hello);
-        if open_options.require_fencing && !supports_transactions {
-            return Err(StorageError::unsupported(
-                Capability::Fencing,
-                "this MongoDB deployment does not provide fencing",
-            ));
-        }
-        if open_options.require_transactions && !supports_transactions {
-            return Err(StorageError::unsupported(
-                Capability::Transactions,
-                "this MongoDB deployment does not provide transactions",
-            ));
-        }
+        open_options.validate(supports_transactions)?;
         // Admission and payload reads must observe the primary.
         let db = client.database_with_options(
             database,
