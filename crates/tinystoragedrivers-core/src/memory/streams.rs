@@ -110,7 +110,7 @@ impl MemoryStreams {
             content_type: Some("application/zstd".to_owned()),
         };
         state.blobs.insert(blob_key, (meta, bytes, None));
-        state.blob_written_ms.insert(blob_key, self.now_ms());
+        state.blob_written_ms.insert(blob_key, (self.clock)());
         Ok(outcome)
     }
 
