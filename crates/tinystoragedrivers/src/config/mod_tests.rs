@@ -48,6 +48,140 @@ fn parses_every_form() {
             database: "app".into()
         }
     );
+    assert_eq!(
+        StorageConfig::parse("memory?blobs=memory%3a")
+            .unwrap()
+            .driver(),
+        "composite"
+    );
+}
+
+#[test]
+fn parses_an_encoded_blob_backend_and_preserves_record_options() {
+    let blobs = percent_encode(
+        "mongodb://blob-user:blob-secret@blob-host/blobs?password=query-secret&readConcern=majority",
+    );
+    let url = format!(
+        "mongodb://records-user:records-secret@records-host/app?appName=desktop&retryWrites=true&blobs={blobs}"
+    );
+    let config = StorageConfig::parse(&url).unwrap();
+
+    assert_eq!(config.driver(), "composite");
+    let StorageConfig::Composite { records, .. } = &config else {
+        panic!("expected a composite config")
+    };
+    assert_eq!(
+        records.to_string(),
+        "mongodb://records-user:***@records-host/app?appName=desktop&retryWrites=true"
+    );
+    let shown = config.to_string();
+    for preserved in [
+        "appName",
+        "desktop",
+        "retryWrites",
+        "true",
+        "readConcern",
+        "majority",
+    ] {
+        assert!(shown.contains(preserved), "{shown} omitted {preserved}");
+    }
+    for secret in ["records-secret", "blob-secret", "query-secret"] {
+        assert!(!shown.contains(secret), "{shown} exposed {secret}");
+        assert!(!format!("{config:?}").contains(secret));
+    }
+}
+
+#[cfg(feature = "s3")]
+#[test]
+fn parses_an_encoded_s3_blob_backend_without_connecting() {
+    let blobs = percent_encode(
+        "s3://test-bucket/root?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A1",
+    );
+    let config = StorageConfig::parse(&format!("memory?blobs={blobs}")).unwrap();
+    assert_eq!(config.driver(), "composite");
+}
+
+#[test]
+fn rejects_malformed_duplicate_and_recursive_blob_parameters() {
+    let malformed = StorageConfig::parse("memory?blobs=%ZZ").unwrap_err();
+    assert_eq!(malformed.kind(), ErrorKind::InvalidInput);
+
+    for bad in ["memory?blobs=", "memory?blobs=%FF"] {
+        let error = StorageConfig::parse(bad).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput, "{bad}");
+    }
+
+    let duplicate =
+        StorageConfig::parse("memory?blobs=memory&blobs=file%3A%2Ftmp%2Fblobs").unwrap_err();
+    assert_eq!(duplicate.kind(), ErrorKind::InvalidInput);
+
+    let recursive = StorageConfig::parse("memory?blobs=memory%3Fblobs%3Dmemory").unwrap_err();
+    assert_eq!(recursive.kind(), ErrorKind::InvalidInput);
+}
+
+#[test]
+fn nested_blob_parse_errors_do_not_echo_credentials() {
+    let blobs =
+        percent_encode("mongodb://nested-user:nested-secret@blob-host?password=query-secret");
+    let error = StorageConfig::parse(&format!("memory?blobs={blobs}")).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(!error.to_string().contains("nested-secret"), "{error}");
+    assert!(!error.to_string().contains("query-secret"), "{error}");
+    assert!(error.message().contains("names no database"), "{error}");
+}
+
+#[test]
+fn nested_blob_errors_redact_credentials_even_for_unknown_schemes() {
+    let nested = percent_encode("memory?password=sentinel-secret");
+    let error = StorageConfig::parse(&format!("memory?blobs={nested}")).unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(!error.to_string().contains("sentinel-secret"), "{error}");
+}
+
+#[cfg(feature = "file")]
+#[tokio::test]
+async fn opens_composite_url_with_independent_record_and_blob_drivers() {
+    let dir = tempfile::tempdir().unwrap();
+    let blobs_url = format!("file:{}", dir.path().display());
+    let url = format!("memory?blobs={}", percent_encode(&blobs_url));
+    let config = StorageConfig::parse(&url).unwrap();
+
+    let backend = open(&config).await.unwrap();
+    assert_eq!(backend.driver(), "composite");
+    assert_eq!(backend.document_driver(), "memory");
+    let scoped = backend.for_scope(&crate::Scope::local()).unwrap();
+    scoped
+        .blobs()
+        .put("persisted", vec![1, 2, 3], None)
+        .await
+        .unwrap();
+
+    let reopened = open(&StorageConfig::parse(&url).unwrap()).await.unwrap();
+    let reopened = reopened.for_scope(&crate::Scope::local()).unwrap();
+    assert_eq!(
+        reopened
+            .blobs()
+            .get("persisted")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        vec![1, 2, 3]
+    );
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").unwrap();
+        }
+    }
+    encoded
 }
 
 #[test]

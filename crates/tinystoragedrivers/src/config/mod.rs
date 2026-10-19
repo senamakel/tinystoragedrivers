@@ -45,6 +45,13 @@ pub enum StorageConfig {
         /// Root directory.
         dir: PathBuf,
     },
+    /// Documents and streams on one backend with blobs on another.
+    Composite {
+        /// The records backend configuration.
+        records: Box<StorageConfig>,
+        /// The independently configured blob backend.
+        blobs: Box<crate::BlobConfig>,
+    },
 }
 
 impl StorageConfig {
@@ -53,17 +60,27 @@ impl StorageConfig {
     /// Accepted forms: `memory`; `sqlite:<path>`; a bare path (absolute, or
     /// starting with `./` or `../`), read as SQLite;
     /// `mongodb://…/<database>` and `mongodb+srv://…/<database>`;
-    /// `file:<dir>`.
+    /// `file:<dir>`. Add one percent-encoded `blobs=<URL>` query option to
+    /// select an independent blob backend; nested composite blob URLs are not
+    /// supported.
     ///
     /// # Errors
     ///
     /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) for an
-    /// empty or unrecognized URL, an empty path, or a `MongoDB` URI without a
-    /// database name.
+    /// empty or unrecognized URL, an empty path, a malformed or duplicate
+    /// `blobs` option, or a `MongoDB` URI without a database name.
     pub fn parse(url: &str) -> Result<Self> {
         let url = url.trim();
         if url.is_empty() {
             return Err(StorageError::invalid_input("storage URL is empty"));
+        }
+        if let Some((records_url, blobs_url)) = split_blob_option(url)? {
+            let records = Self::parse(&records_url)?;
+            let blobs = crate::BlobConfig::parse(&blobs_url)?;
+            return Ok(Self::Composite {
+                records: Box::new(records),
+                blobs: Box::new(blobs),
+            });
         }
         if url == "memory" || url == "memory:" {
             return Ok(Self::Memory);
@@ -115,8 +132,105 @@ impl StorageConfig {
             Self::Sqlite { .. } => "sqlite",
             Self::MongoDb { .. } => "mongodb",
             Self::File { .. } => "file",
+            Self::Composite { .. } => "composite",
         }
     }
+}
+
+/// Remove and decode the one optional `blobs=` query component while retaining
+/// every other records URL query component verbatim.
+fn split_blob_option(url: &str) -> Result<Option<(String, String)>> {
+    let Some(query_start) = url.find('?') else {
+        return Ok(None);
+    };
+    let (query, fragment) = url[query_start + 1..]
+        .split_once('#')
+        .map_or((&url[query_start + 1..], ""), |(query, fragment)| {
+            (query, fragment)
+        });
+    let mut blob_value = None;
+    let mut kept = Vec::new();
+    for option in query.split('&') {
+        let (key, value) = option.split_once('=').unwrap_or((option, ""));
+        if key == "blobs" {
+            if blob_value.is_some() {
+                return Err(StorageError::invalid_input(
+                    "storage URL has more than one blobs option",
+                ));
+            }
+            blob_value = Some(decode_query_component(value)?);
+        } else {
+            kept.push(option);
+        }
+    }
+    let Some(blob_value) = blob_value else {
+        return Ok(None);
+    };
+    if blob_value.is_empty() {
+        return Err(StorageError::invalid_input(
+            "storage URL blobs option is empty",
+        ));
+    }
+    let prefix = &url[..query_start];
+    let records_url = if kept.is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}?{}", kept.join("&"))
+    };
+    let records_url = if fragment.is_empty() {
+        records_url
+    } else {
+        format!("{records_url}#{fragment}")
+    };
+    Ok(Some((records_url, blob_value)))
+}
+
+fn decode_query_component(value: &str) -> Result<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = bytes.get(index + 1).and_then(|byte| hex_nibble(*byte));
+            let low = bytes.get(index + 2).and_then(|byte| hex_nibble(*byte));
+            let (Some(high), Some(low)) = (high, low) else {
+                return Err(StorageError::invalid_input(
+                    "storage URL blobs option has invalid percent encoding",
+                ));
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| StorageError::invalid_input("storage URL blobs option is not valid UTF-8"))
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn encode_query_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 fn non_empty_path(path: &str, driver: &str) -> Result<PathBuf> {
@@ -179,8 +293,9 @@ enum Boundary {
 
 /// Query options whose values are credentials (AWS session tokens ride in
 /// `authMechanismProperties`).
-const SECRET_OPTIONS: [&str; 3] = [
+const SECRET_OPTIONS: [&str; 4] = [
     "authmechanismproperties",
+    "proxypassword",
     "tlscertificatekeyfilepassword",
     "password",
 ];
@@ -189,7 +304,10 @@ const SECRET_OPTIONS: [&str; 3] = [
 /// any option in [`SECRET_OPTIONS`].
 fn redact(url: &str) -> String {
     let Some(parts) = split_uri(url, Boundary::Anywhere) else {
-        return url.to_owned();
+        let Some((prefix, query)) = url.split_once('?') else {
+            return url.to_owned();
+        };
+        return format!("{prefix}?{}", redact_query(query));
     };
     let mut out = format!("{}://", parts.scheme);
     if let Some(userinfo) = parts.userinfo {
@@ -207,18 +325,22 @@ fn redact(url: &str) -> String {
     }
     if let Some(query) = parts.query {
         out.push('?');
-        let options: Vec<String> = query
-            .split('&')
-            .map(|option| match option.split_once('=') {
-                Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
-                    format!("{key}=***")
-                }
-                _ => option.to_owned(),
-            })
-            .collect();
-        out.push_str(&options.join("&"));
+        out.push_str(&redact_query(query));
     }
     out
+}
+
+fn redact_query(query: &str) -> String {
+    query
+        .split('&')
+        .map(|option| match option.split_once('=') {
+            Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
+                format!("{key}=***")
+            }
+            _ => option.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 impl fmt::Display for StorageConfig {
@@ -228,6 +350,18 @@ impl fmt::Display for StorageConfig {
             Self::Sqlite { path } => write!(f, "sqlite:{}", path.display()),
             Self::MongoDb { uri, .. } => f.write_str(&redact(uri)),
             Self::File { dir } => write!(f, "file:{}", dir.display()),
+            Self::Composite { records, blobs } => {
+                let separator = if records.to_string().contains('?') {
+                    '&'
+                } else {
+                    '?'
+                };
+                write!(
+                    f,
+                    "{records}{separator}blobs={}",
+                    encode_query_component(&blobs.to_string())
+                )
+            }
         }
     }
 }
@@ -264,6 +398,7 @@ pub async fn open(config: &StorageConfig) -> Result<Arc<dyn StorageBackend>> {
         StorageConfig::MongoDb { uri, database } => Ok(Arc::new(
             tinystoragedrivers_mongodb::MongoStorage::connect(uri, database).await?,
         )),
+        StorageConfig::Composite { records, blobs } => crate::open_composite(records, blobs).await,
         #[allow(
             unreachable_patterns,
             reason = "reachable unless every driver feature is enabled"

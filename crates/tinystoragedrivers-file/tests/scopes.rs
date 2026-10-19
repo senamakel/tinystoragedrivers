@@ -25,6 +25,7 @@ async fn lists_scopes_by_kind_with_names_that_need_encoding() {
             .capabilities()
             .contains(Capability::ScopeEnumeration)
     );
+    assert!(storage.capabilities().contains(Capability::ScopePurge));
 
     let doc = scope("u:ann");
     let stream = scope("u:ann/agent:Z");

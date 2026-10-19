@@ -25,8 +25,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, StorageError, clamp_range,
-    is_reserved_blob_key, validate_blob_key, validate_user_blob_key, validate_user_blob_prefix,
+    Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, ScopeGeneration,
+    StorageError, clamp_range, is_reserved_blob_key, validate_blob_key, validate_user_blob_key,
+    validate_user_blob_prefix,
 };
 
 use crate::documents::guard;
@@ -63,6 +64,7 @@ pub struct FileBlobs {
     scope: Scope,
     /// Checked under the database lock before every write, when set.
     fence: Option<Arc<Fencing>>,
+    generation: ScopeGeneration,
 }
 
 /// The paths of one blob.
@@ -75,7 +77,17 @@ struct Paths {
 
 impl FileBlobs {
     pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fencing>>) -> Self {
-        Self { db, scope, fence }
+        Self {
+            db,
+            scope,
+            fence,
+            generation: ScopeGeneration::default(),
+        }
+    }
+
+    pub(crate) fn with_generation(mut self, generation: ScopeGeneration) -> Self {
+        self.generation = generation;
+        self
     }
 
     fn dir(db: &Db, scope: &Scope) -> PathBuf {
@@ -91,9 +103,10 @@ impl FileBlobs {
     ///
     /// A filesystem error.
     pub async fn sweep_expired(&self) -> Result<u64> {
-        let (scope, fence) = (self.scope.clone(), self.fence.clone());
+        let (scope, fence, generation) = (self.scope.clone(), self.fence.clone(), self.generation);
         self.db
             .run(move |db| {
+                db.check_generation(&scope, generation)?;
                 guard(db, fence.as_deref())?;
                 let dir = Self::dir(db, &scope);
                 let now = db.now();
@@ -138,9 +151,10 @@ impl FileBlobs {
         F: FnOnce(&Paths, &str) -> Result<T> + Send + 'static,
     {
         validate_user_blob_key(key)?;
-        let (scope, key) = (self.scope.clone(), key.to_owned());
+        let (scope, key, generation) = (self.scope.clone(), key.to_owned(), self.generation);
         self.db
             .run(move |db| {
+                db.check_generation(&scope, generation)?;
                 guard(db, fence.as_deref())?;
                 work(&Self::paths(db, &scope, &key), &key)
             })
@@ -380,9 +394,10 @@ impl BlobStore for FileBlobs {
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         validate_user_blob_prefix(prefix)?;
-        let (scope, prefix) = (self.scope.clone(), prefix.to_owned());
+        let (scope, prefix, generation) = (self.scope.clone(), prefix.to_owned(), self.generation);
         self.db
             .run(move |db| {
+                db.check_generation(&scope, generation)?;
                 let dir = Self::dir(db, &scope);
                 let now = db.now();
                 let mut out = Vec::new();
