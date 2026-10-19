@@ -91,6 +91,45 @@ impl SqliteStorage {
         Self::assemble(&file, Arc::new(system_clock))
     }
 
+    /// Open an existing database for reads without creating the database or
+    /// its parent directory, applying write-oriented SQLite pragmas, or
+    /// preparing or migrating its schema. The opened database's contents and
+    /// schema are left unchanged.
+    ///
+    /// SQLite may create or update `-wal` and `-shm` coordination files while
+    /// opening a WAL database. Those files can remain after this handle closes.
+    ///
+    /// The path rules match [`Self::open`]: a `.db` or `.sqlite` path names a
+    /// file; any other path names a directory containing `storage.db`. The
+    /// database's TSD table layout is validated as-is. Returned document
+    /// handles also refuse schema declarations, and writes through any storage
+    /// port or [`SqliteNative`] connection fail because SQLite opened the file
+    /// with read-only flags. This does not prevent SQLite from maintaining WAL
+    /// coordination files when needed to read committed WAL data.
+    ///
+    /// # Errors
+    ///
+    /// The file or parent does not exist, the file cannot be opened read-only,
+    /// or its TSD schema is missing or incompatible.
+    pub fn open_existing_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let file = if is_file_path(path) {
+            path.to_path_buf()
+        } else {
+            path.join(ROOT_FILE)
+        };
+        let db = Db::open_read_only(&file)?;
+        let tables = Arc::new(Tables::new());
+        let validate = Arc::clone(&tables);
+        db.run_now(move |conn| validate.validate(conn))?;
+        Ok(Self {
+            db,
+            tables,
+            clock: Arc::new(system_clock),
+            existing: true,
+        })
+    }
+
     fn assemble(file: &Path, clock: Clock) -> Result<Self> {
         let db = Db::open(file)?;
         let tables = Arc::new(Tables::new());
@@ -131,7 +170,7 @@ impl SqliteStorage {
         fencing: Option<&Arc<Fencing>>,
         generation: tinystoragedrivers_core::ScopeGeneration,
     ) -> ScopedStorage {
-        ScopedStorage::new(
+        let storage = ScopedStorage::new(
             scope.clone(),
             self.driver(),
             Arc::new(
@@ -165,14 +204,18 @@ impl SqliteStorage {
                 )
                 .with_generation(generation),
             ),
-        )
-        .with_purge(Arc::new(crate::purge::SqlitePurge {
-            db: Arc::clone(&self.db),
-            tables: Arc::clone(&self.tables),
-            scope: scope.clone(),
-            generation,
-            fencing: fencing.cloned(),
-        }))
+        );
+        if self.db.is_read_only() {
+            storage
+        } else {
+            storage.with_purge(Arc::new(crate::purge::SqlitePurge {
+                db: Arc::clone(&self.db),
+                tables: Arc::clone(&self.tables),
+                scope: scope.clone(),
+                generation,
+                fencing: fencing.cloned(),
+            }))
+        }
     }
 
     /// The database file this storage reads and writes.
@@ -189,15 +232,15 @@ impl StorageBackend for SqliteStorage {
     }
 
     fn capabilities(&self) -> Capabilities {
-        capabilities()
+        capabilities(self.db.is_read_only())
     }
 
     fn supports_scope_purge_binding_validation(&self) -> bool {
-        true
+        !self.db.is_read_only()
     }
 
     fn supports_scope_purge_generation_validation(&self) -> bool {
-        true
+        !self.db.is_read_only()
     }
 
     async fn prepare_schema(&self) -> Result<()> {
@@ -286,3 +329,7 @@ mod schema_tests;
 #[cfg(test)]
 #[path = "generation_tests.rs"]
 mod generation_tests;
+
+#[cfg(test)]
+#[path = "readonly_tests.rs"]
+mod readonly_tests;
