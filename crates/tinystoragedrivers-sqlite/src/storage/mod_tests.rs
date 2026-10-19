@@ -155,7 +155,8 @@ async fn orphan_sweep_keeps_legacy_rows_with_unknown_write_time() {
     storage
         .db
         .run_now(|conn| {
-            conn.execute(&update, [scope.as_str(), "sweep/legacy"])?;
+            conn.execute(&update, [scope.as_str(), "sweep/legacy"])
+                .unwrap();
             Ok(())
         })
         .unwrap();

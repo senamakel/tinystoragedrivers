@@ -456,9 +456,10 @@ impl BlobStore for MongoBlobs {
         crate::purge::admitted!(self, {
             validate_sweep_page_request(prefix, after, limit)?;
             let bucket = self.bucket().await?;
-            let filename = match after {
-                Some(after) => doc! { "$regex": prefix_regex(prefix), "$gt": after },
-                None => doc! { "$regex": prefix_regex(prefix) },
+            let filename = if let Some(after) = after {
+                doc! { "$regex": prefix_regex(prefix), "$gt": after }
+            } else {
+                doc! { "$regex": prefix_regex(prefix) }
             };
             let filter = doc! { "filename": filename };
             let mut files = bucket
