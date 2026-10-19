@@ -25,8 +25,9 @@ mod streams;
 mod types;
 pub use blobs::{
     BLOBS_OBJECT, BLOBS_SELECTORS, BlobBody, BlobCapabilities, BlobInfo, BlobKeyRequest,
-    BlobStreamHead, GetRangeRequest, ListBlobsRequest, PresignRequest, PresignedUrl,
-    PutBlobRequest, PutBlobStreamRequest, is_blobs_selector,
+    BlobStreamHead, BlobSweepInfo, BlobSweepPage, GetRangeRequest, ListBlobSweepPageRequest,
+    ListBlobsRequest, PresignRequest, PresignedUrl, PutBlobRequest, PutBlobStreamRequest,
+    is_blobs_selector,
 };
 pub use client::DocumentClient;
 pub use documents::{

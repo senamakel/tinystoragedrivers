@@ -77,10 +77,13 @@ pub enum Capability {
     /// (`SQLite` and `MongoDB`); the memory driver is one process's heap, and the
     /// file driver serializes only among the handles of one process.
     SharedAcrossProcesses,
+    /// `BlobStore::list_sweep_page` returns bounded key pages and trustworthy
+    /// write times for blobs, including payloads hidden by expired lifetimes.
+    BlobSweep,
 }
 
 impl Capability {
-    const ALL: [Self; 20] = [
+    const ALL: [Self; 21] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -101,6 +104,7 @@ impl Capability {
         Self::ScopeEnumeration,
         Self::StreamSeal,
         Self::SharedAcrossProcesses,
+        Self::BlobSweep,
     ];
 
     const fn bit(self) -> u32 {
@@ -125,6 +129,7 @@ impl Capability {
             Self::ScopeEnumeration => 1 << 18,
             Self::StreamSeal => 1 << 19,
             Self::SharedAcrossProcesses => 1 << 20,
+            Self::BlobSweep => 1 << 22,
         }
     }
 }
@@ -152,6 +157,7 @@ impl fmt::Display for Capability {
             Self::ScopeEnumeration => "scope_enumeration",
             Self::StreamSeal => "stream_seal",
             Self::SharedAcrossProcesses => "shared_across_processes",
+            Self::BlobSweep => "blob_sweep",
         })
     }
 }
@@ -205,7 +211,8 @@ impl Capabilities {
                 | Capability::Maintenance.bit()
                 | Capability::ScopeEnumeration.bit()
                 | Capability::StreamSeal.bit()
-                | Capability::SharedAcrossProcesses.bit(),
+                | Capability::SharedAcrossProcesses.bit()
+                | Capability::BlobSweep.bit(),
         )
     }
 

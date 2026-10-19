@@ -94,6 +94,44 @@ async fn data_survives_reopening() {
 }
 
 #[tokio::test]
+async fn blob_write_time_tracks_overwrites_and_survives_reopening() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicU64::new(50));
+    let clock = Arc::clone(&now);
+    {
+        let storage = SqliteStorage::open(dir.path())
+            .unwrap()
+            .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+        let blobs = storage.for_scope(&Scope::local()).unwrap().blobs().clone();
+        blobs.put("sweep/key", vec![1], None).await.unwrap();
+        now.store(70, Ordering::SeqCst);
+        blobs.put("sweep/key", vec![2], None).await.unwrap();
+        assert_eq!(
+            blobs
+                .list_sweep_page("sweep/", None, 10)
+                .await
+                .unwrap()
+                .items[0]
+                .written_at_ms,
+            Some(70)
+        );
+    }
+    let storage = SqliteStorage::open(dir.path())
+        .unwrap()
+        .with_clock(Arc::new(move || now.load(Ordering::SeqCst)));
+    let blobs = storage.for_scope(&Scope::local()).unwrap().blobs().clone();
+    assert_eq!(
+        blobs
+            .list_sweep_page("sweep/", None, 10)
+            .await
+            .unwrap()
+            .items[0]
+            .written_at_ms,
+        Some(70)
+    );
+}
+
+#[tokio::test]
 async fn expiry_follows_the_injected_clock() {
     let dir = tempfile::tempdir().unwrap();
     let now = Arc::new(AtomicU64::new(1_000));

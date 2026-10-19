@@ -110,6 +110,9 @@ impl BusStorage {
         for capability in HOST_ONLY {
             capabilities = capabilities.without(capability);
         }
+        if blob_capabilities.blob_sweep {
+            capabilities = capabilities.with(Capability::BlobSweep);
+        }
         Ok(Self {
             wire,
             scope,

@@ -110,6 +110,7 @@ impl MemoryStreams {
             content_type: Some("application/zstd".to_owned()),
         };
         state.blobs.insert(blob_key, (meta, bytes, None));
+        state.blob_written_ms.insert(blob_key, self.now_ms());
         Ok(outcome)
     }
 
@@ -299,6 +300,7 @@ impl StreamStore for MemoryStreams {
         // there, to clear one a crashed seal left.
         let existed = state.streams.remove(&self.key(stream)).is_some();
         state.blobs.remove(&self.blob_key(stream)?);
+        state.blob_written_ms.remove(&self.blob_key(stream)?);
         Ok(existed)
     }
 
@@ -313,6 +315,7 @@ impl StreamStore for MemoryStreams {
         }
         state.streams.remove(&key);
         state.blobs.remove(&self.blob_key(stream)?);
+        state.blob_written_ms.remove(&self.blob_key(stream)?);
         Ok(true)
     }
 

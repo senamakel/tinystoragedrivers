@@ -93,3 +93,83 @@ async fn default_streaming_publishes_exact_bytes_and_reads_missing_as_absent() {
         crate::ErrorKind::Unsupported(Capability::PresignedUrls)
     );
 }
+
+#[tokio::test]
+async fn unreferenced_sweep_observes_cutoff_reference_and_prefix() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::{MemoryStorage, Scope, StorageBackend, sweep_unreferenced};
+
+    let now = Arc::new(AtomicU64::new(100));
+    let clock = Arc::clone(&now);
+    let storage = MemoryStorage::with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let blobs = storage.for_scope(&Scope::local()).unwrap().blobs().clone();
+
+    blobs.put("orphans/old", vec![1], None).await.unwrap();
+    now.store(200, Ordering::SeqCst);
+    blobs
+        .put("orphans/referenced", vec![2], None)
+        .await
+        .unwrap();
+    blobs.put("elsewhere/old", vec![3], None).await.unwrap();
+    now.store(300, Ordering::SeqCst);
+    blobs.put("orphans/fresh", vec![4], None).await.unwrap();
+
+    let removed = sweep_unreferenced(&*blobs, "orphans/", 250, |key| async move {
+        Ok(key == "orphans/referenced")
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(removed, 1);
+    assert!(blobs.head("orphans/old").await.unwrap().is_none());
+    assert!(blobs.head("orphans/referenced").await.unwrap().is_some());
+    assert!(blobs.head("orphans/fresh").await.unwrap().is_some());
+    assert!(blobs.head("elsewhere/old").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn unreferenced_sweep_stops_on_reference_check_error() {
+    use crate::{MemoryStorage, Scope, StorageBackend, sweep_unreferenced};
+
+    let blobs = MemoryStorage::new()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .blobs()
+        .clone();
+    blobs.put("orphans/old", vec![1], None).await.unwrap();
+
+    let error = sweep_unreferenced(&*blobs, "orphans/", u64::MAX, |_| async {
+        Err(crate::StorageError::backend("reference lookup failed"))
+    })
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind(), crate::ErrorKind::Backend);
+    assert!(blobs.head("orphans/old").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn cleanup_pages_include_expired_physical_blobs() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::{MemoryStorage, Scope, StorageBackend};
+
+    let now = Arc::new(AtomicU64::new(10));
+    let clock = Arc::clone(&now);
+    let storage = MemoryStorage::with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let blobs = storage.for_scope(&Scope::local()).unwrap().blobs().clone();
+    blobs
+        .put_expiring("expired/physical", vec![1], None, Duration::from_millis(1))
+        .await
+        .unwrap();
+    now.store(12, Ordering::SeqCst);
+
+    assert!(blobs.get("expired/physical").await.unwrap().is_none());
+    let page = blobs.list_sweep_page("expired/", None, 8).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].meta.key, "expired/physical");
+    assert_eq!(page.items[0].written_at_ms, Some(10));
+}

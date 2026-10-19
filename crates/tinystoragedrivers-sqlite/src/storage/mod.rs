@@ -48,6 +48,7 @@ pub struct SqliteStorage {
     tables: Arc<Tables>,
     clock: Clock,
     existing: bool,
+    blob_sweep_supported: bool,
 }
 
 impl fmt::Debug for SqliteStorage {
@@ -101,6 +102,7 @@ impl SqliteStorage {
             tables,
             clock,
             existing: false,
+            blob_sweep_supported: true,
         })
     }
 
@@ -141,6 +143,7 @@ impl SqliteStorage {
                     scope.clone(),
                     Arc::clone(&self.clock),
                     fencing.cloned(),
+                    self.blob_sweep_supported,
                     self.existing,
                 )
                 .with_generation(generation),
@@ -189,7 +192,12 @@ impl StorageBackend for SqliteStorage {
     }
 
     fn capabilities(&self) -> Capabilities {
-        capabilities()
+        let caps = capabilities();
+        if self.blob_sweep_supported {
+            caps.with(tinystoragedrivers_core::Capability::BlobSweep)
+        } else {
+            caps
+        }
     }
 
     async fn prepare_schema(&self) -> Result<()> {
@@ -205,9 +213,13 @@ impl StorageBackend for SqliteStorage {
 
     fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {
         let inspect = Arc::clone(&self.tables);
-        self.db.run_now(move |conn| inspect.validate(conn))?;
+        let blob_sweep_supported = self.db.run_now(move |conn| {
+            inspect.validate(conn)?;
+            inspect.blob_write_times(conn)
+        })?;
         let mut storage = self.clone();
         storage.existing = true;
+        storage.blob_sweep_supported = blob_sweep_supported;
         Ok(Arc::new(storage))
     }
 

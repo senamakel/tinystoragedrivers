@@ -238,7 +238,7 @@ docs(scope, coll, id, version, schema, created_ms, updated_ms, expires_ms,
      deleted, body)                     PK (scope, coll, id)
 streams(scope, name, seq, body)         PK (scope, name, seq)
 stream_heads(scope, name, base, len, sealed, sealed_ms, last_append_ms)
-blobs(scope, key, content_type, size, sha256, expires_ms, bytes)
+blobs(scope, key, content_type, size, sha256, expires_ms, written_ms, bytes)
 doc_fields(scope, coll, id, path, kind, value)   PK (scope, coll, id, path)
 fts                                     FTS5, searchable collections only
 meta(key, value)                        registry snapshot, versions, layout

@@ -110,6 +110,25 @@ impl StorageServer {
                 }
                 encode(&listed.into_iter().map(info).collect::<Vec<_>>())
             }
+            "ListSweepPage" => {
+                let r: wire::ListBlobSweepPageRequest = decode(request)?;
+                let page = native(
+                    blobs
+                        .list_sweep_page(&r.prefix, r.after.as_deref(), r.limit)
+                        .await,
+                )?;
+                encode(&wire::BlobSweepPage {
+                    items: page
+                        .items
+                        .into_iter()
+                        .map(|entry| wire::BlobSweepInfo {
+                            info: info(entry.meta),
+                            written_at_ms: entry.written_at_ms,
+                        })
+                        .collect(),
+                    next_after: page.next_after,
+                })
+            }
             "PresignGet" | "PresignPut" => {
                 let r: wire::PresignRequest = decode(request)?;
                 if r.ttl_secs == 0 || r.ttl_secs > MAX_PRESIGN_TTL_SECS {
@@ -130,6 +149,7 @@ impl StorageServer {
                 encode(&wire::BlobCapabilities {
                     presigned_urls: blobs.capabilities().contains(Capability::PresignedUrls),
                     ttl: blobs.capabilities().contains(Capability::BlobTtl),
+                    blob_sweep: blobs.capabilities().contains(Capability::BlobSweep),
                     max_key_len: blobs.max_key_len(),
                 })
             }

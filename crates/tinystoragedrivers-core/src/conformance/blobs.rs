@@ -2,7 +2,7 @@
 
 use super::{empty, fails, ok, unique};
 use crate::backend::ScopedStorage;
-use crate::blob::{TreeEntry, TreeFile};
+use crate::blob::{TreeEntry, TreeFile, sweep_unreferenced};
 use crate::error::ErrorKind;
 use crate::{BlobReader, Capability};
 use std::time::Duration;
@@ -73,6 +73,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
     sealed_prefix_is_reserved(storage).await;
     tree(storage).await;
     expiry(storage).await;
+    orphan_sweep(storage).await;
 
     for bad in ["", "/abs", "a//b", "a/../b", "a/./b"] {
         fails(
@@ -81,6 +82,69 @@ pub(super) async fn run(storage: &ScopedStorage) {
             "invalid key",
         );
     }
+}
+
+/// Cleanup pages are ordered and bounded, preserve referenced objects, and
+/// include old enough physical blobs hidden by expiration.
+async fn orphan_sweep(storage: &ScopedStorage) {
+    let blobs = storage.blobs();
+    assert!(
+        blobs.capabilities().contains(Capability::BlobSweep),
+        "blob sweep capability"
+    );
+    let base = unique("sweep");
+    let prefix = format!("{base}/");
+    let keys = [
+        format!("{base}/a"),
+        format!("{base}/b"),
+        format!("{base}/c"),
+    ];
+    for key in &keys {
+        ok(blobs.put(key, vec![1], None).await, "put sweep candidate");
+    }
+    let first = ok(
+        blobs.list_sweep_page(&prefix, None, 2).await,
+        "first sweep page",
+    );
+    assert_eq!(first.items.len(), 2, "page respects its limit");
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|item| item.meta.key.as_str())
+            .collect::<Vec<_>>(),
+        [keys[0].as_str(), keys[1].as_str()],
+        "page is ordered by key"
+    );
+    assert!(first.items.iter().all(|item| item.written_at_ms.is_some()));
+    let cursor = first.next_after.expect("more than one page exists");
+    let last = ok(
+        blobs.list_sweep_page(&prefix, Some(&cursor), 2).await,
+        "last sweep page",
+    );
+    assert_eq!(last.items.len(), 1);
+    assert!(last.next_after.is_none());
+    let cutoff = first
+        .items
+        .iter()
+        .chain(last.items.iter())
+        .filter_map(|item| item.written_at_ms)
+        .max()
+        .expect("driver reports write times")
+        .saturating_add(1);
+
+    let removed = ok(
+        sweep_unreferenced(blobs.as_ref(), &prefix, cutoff, |key| {
+            let referenced_key = keys[1].clone();
+            async move { Ok(key == referenced_key) }
+        })
+        .await,
+        "sweep unreferenced blobs",
+    );
+    assert_eq!(removed, 2);
+    assert!(ok(blobs.head(&keys[0]).await, "first candidate swept").is_none());
+    assert!(ok(blobs.head(&keys[1]).await, "referenced candidate kept").is_some());
+    assert!(ok(blobs.head(&keys[2]).await, "last candidate swept").is_none());
 }
 
 /// Build a key of exactly the announced byte limit with small path segments,

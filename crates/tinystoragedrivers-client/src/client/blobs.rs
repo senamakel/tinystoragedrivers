@@ -5,8 +5,8 @@ use std::time::Duration;
 use tinystoragedrivers_bus as wire;
 use tinystoragedrivers_bus::MAX_INLINE_BLOB_BYTES;
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability, Result,
-    StorageError, async_trait, clamp_range,
+    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, BlobSweepEntry, BlobSweepPage, Capabilities,
+    Capability, Result, StorageError, async_trait, clamp_range,
 };
 use tokio::io::AsyncReadExt;
 
@@ -141,6 +141,9 @@ impl BlobStore for BusBlobs {
         }
         if self.server.ttl {
             capabilities = capabilities.with(Capability::BlobTtl);
+        }
+        if self.server.blob_sweep {
+            capabilities = capabilities.with(Capability::BlobSweep);
         }
         capabilities
     }
@@ -284,5 +287,38 @@ impl BlobStore for BusBlobs {
         };
         let listed: Vec<wire::BlobInfo> = self.call("List", &request, None).await?;
         Ok(listed.into_iter().map(meta).collect())
+    }
+
+    async fn list_sweep_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobSweepPage> {
+        if !self.server.blob_sweep {
+            return Err(StorageError::unsupported(
+                Capability::BlobSweep,
+                "the storage host cannot page cleanup metadata",
+            ));
+        }
+        let request = wire::ListBlobSweepPageRequest {
+            prefix: prefix.to_owned(),
+            after: after.map(str::to_owned),
+            limit,
+        };
+        let page: wire::BlobSweepPage = self
+            .call("ListSweepPage", &request, Some(Capability::BlobSweep))
+            .await?;
+        Ok(BlobSweepPage {
+            items: page
+                .items
+                .into_iter()
+                .map(|item| BlobSweepEntry {
+                    meta: meta(item.info),
+                    written_at_ms: item.written_at_ms,
+                })
+                .collect(),
+            next_after: page.next_after,
+        })
     }
 }

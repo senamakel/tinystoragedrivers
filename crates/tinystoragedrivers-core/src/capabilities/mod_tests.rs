@@ -44,6 +44,7 @@ fn all_holds_every_capability() {
             Capability::ScopeEnumeration,
             Capability::StreamSeal,
             Capability::SharedAcrossProcesses,
+            Capability::BlobSweep,
         ]
     );
 }
@@ -90,6 +91,7 @@ fn renders_names() {
         (Capability::ScopeEnumeration, "scope_enumeration"),
         (Capability::StreamSeal, "stream_seal"),
         (Capability::SharedAcrossProcesses, "shared_across_processes"),
+        (Capability::BlobSweep, "blob_sweep"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }

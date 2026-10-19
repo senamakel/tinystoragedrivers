@@ -31,8 +31,9 @@ use mongodb::bson::{Bson, Document, doc};
 use mongodb::gridfs::{FilesCollectionDocument, GridFsBucket};
 use mongodb::options::{FindOptions, GridFsBucketOptions, IndexOptions};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, StorageError, clamp_range,
-    is_reserved_blob_key, validate_blob_key, validate_user_blob_key, validate_user_blob_prefix,
+    Blob, BlobMeta, BlobStore, BlobSweepEntry, BlobSweepPage, Capabilities, Capability, Result,
+    Scope, StorageError, clamp_range, is_reserved_blob_key, validate_blob_key,
+    validate_sweep_page_request, validate_user_blob_key, validate_user_blob_prefix,
 };
 
 use crate::backend::Shared;
@@ -438,7 +439,65 @@ impl BlobStore for MongoBlobs {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none().with(Capability::BlobTtl)
+        let caps = Capabilities::none().with(Capability::BlobTtl);
+        if self.fenced {
+            caps
+        } else {
+            caps.with(Capability::BlobSweep)
+        }
+    }
+
+    async fn list_sweep_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobSweepPage> {
+        crate::purge::admitted!(self, {
+            validate_sweep_page_request(prefix, after, limit)?;
+            let bucket = self.bucket().await?;
+            let filename = match after {
+                Some(after) => doc! { "$regex": prefix_regex(prefix), "$gt": after },
+                None => doc! { "$regex": prefix_regex(prefix) },
+            };
+            let filter = doc! { "filename": filename };
+            let mut files = bucket
+                .find(scoped_filter(FILE_SCOPE, &self.scope, filter))
+                .sort(doc! { "filename": 1, "_id": -1 })
+                .await
+                .map_err(errors::failed("page blob sweep metadata"))?;
+            let mut items = Vec::with_capacity(limit);
+            let mut previous: Option<String> = None;
+            let mut has_more = false;
+            while let Some(file) = files
+                .try_next()
+                .await
+                .map_err(errors::failed("page blob sweep metadata"))?
+            {
+                let key = file.filename.clone();
+                if previous.as_deref() == Some(key.as_str()) {
+                    continue;
+                }
+                previous = Some(key.clone());
+                if !key.starts_with(prefix) || (!self.sealed_access && is_reserved_blob_key(&key)) {
+                    continue;
+                }
+                if items.len() == limit {
+                    has_more = true;
+                    break;
+                }
+                items.push(BlobSweepEntry {
+                    meta: blob_meta(&file),
+                    written_at_ms: u64::try_from(file.upload_date.timestamp_millis()).ok(),
+                });
+            }
+            let next_after = if has_more {
+                items.last().map(|entry| entry.meta.key.clone())
+            } else {
+                None
+            };
+            Ok(BlobSweepPage { items, next_after })
+        })
     }
 
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {

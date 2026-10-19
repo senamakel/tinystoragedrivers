@@ -242,6 +242,35 @@ pub(crate) fn files_with_suffix(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>
     Ok(out)
 }
 
+/// Visit regular files in one directory without materializing the listing.
+/// Hidden temporary files are skipped just like [`files_with_suffix`].
+pub(crate) fn for_each_file_with_suffix<F>(dir: &Path, suffix: &str, mut visit: F) -> Result<()>
+where
+    F: FnMut(PathBuf) -> Result<()>,
+{
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error("list a directory")(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(io_error("list a directory"))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with('.') || !name.ends_with(suffix) {
+            continue;
+        }
+        if entry
+            .file_type()
+            .map_err(io_error("list a directory"))?
+            .is_file()
+        {
+            visit(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Open `path` for appending, creating it (and its directory) when missing.
 /// A symlink at `path` is refused, not followed.
 pub(crate) fn open_append(path: &Path) -> Result<File> {

@@ -39,6 +39,7 @@ impl BlobBackend for BackendBlobs {
             Capability::StreamingBlobs,
             Capability::PresignedUrls,
             Capability::BlobTtl,
+            Capability::BlobSweep,
         ] {
             if source.contains(cap) {
                 caps = caps.with(cap);
@@ -107,11 +108,13 @@ impl StorageBackend for CompositeStorage {
             .without(Capability::ScopeEnumeration)
             .without(Capability::PresignedUrls)
             .without(Capability::StreamingBlobs)
-            .without(Capability::BlobTtl);
+            .without(Capability::BlobTtl)
+            .without(Capability::BlobSweep);
         for cap in [
             Capability::StreamingBlobs,
             Capability::PresignedUrls,
             Capability::BlobTtl,
+            Capability::BlobSweep,
         ] {
             if self.blobs.capabilities().contains(cap) {
                 caps = caps.with(cap);
@@ -158,6 +161,9 @@ impl BlobStore for FencedBlobs {
             .without(Capability::AtomicScopePurge)
             .without(Capability::PresignedUrls)
             .without(Capability::BlobTtl)
+            // Fenced blob writes cannot coordinate a sweep with the document
+            // reference check, so this handle must not advertise cleanup.
+            .without(Capability::BlobSweep)
     }
     async fn put(&self, _: &str, _: Vec<u8>, _: Option<&str>) -> Result<BlobMeta> {
         Err(unfenceable())
@@ -213,6 +219,17 @@ impl BlobStore for FencedBlobs {
     }
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         self.0.list(prefix).await
+    }
+    async fn list_sweep_page(
+        &self,
+        _prefix: &str,
+        _after: Option<&str>,
+        _limit: usize,
+    ) -> Result<crate::BlobSweepPage> {
+        Err(StorageError::unsupported(
+            Capability::BlobSweep,
+            "fenced blob handles cannot sweep document references",
+        ))
     }
     async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String> {
         self.0.presign_get(key, ttl).await

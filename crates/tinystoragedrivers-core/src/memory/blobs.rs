@@ -12,7 +12,8 @@ use super::{Clock, MemoryDb};
 use crate::Capabilities;
 use crate::Capability;
 use crate::blob::{
-    Blob, BlobMeta, BlobStore, clamp_range, validate_user_blob_key, validate_user_blob_prefix,
+    Blob, BlobMeta, BlobStore, BlobSweepEntry, BlobSweepPage, clamp_range,
+    validate_sweep_page_request, validate_user_blob_key, validate_user_blob_prefix,
 };
 use crate::error::Result;
 use crate::scope::Scope;
@@ -88,9 +89,9 @@ impl MemoryBlobs {
         };
         let mut state = self.db.lock()?;
         self.guard(&state)?;
-        // A plain write never reads the clock; only a lifetime needs it.
+        let written_at_ms = (self.clock)();
         let expires_at = ttl.map(|ttl| {
-            (self.clock)().saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+            written_at_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
         });
         if let Some(at) = expires_at {
             // Expired blobs are invisible; drop them where a lifetime write
@@ -99,15 +100,20 @@ impl MemoryBlobs {
             state
                 .blobs
                 .retain(|_, (_, _, expiry)| expiry.is_none_or(|expires| expires > now));
+            state
+                .blob_written_ms
+                .retain(|key, _| state.blobs.contains_key(key));
             if at <= now {
                 // A zero lifetime is expired on arrival: replace, then vanish.
                 state.blobs.remove(&self.key(key));
+                state.blob_written_ms.remove(&self.key(key));
                 return Ok(meta);
             }
         }
         state
             .blobs
             .insert(self.key(key), (meta.clone(), bytes, expires_at));
+        state.blob_written_ms.insert(self.key(key), written_at_ms);
         Ok(meta)
     }
 
@@ -136,11 +142,16 @@ impl BlobStore for MemoryBlobs {
         state.blobs.retain(|(owner, _), (_, _, expiry)| {
             owner != scope || expiry.is_none_or(|expires| expires > now)
         });
+        state
+            .blob_written_ms
+            .retain(|key, _| state.blobs.contains_key(key));
         Ok((before - state.blobs.len()) as u64)
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none().with(Capability::BlobTtl)
+        Capabilities::none()
+            .with(Capability::BlobTtl)
+            .with(Capability::BlobSweep)
     }
 
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
@@ -192,10 +203,13 @@ impl BlobStore for MemoryBlobs {
         let mut state = self.db.lock()?;
         self.guard(&state)?;
         // Only a blob with a lifetime needs the clock to say it still exists.
-        Ok(state
+        let scoped_key = self.key(key);
+        let removed = state
             .blobs
-            .remove(&self.key(key))
-            .is_some_and(|(_, _, expiry)| expiry.is_none_or(|at| at > (self.clock)())))
+            .remove(&scoped_key)
+            .is_some_and(|(_, _, expiry)| expiry.is_none_or(|at| at > (self.clock)()));
+        state.blob_written_ms.remove(&scoped_key);
+        Ok(removed)
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
@@ -214,5 +228,41 @@ impl BlobStore for MemoryBlobs {
             })
             .map(|(_, (meta, _, _))| meta.clone())
             .collect())
+    }
+
+    async fn list_sweep_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobSweepPage> {
+        validate_sweep_page_request(prefix, after, limit)?;
+        let state = self.db.lock()?;
+        state.check_generation(self.scope.as_str(), self.generation)?;
+        let mut items = Vec::with_capacity(limit);
+        let mut next_after = None;
+        for ((scope, key), (meta, _, _)) in &state.blobs {
+            if scope != self.scope.as_str()
+                || !key.starts_with(prefix)
+                || crate::is_reserved_blob_key(key)
+                || after.is_some_and(|after| key.as_str() <= after)
+            {
+                continue;
+            }
+            if items.len() == limit {
+                next_after = items
+                    .last()
+                    .map(|entry: &BlobSweepEntry| entry.meta.key.clone());
+                break;
+            }
+            items.push(BlobSweepEntry {
+                meta: meta.clone(),
+                written_at_ms: state
+                    .blob_written_ms
+                    .get(&(scope.clone(), key.clone()))
+                    .copied(),
+            });
+        }
+        Ok(BlobSweepPage { items, next_after })
     }
 }

@@ -79,6 +79,9 @@ pub(super) struct DbState {
     pub(super) streams: BTreeMap<ScopedKey, StoredStream>,
     /// Meta, bytes, and the epoch-millisecond instant a blob expires at.
     pub(super) blobs: BTreeMap<ScopedKey, (BlobMeta, Vec<u8>, Option<u64>)>,
+    /// The last write time for each blob; separate so internal sealed-stream
+    /// blobs keep their existing storage tuple and can still be age-listed.
+    pub(super) blob_written_ms: BTreeMap<ScopedKey, u64>,
     /// The last version of every removed document, so a recreated id
     /// continues its version sequence and a stale compare-and-swap from
     /// before the removal still fails.

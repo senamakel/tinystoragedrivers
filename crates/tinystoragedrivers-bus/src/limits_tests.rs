@@ -9,7 +9,7 @@ const _: () = {
 
 #[test]
 fn limits_are_pinned() {
-    assert_eq!(CONTRACT_VERSION, 4);
+    assert_eq!(CONTRACT_VERSION, 6);
     assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
     assert_eq!(MAX_INLINE_BYTES, 8 * 1024 * 1024);
     assert_eq!(MAX_PAGE_ITEMS, 1_000);
