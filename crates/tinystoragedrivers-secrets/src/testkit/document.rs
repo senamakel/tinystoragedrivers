@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tinystoragedrivers_core::ScopedStorage;
 
-use super::{CatchUnwind, secrets_conformance, unique_prefix};
+use super::{CatchUnwind, secrets_conformance, unique_prefix, versioned_secrets_conformance};
 use crate::store::SecretStore;
 use crate::{DEFAULT_COLLECTION, DerivedKeys, DocumentSecrets, crypto};
 
@@ -26,6 +26,7 @@ pub async fn document_secrets_conformance(storage: &ScopedStorage) {
     let store = DocumentSecrets::new(storage, Arc::new(DerivedKeys::new(keys)));
     assert_eq!(store.backend_name(), "document");
     secrets_conformance(&store).await;
+    versioned_secrets_conformance(&store).await;
     ciphertext_at_rest(storage, &store).await;
 }
 

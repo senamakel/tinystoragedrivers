@@ -43,7 +43,10 @@ use tinystoragedrivers_core::{Result, StorageError};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::{self, KEY_LEN, key_from_hex, key_to_hex};
-use crate::store::{SecretStore, require_utf8, validate_name, validate_prefix};
+use crate::store::{
+    Precondition, SecretStore, SecretVersion, require_utf8, validate_name, validate_prefix,
+    version_from_parts,
+};
 use crate::task::{io_error, run_blocking};
 
 mod hex_key_source;
@@ -189,6 +192,29 @@ impl SecretStore for EncryptedFileSecrets {
         .await
     }
 
+    async fn get_versioned(
+        &self,
+        name: &str,
+    ) -> Result<Option<(Zeroizing<Vec<u8>>, SecretVersion)>> {
+        validate_name(name)?;
+        let inner = Arc::clone(&self.inner);
+        let name = name.to_string();
+        run_blocking(move || {
+            let lock = inner.lock()?;
+            let (map, version) = inner.read_map_versioned_in(&lock.namespace, &name)?;
+            lock.verify()
+                .map_err(|e| io_error("revalidate the versioned read lock", e))?;
+            let Some(value) = map.0.get(&name) else {
+                return Ok(None);
+            };
+            let version = version.ok_or_else(|| {
+                StorageError::backend("stored secret has no encrypted file revision")
+            })?;
+            Ok(Some((Zeroizing::new(value.as_bytes().to_vec()), version)))
+        })
+        .await
+    }
+
     async fn set(&self, name: &str, value: &[u8]) -> Result<()> {
         validate_name(name)?;
         let value = Zeroizing::new(require_utf8(value, "encrypted file")?.to_string());
@@ -203,6 +229,41 @@ impl SecretStore for EncryptedFileSecrets {
             inner.write_map_in(&lock.namespace, &map)?;
             lock.verify()
                 .map_err(|e| io_error("verify the published lock", e))
+        })
+        .await
+    }
+
+    async fn set_if(
+        &self,
+        name: &str,
+        value: &[u8],
+        condition: Precondition,
+    ) -> Result<SecretVersion> {
+        validate_name(name)?;
+        let value = Zeroizing::new(require_utf8(value, "encrypted file")?.to_string());
+        let inner = Arc::clone(&self.inner);
+        let name = name.to_string();
+        run_blocking(move || {
+            let lock = inner.lock()?;
+            let (mut map, current_version) = inner.read_map_versioned_in(&lock.namespace, &name)?;
+            match condition {
+                Precondition::Absent if map.0.contains_key(&name) => {
+                    return Err(StorageError::conflict("secret changed since it was read"));
+                }
+                Precondition::Version(expected) => {
+                    if !map.0.contains_key(&name) || current_version != Some(expected) {
+                        return Err(StorageError::conflict("secret changed since it was read"));
+                    }
+                }
+                Precondition::Absent => {}
+            }
+            map.0.insert(name.clone(), value.to_string());
+            lock.verify()
+                .map_err(|e| io_error("revalidate the conditional write lock", e))?;
+            let version = inner.write_map_versioned_in(&lock.namespace, &map, &name)?;
+            lock.verify()
+                .map_err(|e| io_error("verify the conditional write lock", e))?;
+            Ok(version)
         })
         .await
     }
@@ -266,15 +327,39 @@ impl Drop for SecretMap {
 
 impl Inner {
     fn read_map_in(&self, namespace: &secure::Namespace) -> Result<SecretMap> {
-        let blob = match read_private(namespace, &self.path) {
-            Ok(blob) => blob,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(SecretMap::default()),
-            Err(e) => return Err(io_error("read the secrets file", e)),
+        let blob = self.read_blob_in(namespace)?;
+        self.decode_map(blob.as_deref())
+    }
+
+    fn read_map_versioned_in(
+        &self,
+        namespace: &secure::Namespace,
+        name: &str,
+    ) -> Result<(SecretMap, Option<SecretVersion>)> {
+        let blob = self.read_blob_in(namespace)?;
+        let file_identity = path_identity(&self.path);
+        let version = blob.as_deref().filter(|blob| !blob.is_empty()).map(|blob| {
+            version_from_parts(&[b"encrypted_file", &file_identity, name.as_bytes(), blob])
+        });
+        Ok((self.decode_map(blob.as_deref())?, version))
+    }
+
+    fn read_blob_in(&self, namespace: &secure::Namespace) -> Result<Option<Vec<u8>>> {
+        match read_private(namespace, &self.path) {
+            Ok(blob) => Ok(Some(blob)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_error("read the secrets file", e)),
+        }
+    }
+
+    fn decode_map(&self, blob: Option<&[u8]>) -> Result<SecretMap> {
+        let Some(blob) = blob else {
+            return Ok(SecretMap::default());
         };
         if blob.is_empty() {
             return Ok(SecretMap::default());
         }
-        let json = crypto::decrypt(&self.key, &blob)?;
+        let json = crypto::decrypt(&self.key, blob)?;
         // The serde message can quote the offending input, which here is
         // plaintext, so it is neither kept nor chained as the source.
         serde_json::from_slice(&json).map(SecretMap).map_err(|_| {
@@ -288,12 +373,47 @@ impl Inner {
         write_atomic_in(namespace, &self.path, &blob)
     }
 
+    fn write_map_versioned_in(
+        &self,
+        namespace: &secure::Namespace,
+        map: &SecretMap,
+        name: &str,
+    ) -> Result<SecretVersion> {
+        let json = Zeroizing::new(serde_json::to_vec(&map.0)?);
+        let blob = crypto::encrypt(&self.key, &json)?;
+        let file_identity = path_identity(&self.path);
+        let version =
+            version_from_parts(&[b"encrypted_file", &file_identity, name.as_bytes(), &blob]);
+        write_atomic_in(namespace, &self.path, &blob)?;
+        Ok(version)
+    }
+
     /// Take the exclusive cross-process lock on `<path>.lock`, held until the
     /// returned file is dropped.
     fn lock(&self) -> Result<secure::Locked> {
         let mut name = self.path.file_name().unwrap_or_default().to_os_string();
         name.push(".lock");
         lock_file(&self.path.with_file_name(name))
+    }
+}
+
+fn path_identity(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_be_bytes)
+            .collect()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        path.to_string_lossy().as_bytes().to_vec()
     }
 }
 

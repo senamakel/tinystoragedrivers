@@ -131,6 +131,25 @@ async fn passes_the_secrets_conformance_suite() {
 }
 
 #[tokio::test]
+async fn keyring_reports_conditional_secret_writes_as_unsupported() {
+    use tinystoragedrivers_core::Capability;
+
+    let (secrets, _) = fake(Fault::None);
+    assert_eq!(
+        secrets.get_versioned("token").await.unwrap_err().kind(),
+        ErrorKind::Unsupported(Capability::ConditionalSecretWrites)
+    );
+    assert_eq!(
+        secrets
+            .set_if("token", b"value", crate::Precondition::Absent)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::ConditionalSecretWrites)
+    );
+}
+
+#[tokio::test]
 async fn stores_one_password_per_name_under_the_service() {
     let (secrets, store) = fake(Fault::None);
     secrets.set("alice:api_key", b"sk-live-abc").await.unwrap();
