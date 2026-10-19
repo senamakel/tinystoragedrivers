@@ -105,7 +105,7 @@ async fn existing_read_only_storage_reads_ports_and_refuses_writes() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Unsupported
+        ErrorKind::Unsupported(Capability::ScopePurge)
     );
     assert!(
         read_only
