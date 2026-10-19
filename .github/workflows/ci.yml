@@ -84,6 +84,8 @@ jobs:
         run: python .github/scripts/check-native-user-denial.py
       - name: Native strict secrets lint
         run: cargo clippy --locked -p tinystoragedrivers-secrets --all-features --all-targets -- -D warnings
+      - name: Native local lease and fence tests
+        run: cargo test --locked -p tinystoragedrivers-fence --features file -- --nocapture
       - name: Clear instrumented artifacts for a fresh compiled source inventory
         run: cargo llvm-cov clean --workspace
       - name: Bind native coverage execution to the original source base
