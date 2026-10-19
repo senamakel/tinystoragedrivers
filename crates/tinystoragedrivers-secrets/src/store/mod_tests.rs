@@ -53,3 +53,11 @@ fn require_utf8_rejects_binary_without_echoing_it() {
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert!(error.to_string().contains("file"));
 }
+
+#[test]
+fn secret_version_round_trips_opaque_wire_bytes() {
+    let bytes = [0x5a; 32];
+    let version = SecretVersion::from_bytes(bytes);
+    assert_eq!(version.as_bytes(), &bytes);
+    assert_eq!(version.into_bytes(), bytes);
+}

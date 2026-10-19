@@ -44,8 +44,9 @@ pub use limits::{
     MAX_INLINE_BLOB_BYTES, MAX_INLINE_BYTES, MAX_PAGE_ITEMS, MAX_PRESIGN_TTL_SECS,
 };
 pub use secrets::{
-    ListSecretsRequest, SECRETS_OBJECT, SECRETS_SELECTORS, SecretNameRequest, SecretValue,
-    SetSecretRequest, is_secrets_selector,
+    ListSecretsRequest, SECRETS_OBJECT, SECRETS_SELECTORS, SecretNameRequest, SecretPrecondition,
+    SecretRevision, SecretValue, SetSecretIfRequest, SetSecretRequest, VersionedSecret,
+    is_secrets_selector,
 };
 pub use streams::{
     AppendBatchIfOffsetRequest, AppendBatchRequest, AppendRequest, AppendResponse,

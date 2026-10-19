@@ -9,6 +9,9 @@ use serde_json::json;
 pub(super) async fn run(backend: &dyn StorageBackend) {
     let owner = Scope::new(unique("purge_owner")).expect("valid scope");
     let ports = ok(backend.for_scope(&owner), "purge handle");
+    if backend.capabilities().contains(Capability::ScopePurge) {
+        sequential_generations(backend).await;
+    }
     if !backend
         .capabilities()
         .contains(Capability::AtomicScopePurge)
@@ -83,6 +86,45 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
         receipt
     );
     resumption(backend, &owner, &receipt, &fence, &guard, &leases, &request).await;
+}
+
+async fn sequential_generations(backend: &dyn StorageBackend) {
+    let scope = Scope::new(unique("purge_generation")).expect("valid scope");
+    let initial = ok(backend.for_scope(&scope), "generation-zero purge handle");
+    let first_request = PurgeRequest {
+        operation_id: unique("generation_one"),
+        mode: PurgeMode::Quiescent,
+    };
+    let first = ok(initial.purge(&first_request).await, "purge generation zero");
+    assert_eq!(first.generation, ScopeGeneration(1));
+
+    let generation_one = ok(
+        backend.for_scope_generation(&scope, first.generation),
+        "generation-one purge handle",
+    );
+    let second_request = PurgeRequest {
+        operation_id: unique("generation_two"),
+        mode: PurgeMode::Quiescent,
+    };
+    let second = ok(
+        generation_one.purge(&second_request).await,
+        "purge generation one",
+    );
+    assert_eq!(second.generation, ScopeGeneration(2));
+    assert_eq!(
+        ok(
+            initial.purge(&first_request).await,
+            "idempotent generation-zero retry"
+        ),
+        first
+    );
+    assert_eq!(
+        ok(
+            generation_one.purge(&second_request).await,
+            "idempotent generation-one retry"
+        ),
+        second
+    );
 }
 
 async fn resumption(

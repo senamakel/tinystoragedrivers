@@ -77,13 +77,17 @@ pub enum Capability {
     /// (`SQLite` and `MongoDB`); the memory driver is one process's heap, and the
     /// file driver serializes only among the handles of one process.
     SharedAcrossProcesses,
+    /// `SecretStore::get_versioned` and `SecretStore::set_if` perform native
+    /// compare-and-set operations instead of a read followed by an unconditional
+    /// write.
+    ConditionalSecretWrites,
     /// `BlobStore::list_sweep_page` returns bounded key pages and trustworthy
     /// write times for blobs, including payloads hidden by expired lifetimes.
     BlobSweep,
 }
 
 impl Capability {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 22] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -104,6 +108,7 @@ impl Capability {
         Self::ScopeEnumeration,
         Self::StreamSeal,
         Self::SharedAcrossProcesses,
+        Self::ConditionalSecretWrites,
         Self::BlobSweep,
     ];
 
@@ -129,6 +134,7 @@ impl Capability {
             Self::ScopeEnumeration => 1 << 18,
             Self::StreamSeal => 1 << 19,
             Self::SharedAcrossProcesses => 1 << 20,
+            Self::ConditionalSecretWrites => 1 << 21,
             Self::BlobSweep => 1 << 22,
         }
     }
@@ -157,6 +163,7 @@ impl fmt::Display for Capability {
             Self::ScopeEnumeration => "scope_enumeration",
             Self::StreamSeal => "stream_seal",
             Self::SharedAcrossProcesses => "shared_across_processes",
+            Self::ConditionalSecretWrites => "conditional_secret_writes",
             Self::BlobSweep => "blob_sweep",
         })
     }
@@ -212,6 +219,7 @@ impl Capabilities {
                 | Capability::ScopeEnumeration.bit()
                 | Capability::StreamSeal.bit()
                 | Capability::SharedAcrossProcesses.bit()
+                | Capability::ConditionalSecretWrites.bit()
                 | Capability::BlobSweep.bit(),
         )
     }

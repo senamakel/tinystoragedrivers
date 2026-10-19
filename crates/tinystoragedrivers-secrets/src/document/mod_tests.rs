@@ -1,12 +1,14 @@
 //! The document driver on the core memory backend.
 
 use serde_json::json;
-use tinystoragedrivers_core::{ErrorKind, MemoryStorage, StorageBackend};
+use tinystoragedrivers_core::{
+    ErrorKind, MemoryStorage, Precondition as DocumentPrecondition, StorageBackend,
+};
 
 use super::*;
 use crate::crypto::tests::{OPENHUMAN_ENC2, fixture_key};
 use crate::keys::{DerivedKeys, StaticKey};
-use crate::testkit::secrets_conformance;
+use crate::testkit::{secrets_conformance, versioned_secrets_conformance};
 
 fn derived() -> Arc<dyn KeyProvider> {
     Arc::new(DerivedKeys::new(crypto::generate_key().unwrap()))
@@ -17,7 +19,52 @@ async fn passes_the_secrets_conformance_suite() {
     let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
     let store = DocumentSecrets::new(&storage, derived());
     secrets_conformance(&store).await;
+    versioned_secrets_conformance(&store).await;
     assert_eq!(store.backend_name(), "document");
+}
+
+#[tokio::test]
+async fn independent_document_handles_have_atomic_versioned_writes() {
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    let backend = MemoryStorage::new();
+    let storage = backend.for_scope(&Scope::local()).unwrap();
+    let keys = derived();
+    let first = DocumentSecrets::new(&storage, Arc::clone(&keys));
+    let second = DocumentSecrets::new(&storage, keys);
+    first
+        .set_if("shared", b"initial", crate::Precondition::Absent)
+        .await
+        .unwrap();
+    let (_, first_version) = first.get_versioned("shared").await.unwrap().unwrap();
+    let (_, second_version) = second.get_versioned("shared").await.unwrap().unwrap();
+    assert_eq!(first_version, second_version);
+    let version = first_version;
+
+    let barrier = Arc::new(Barrier::new(2));
+    let first_barrier = Arc::clone(&barrier);
+    let first_write = async {
+        first_barrier.wait().await;
+        first
+            .set_if("shared", b"writer-a", crate::Precondition::Version(version))
+            .await
+    };
+    let second_write = async {
+        barrier.wait().await;
+        second
+            .set_if("shared", b"writer-b", crate::Precondition::Version(version))
+            .await
+    };
+    let (first_result, second_result) = tokio::join!(first_write, second_write);
+    assert_eq!(
+        usize::from(first_result.is_ok()) + usize::from(second_result.is_ok()),
+        1
+    );
+    let loser = first_result.err().or_else(|| second_result.err()).unwrap();
+    assert_eq!(loser.kind(), ErrorKind::Conflict);
+    let current = first.get("shared").await.unwrap().unwrap();
+    assert!(current.as_slice() == b"writer-a" || current.as_slice() == b"writer-b");
 }
 
 #[tokio::test]
@@ -47,7 +94,7 @@ async fn reads_an_enc2_value_openhuman_wrote() {
             DEFAULT_COLLECTION,
             "migrated",
             json!({ "ciphertext": OPENHUMAN_ENC2 }),
-            Precondition::Absent,
+            DocumentPrecondition::Absent,
         )
         .await
         .unwrap();
@@ -95,7 +142,12 @@ async fn tenants_get_distinct_keys_and_cannot_read_each_other() {
         .doc;
     b_storage
         .documents()
-        .put(DEFAULT_COLLECTION, "shared-name", a_doc, Precondition::None)
+        .put(
+            DEFAULT_COLLECTION,
+            "shared-name",
+            a_doc,
+            DocumentPrecondition::None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -113,7 +165,7 @@ async fn a_malformed_document_is_a_serialization_error() {
             DEFAULT_COLLECTION,
             "bad",
             json!({ "ciphertext": 7 }),
-            Precondition::None,
+            DocumentPrecondition::None,
         )
         .await
         .unwrap();
@@ -180,7 +232,7 @@ async fn a_key_provider_failure_propagates() {
             DEFAULT_COLLECTION,
             "a",
             json!({ "ciphertext": "enc2:00" }),
-            Precondition::None,
+            DocumentPrecondition::None,
         )
         .await
         .unwrap();

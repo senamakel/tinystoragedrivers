@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, CursorPosition, DocumentStore, Filter, Page,
-    Precondition, Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned,
-    WriteOptions, validate_collection, validate_doc, validate_id, value,
+    Precondition, Query, Result, Scope, ScopeGeneration, SearchHit, Sort, StorageError, Version,
+    Versioned, WriteOptions, validate_collection, validate_doc, validate_id, value,
 };
 
 use crate::encode::fnv1a_64;
@@ -33,6 +33,7 @@ pub struct FileDocuments {
     /// Checked under the directory lock before every write, when set.
     fence: Option<Arc<Fencing>>,
     existing: bool,
+    generation: ScopeGeneration,
 }
 
 /// Refuse a write unless `fence` (when there is one) holds. Called under the
@@ -68,7 +69,13 @@ impl FileDocuments {
             scope,
             fence,
             existing,
+            generation: ScopeGeneration::default(),
         }
+    }
+
+    pub(crate) fn with_generation(mut self, generation: ScopeGeneration) -> Self {
+        self.generation = generation;
+        self
     }
 
     /// Run `work` under the directory lock with this scope's document view.
@@ -96,8 +103,10 @@ impl FileDocuments {
         F: FnOnce(&Docs<'_>) -> Result<T> + Send + 'static,
     {
         let scope = self.scope.clone();
+        let generation = self.generation;
         self.db
             .run(move |db| {
+                db.check_generation(&scope, generation)?;
                 guard(db, fence.as_deref())?;
                 let docs = Docs {
                     db,

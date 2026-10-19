@@ -483,6 +483,14 @@ impl StorageBackend for MongoStorage {
         }
     }
 
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        self.shared.transactions
+    }
+
+    fn supports_scope_purge_generation_validation(&self) -> bool {
+        self.shared.transactions
+    }
+
     async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
         crate::scopes::list(&self.shared, prefix).await
     }

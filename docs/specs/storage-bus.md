@@ -89,9 +89,9 @@ those semantics; the Storage bus will then adapt that accepted capability.
 Streams mirrors append/read/range/length/truncate/delete and conditional batch
 append when supported. Offsets are dense and never reused by truncation.
 Blobs mirrors put/get/ranged-read/delete/prefix-list and sends large byte
-payloads only over TinyBus Stream. Secrets mirrors get/set/delete/prefix-list
-through encrypted native storage; secret bytes and names are only returned to
-authorized confidential callers. Every operation reports unsupported
+payloads only over TinyBus Stream. Secrets mirrors get/versioned-get/set/
+conditional-set/delete/prefix-list through encrypted native storage; secret
+bytes and names are only returned to authorized confidential callers. Every operation reports unsupported
 capabilities explicitly; adapters must not claim unimplemented capabilities.
 
 The S3 driver remains a host-side driver. Hosts forward S3 configuration and
@@ -99,6 +99,10 @@ credentials into their own storage backend construction; neither these secrets
 nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
+
+Version 5 adds `Secrets.GetVersioned` and `Secrets.SetIf`; version 6 adds
+`Blobs.ListSweepPage`, which exposes bounded write-time metadata for physical
+blob cleanup without returning payloads.
 
 Contract version: `CONTRACT_VERSION = 6` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
@@ -108,7 +112,7 @@ Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 | `Documents` | 17, see `DOCUMENTS_SELECTORS` | private |
 | `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams`, `Seal`, `Info` | private |
 | `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `ListSweepPage`, `PresignGet`, `PresignPut`, `Capabilities` | private |
-| `Secrets` | `Get`, `Set`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
+| `Secrets` | `Get`, `GetVersioned`, `Set`, `SetIf`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
 
 Size limits (constants in the crate, enforced by the server before native I/O):
 
@@ -250,6 +254,21 @@ unknown fields, so a host serving version 4 metadata must be paired with a
 module built against version 4. This is the existing rule that contract
 changes bump `CONTRACT_VERSION`; the constant is informational and no
 handshake compares it.
+
+### Secret compare-and-set (version 5)
+
+The confidential `Secrets` object adds `GetVersioned` and `SetIf`. A successful
+`GetVersioned` returns either `null` or a paired `{value, version}` snapshot;
+the opaque 32-byte `version` is usable only with the same secret and host that
+issued it. `SetIf` accepts `{"kind":"absent"}` to create a missing secret or
+`{"kind":"version","version":[...]}` to replace the exact observed
+revision. It returns the revision created by that write, and a failed
+condition is the typed `Conflict` failure. Secret names, plaintext values and
+revision bytes stay out of debug output and error text.
+
+Version 5 clients require a version 5 host for these selectors. The host calls
+the native `SecretStore` compare-and-set implementation; it must not emulate
+conditional writes with a client-side read followed by an unconditional write.
 
 ## Real TinyBus transport
 

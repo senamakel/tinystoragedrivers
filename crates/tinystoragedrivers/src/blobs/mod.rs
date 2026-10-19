@@ -2,10 +2,11 @@
 #[cfg(not(feature = "s3"))]
 use crate::StorageError;
 use crate::{BackendBlobs, BlobBackend, CompositeStorage, Result, StorageBackend, StorageConfig};
+use std::fmt;
 use std::sync::Arc;
 
 /// A blob location independent of the document/stream location.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobConfig {
     /// The blob port from a complete backend.
     Backend(StorageConfig),
@@ -36,7 +37,22 @@ impl BlobConfig {
                 "s3 blob URL needs the s3 feature",
             ));
         }
-        Ok(Self::Backend(StorageConfig::parse(url)?))
+        let config = StorageConfig::parse(url)?;
+        if matches!(&config, StorageConfig::Composite { .. }) {
+            return Err(crate::StorageError::invalid_input(
+                "nested composite blob URLs are not supported",
+            ));
+        }
+        Ok(Self::Backend(config))
+    }
+}
+
+impl fmt::Display for BlobConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Backend(config) => write!(f, "{config}"),
+            Self::S3 { url } => f.write_str(url),
+        }
     }
 }
 
@@ -47,7 +63,9 @@ impl BlobConfig {
 /// A missing feature, invalid configuration, or backend connection error.
 pub async fn open_blobs(config: &BlobConfig) -> Result<Arc<dyn BlobBackend>> {
     match config {
-        BlobConfig::Backend(config) => Ok(Arc::new(BackendBlobs::new(crate::open(config).await?))),
+        BlobConfig::Backend(config) => Ok(Arc::new(BackendBlobs::new(
+            Box::pin(crate::open(config)).await?,
+        ))),
         #[cfg(feature = "s3")]
         BlobConfig::S3 { url } => Ok(Arc::new(tinystoragedrivers_s3::S3Storage::open(
             &tinystoragedrivers_s3::S3Config::parse(url)?,
@@ -72,7 +90,7 @@ pub async fn open_composite(
     blobs: &BlobConfig,
 ) -> Result<Arc<dyn StorageBackend>> {
     Ok(Arc::new(CompositeStorage::new(
-        crate::open(records).await?,
+        Box::pin(crate::open(records)).await?,
         open_blobs(blobs).await?,
     )))
 }

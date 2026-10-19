@@ -12,6 +12,11 @@ publish = false
 tinystoragedrivers-core = { workspace = true }
 # S3 protocol, multipart uploads and SigV4 presigning without the AWS SDK.
 object_store = { version = "0.14.2", default-features = false, features = ["aws"] }
+# Version-aware purge uses the retained SigV4 signer for S3's ListObjectVersions
+# and versionId DELETE operations, which object_store does not expose.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
+serde = { workspace = true }
 # Object-store payloads and streaming responses.
 bytes = { workspace = true }
 futures-util = "0.3"
@@ -24,8 +29,7 @@ url = "2"
 
 [dev-dependencies]
 # Exercise bearer URLs against the explicitly configured local MinIO fixture.
-reqwest = { workspace = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "sync", "net"] }
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
 
 [lints]

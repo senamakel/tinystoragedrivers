@@ -9,12 +9,23 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | Tests, stateless embedders | `memory` | in-process maps |
 | Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file (feature `sqlite`) |
 | Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant (feature `mongodb`) |
+| Cloud records and object blobs | `mongodb://…/<db>?blobs=s3%3A%2F%2Fbucket%2Fprefix%3Fregion%3Dus-east-1` | MongoDB records with S3 blobs (features `mongodb`, `s3`) |
 | Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
 | Secrets | none (features `secrets`, `keyring`, `keyring-secret-service`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
 
 Drivers are separate crates. A host compiles in only the ones it enables, as
 Cargo features on the `tinystoragedrivers` facade. A desktop build never links
 a MongoDB client, and a cloud build never links SQLite.
+
+Add one percent-encoded `blobs=<URL>` query option to any records URL to keep
+documents and streams on that backend while storing blobs independently. Other
+records query options stay on the records URL. The blob URL may name `s3:` or
+another supported storage backend; nested composite blob URLs are rejected.
+For example, with the `mongodb` and `s3` features enabled:
+
+```text
+mongodb://db.example/openhuman?retryWrites=true&blobs=s3%3A%2F%2Fbucket%2Fattachments%3Fregion%3Dus-east-1
+```
 
 ## The ports
 

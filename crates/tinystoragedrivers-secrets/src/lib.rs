@@ -4,8 +4,8 @@
 //! API keys, OAuth tokens and encrypted configuration fields need a store that
 //! is not a [`DocumentStore`](tinystoragedrivers_core::DocumentStore): values
 //! are bytes that must never reach a log, a query, or a backend in plaintext.
-//! The port is small (`get`, `set`, `delete`, `list`), and the drivers decide
-//! where the bytes live:
+//! The port is small (`get`, `get_versioned`, `set`, `set_if`, `delete`,
+//! `list`), and the drivers decide where the bytes live:
 //!
 //! | Driver | Where | Deployment |
 //! | --- | --- | --- |
@@ -24,6 +24,10 @@
 //! [`StaticKey`] for one key everywhere, [`DerivedKeys`] for a distinct
 //! HKDF-SHA256 key per tenant from one master key, or [`KmsKeyProvider`] for
 //! per-scope envelope keys wrapped by a cloud KMS and persisted on storage.
+//! `get_versioned` pairs a plaintext value with a redacted opaque token, while
+//! `set_if` uses an atomic absent or version precondition. The encrypted-file
+//! driver derives its token from the current encrypted map snapshot, so an
+//! unrelated write to that file can conservatively conflict.
 //!
 //! # Example
 //!
@@ -87,7 +91,9 @@ pub use kms::{ENVELOPE_COLLECTION, ENVELOPE_ID, KmsClient, KmsKeyProvider};
 #[cfg(feature = "kms-gcp")]
 pub use kms::{GcpAccessTokenProvider, GcpKms};
 pub use memory::MemorySecrets;
-pub use store::{MAX_SECRET_NAME_LEN, SecretStore, validate_name, validate_prefix};
+pub use store::{
+    MAX_SECRET_NAME_LEN, Precondition, SecretStore, SecretVersion, validate_name, validate_prefix,
+};
 
 /// The `Zeroizing` wrapper every secret value and key is returned in,
 /// re-exported so callers need not name the dependency.

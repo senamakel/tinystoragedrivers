@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Secrets object name under [`crate::STORAGE_INTERFACE`].
 pub const SECRETS_OBJECT: &str = "Secrets";
 /// Finite selector set; servers must reject every other selector.
-pub const SECRETS_SELECTORS: [&str; 4] = ["Get", "Set", "Delete", "List"];
+pub const SECRETS_SELECTORS: [&str; 6] = ["Get", "GetVersioned", "Set", "SetIf", "Delete", "List"];
 
 /// Return whether `selector` belongs to the fixed Secrets selector set.
 #[must_use]
@@ -39,6 +39,39 @@ pub struct SecretValue {
     /// Secret bytes.
     pub value: Vec<u8>,
 }
+/// Secret value and opaque revision from the same read.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionedSecret {
+    /// Secret bytes.
+    pub value: Vec<u8>,
+    /// Opaque revision token; callers must not interpret its bytes.
+    pub version: [u8; 32],
+}
+/// Secret revision required by a conditional write.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretRevision(pub [u8; 32]);
+/// Condition required by `SetIf`.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "version", rename_all = "snake_case")]
+pub enum SecretPrecondition {
+    /// The secret must not exist.
+    Absent,
+    /// The secret must still have the supplied revision.
+    Version(SecretRevision),
+}
+/// Store a secret only while its precondition holds.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetSecretIfRequest {
+    /// Name inside the captured grant.
+    pub name: String,
+    /// Secret bytes.
+    pub value: Vec<u8>,
+    /// Required current state.
+    pub condition: SecretPrecondition,
+}
 /// List secret names by prefix.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,8 +94,25 @@ redacted_debug!(
     SecretNameRequest,
     SetSecretRequest,
     SecretValue,
+    VersionedSecret,
+    SetSecretIfRequest,
     ListSecretsRequest
 );
+
+impl std::fmt::Debug for SecretRevision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretRevision(..)")
+    }
+}
+
+impl std::fmt::Debug for SecretPrecondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => f.write_str("Absent"),
+            Self::Version(_) => f.write_str("Version(SecretRevision(..))"),
+        }
+    }
+}
 
 #[cfg(test)]
 #[path = "secrets_tests.rs"]
