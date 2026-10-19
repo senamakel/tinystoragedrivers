@@ -2,7 +2,10 @@
 
 use super::*;
 use serde_json::json;
-use tinystoragedrivers_core::{CollectionSpec, ErrorKind, Precondition, Scope, StorageBackend};
+use tinystoragedrivers_core::{
+    Capability, CollectionSpec, ErrorKind, Precondition, PurgeMode, PurgeRequest, Scope,
+    StorageBackend,
+};
 
 #[tokio::test]
 async fn existing_read_only_storage_reads_ports_and_refuses_writes() {
@@ -32,6 +35,26 @@ async fn existing_read_only_storage_reads_ports_and_refuses_writes() {
 
     let read_only = SqliteStorage::open_existing_read_only(&path).unwrap();
     let ports = read_only.for_scope(&Scope::local()).unwrap();
+    assert!(!read_only.capabilities().contains(Capability::ScopePurge));
+    assert!(
+        !read_only
+            .capabilities()
+            .contains(Capability::AtomicScopePurge)
+    );
+    assert!(
+        !ports
+            .documents()
+            .capabilities()
+            .contains(Capability::ScopePurge)
+    );
+    assert!(
+        !ports
+            .documents()
+            .capabilities()
+            .contains(Capability::AtomicScopePurge)
+    );
+    assert!(!read_only.supports_scope_purge_binding_validation());
+    assert!(!read_only.supports_scope_purge_generation_validation());
     assert_eq!(
         ports
             .documents()
@@ -72,6 +95,17 @@ async fn existing_read_only_storage_reads_ports_and_refuses_writes() {
             .unwrap_err()
             .kind(),
         ErrorKind::Backend
+    );
+    assert_eq!(
+        ports
+            .purge(&PurgeRequest {
+                operation_id: "readonly-purge".into(),
+                mode: PurgeMode::Atomic,
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported
     );
     assert!(
         read_only
