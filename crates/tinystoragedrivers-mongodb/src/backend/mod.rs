@@ -5,7 +5,10 @@
 //! collections already carry the driver's indexes. Port handles are cheap
 //! views over a `Shared` bound to one scope.
 
+mod open_options;
 pub(crate) mod specs;
+
+pub use open_options::MongoOpenOptions;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -251,6 +254,28 @@ impl MongoStorage {
     /// [`ErrorKind::Unavailable`](tinystoragedrivers_core::ErrorKind::Unavailable)
     /// when no server answers. Messages never include the URI.
     pub async fn connect(uri: &str, database: &str) -> Result<Self> {
+        Self::connect_with_options(uri, database, MongoOpenOptions::default()).await
+    }
+
+    /// Connect to `uri` and use the database `database`, requiring the
+    /// capabilities selected by `open_options`.
+    ///
+    /// Opening checks the deployment's `hello` response before returning. A
+    /// required capability that is absent returns a typed
+    /// `Unsupported(capability)` error. Messages never include the URI.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput)
+    /// for a malformed URI or database name,
+    /// [`ErrorKind::Unavailable`](tinystoragedrivers_core::ErrorKind::Unavailable)
+    /// when no server answers, or `Unsupported(capability)` when the connected
+    /// deployment lacks a required capability.
+    pub async fn connect_with_options(
+        uri: &str,
+        database: &str,
+        open_options: MongoOpenOptions,
+    ) -> Result<Self> {
         validate_mongo_database(database)?;
         let mut options = ClientOptions::parse(uri).await.map_err(|error| {
             let mapped = errors::map(error, "parse the connection string");
@@ -270,6 +295,8 @@ impl MongoStorage {
             .run_command(doc! {"hello": 1})
             .await
             .map_err(errors::failed("reach the server"))?;
+        let supports_transactions = supports_transactions(&hello);
+        open_options.validate(supports_transactions)?;
         // Admission and payload reads must observe the primary.
         let db = client.database_with_options(
             database,
@@ -283,8 +310,8 @@ impl MongoStorage {
             client,
             db,
             Arc::new(system_clock),
-            supports_transactions(&hello),
-            supports_transactions(&hello),
+            supports_transactions,
+            supports_transactions,
         );
         Ok(Self {
             shared: Arc::new(shared),
