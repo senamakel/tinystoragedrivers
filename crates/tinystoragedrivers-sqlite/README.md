@@ -11,6 +11,12 @@ One storage is one database file. The path decides which:
 - Any other path is a directory (created if missing), and the database is
   `<dir>/storage.db`. This keeps `sqlite:<workspace dir>` URLs working.
 
+`SqliteStorage::open_existing_read_only` uses the same path rules for a file
+that already exists. It does not create directories or files, change database
+pragmas, or prepare or migrate schema. It validates the current TSD table
+layout, allows normal port reads, and SQLite refuses writes through storage
+ports and `SqliteNative`.
+
 ## Storage
 
 - **Layout 2.** Tables are `docs`, `streams`, `stream_heads`, `blobs`, `fts`
@@ -65,10 +71,11 @@ One storage is one database file. The path decides which:
 
 ## Concurrency
 
-Every handle on the same file within one process shares one connection. Writes
-use immediate transactions. Other processes are serialized by WAL plus a
-5-second busy timeout. Contention that outlasts the timeout returns a retryable
-`Unavailable` error.
+Handles on the same file and with the same access mode share one connection.
+Read-only and writable handles use separate connections. Writes use immediate
+transactions. Other processes are serialized by WAL plus a 5-second busy
+timeout. Contention that outlasts the timeout returns a retryable `Unavailable`
+error.
 
 A fenced handle (`for_scope_fenced`) checks its guard in the same database.
 The guard check and target document, stream or blob mutation run in one

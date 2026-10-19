@@ -91,6 +91,39 @@ impl SqliteStorage {
         Self::assemble(&file, Arc::new(system_clock))
     }
 
+    /// Open an existing database for reads without creating files, changing
+    /// SQLite pragmas, or preparing or migrating its schema.
+    ///
+    /// The path rules match [`Self::open`]: a `.db` or `.sqlite` path names a
+    /// file; any other path names a directory containing `storage.db`. The
+    /// database's TSD table layout is validated as-is. Returned document
+    /// handles also refuse schema declarations, and writes through any storage
+    /// port or [`SqliteNative`] connection fail because SQLite opened the file
+    /// with read-only flags.
+    ///
+    /// # Errors
+    ///
+    /// The file or parent does not exist, the file cannot be opened read-only,
+    /// or its TSD schema is missing or incompatible.
+    pub fn open_existing_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let file = if is_file_path(path) {
+            path.to_path_buf()
+        } else {
+            path.join(ROOT_FILE)
+        };
+        let db = Db::open_read_only(&file)?;
+        let tables = Arc::new(Tables::new());
+        let validate = Arc::clone(&tables);
+        db.run_now(move |conn| validate.validate(conn))?;
+        Ok(Self {
+            db,
+            tables,
+            clock: Arc::new(system_clock),
+            existing: true,
+        })
+    }
+
     fn assemble(file: &Path, clock: Clock) -> Result<Self> {
         let db = Db::open(file)?;
         let tables = Arc::new(Tables::new());
@@ -278,3 +311,7 @@ mod schema_tests;
 #[cfg(test)]
 #[path = "generation_tests.rs"]
 mod generation_tests;
+
+#[cfg(test)]
+#[path = "readonly_tests.rs"]
+mod readonly_tests;
