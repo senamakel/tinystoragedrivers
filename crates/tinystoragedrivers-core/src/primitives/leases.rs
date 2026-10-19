@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
 use super::LEASES;
@@ -46,19 +47,44 @@ fn is_false(value: &bool) -> bool {
 
 /// The stored state of one lease, live or not, as [`Leases::inspect`] reads
 /// it. [`Lease`] is a holder's proof; this is an observer's view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseRecord {
     /// Who holds (or last held) the lease.
+    #[serde(alias = "owner")]
     pub holder: String,
     /// Where the holder can be reached, when it said so at acquisition.
+    #[serde(default)]
     pub endpoint: Option<String>,
     /// The fencing epoch of the holder's tenure.
     pub epoch: u64,
     /// Unix epoch milliseconds at which the lease lapses.
+    #[serde(alias = "expires_at_ms", deserialize_with = "deserialize_expiry")]
     pub expires_ms: i64,
     /// The holder let go cleanly. A released record is never live; a record
     /// that is merely past `expires_ms` was abandoned (crash, partition).
+    #[serde(default)]
     pub released: bool,
+}
+
+fn deserialize_expiry<'de, D>(deserializer: D) -> std::result::Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Expiry {
+        Signed(i64),
+        Unsigned(u64),
+    }
+
+    match Expiry::deserialize(deserializer)? {
+        Expiry::Signed(value) => Ok(value),
+        // Backend-less leases use u64::MAX as their "until the OS lock is
+        // dropped" sentinel. Saturating it preserves its non-expiring intent
+        // in the shared signed-millisecond representation.
+        Expiry::Unsigned(u64::MAX) => Ok(i64::MAX),
+        Expiry::Unsigned(value) => i64::try_from(value).map_err(D::Error::custom),
+    }
 }
 
 impl LeaseRecord {

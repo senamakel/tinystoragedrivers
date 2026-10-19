@@ -38,6 +38,8 @@ sha2 = "0.10"
 data-encoding = "2"
 # Shared streaming buffers for the S3 driver and zeroized cloud KMS payloads.
 bytes = "1"
+# Portable advisory locks used by the optional lease/fence crate's local lease store.
+fs2 = "0.4"
 # HTTP transports for AWS/GCP KMS; also used by the S3 HTTP contract tests.
 # TLS and JSON stay caller-selected to keep optional transports out of core.
 reqwest = { version = "0.12", default-features = false }
