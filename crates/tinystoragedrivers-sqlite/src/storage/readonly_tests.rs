@@ -2,7 +2,7 @@
 
 use super::*;
 use serde_json::json;
-use tinystoragedrivers_core::{DocumentStore, ErrorKind, Precondition, Scope, StorageBackend};
+use tinystoragedrivers_core::{CollectionSpec, ErrorKind, Precondition, Scope, StorageBackend};
 
 #[tokio::test]
 async fn existing_read_only_storage_reads_ports_and_refuses_writes() {

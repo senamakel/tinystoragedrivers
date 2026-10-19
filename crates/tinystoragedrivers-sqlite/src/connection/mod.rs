@@ -24,6 +24,8 @@ use crate::error::during;
 
 /// How long a statement waits for another process's write lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+type RegistryKey = (PathBuf, bool);
+type OpenRegistry = Mutex<HashMap<RegistryKey, Weak<Db>>>;
 
 /// An open database file.
 pub(crate) struct Db {
@@ -41,8 +43,8 @@ impl fmt::Debug for Db {
     }
 }
 
-fn registry() -> &'static Mutex<HashMap<(PathBuf, bool), Weak<Db>>> {
-    static OPEN: OnceLock<Mutex<HashMap<(PathBuf, bool), Weak<Db>>>> = OnceLock::new();
+fn registry() -> &'static OpenRegistry {
+    static OPEN: OnceLock<OpenRegistry> = OnceLock::new();
     OPEN.get_or_init(Mutex::default)
 }
 
@@ -92,15 +94,16 @@ fn join_error(error: tokio::task::JoinError) -> StorageError {
 impl Db {
     /// Open (or share the already-open) database at `path`, creating it.
     pub(crate) fn open(path: &Path) -> Result<Arc<Self>> {
-        Self::open_with_mode(normalize(path)?, false)
+        Self::open_with_mode(&normalize(path)?, false)
     }
 
     /// Open an existing database without creating files or changing its schema.
     pub(crate) fn open_read_only(path: &Path) -> Result<Arc<Self>> {
-        Self::open_with_mode(normalize_existing(path)?, true)
+        Self::open_with_mode(&normalize_existing(path)?, true)
     }
 
-    fn open_with_mode(path: PathBuf, read_only: bool) -> Result<Arc<Self>> {
+    fn open_with_mode(path: &Path, read_only: bool) -> Result<Arc<Self>> {
+        let path = path.to_path_buf();
         let mut open = registry()
             .lock()
             .map_err(|_| StorageError::backend("sqlite connection registry lock poisoned"))?;
