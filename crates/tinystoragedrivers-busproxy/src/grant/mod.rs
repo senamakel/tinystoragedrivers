@@ -108,6 +108,15 @@ impl StorageGrant {
         self.writable
     }
 
+    /// Whether this grant includes secret storage resources.
+    ///
+    /// This reports only whether the grant contains a secret prefix or exact
+    /// secret name; it does not expose either declaration.
+    #[must_use]
+    pub fn has_secrets(&self) -> bool {
+        self.has_object(Object::Secrets)
+    }
+
     /// Decide whether a request is allowed and how to carry it out.
     ///
     /// # Errors

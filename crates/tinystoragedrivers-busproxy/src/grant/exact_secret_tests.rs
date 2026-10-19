@@ -156,6 +156,41 @@ fn exact_names_require_host_secret_permission_and_valid_unique_names() {
     assert!(!format!("{grant:?}").contains("mcp_cache"));
 }
 
+#[test]
+fn secret_presence_covers_prefix_exact_and_read_only_grants() {
+    assert!(
+        declared_grant(&[], &[ENV_PREFIX], true)
+            .unwrap()
+            .has_secrets()
+    );
+    assert!(
+        declared_grant(&[CACHE_KEY], &[], true)
+            .unwrap()
+            .has_secrets()
+    );
+    assert!(
+        declared_grant(&[CACHE_KEY], &[ENV_PREFIX], true)
+            .unwrap()
+            .has_secrets()
+    );
+
+    let prefixes = [ENV_PREFIX];
+    let read_only = StorageGrant::from_needs(
+        StorageNeeds {
+            secret_prefixes: &prefixes,
+            ..StorageNeeds::default()
+        },
+        &GrantPolicy {
+            writable: false,
+            allow_secrets: true,
+            reserved_collections: &[],
+        },
+    )
+    .unwrap();
+    assert!(!read_only.writable());
+    assert!(read_only.has_secrets());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn exact_grant_crud_works_with_memory_secrets_but_does_not_authorize_suffix_listing() {
     let store = MemorySecrets::new();
