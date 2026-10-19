@@ -100,10 +100,12 @@ impl MemoryBlobs {
             state
                 .blobs
                 .retain(|_, (_, _, expiry)| expiry.is_none_or(|expires| expires > now));
-            let blobs = &state.blobs;
-            state
-                .blob_written_ms
-                .retain(|key, _| blobs.contains_key(key));
+            let DbState {
+                blobs,
+                blob_written_ms,
+                ..
+            } = &mut *state;
+            blob_written_ms.retain(|key, _| blobs.contains_key(key));
             if at <= now {
                 // A zero lifetime is expired on arrival: replace, then vanish.
                 state.blobs.remove(&self.key(key));
@@ -143,10 +145,12 @@ impl BlobStore for MemoryBlobs {
         state.blobs.retain(|(owner, _), (_, _, expiry)| {
             owner != scope || expiry.is_none_or(|expires| expires > now)
         });
-        let blobs = &state.blobs;
-        state
-            .blob_written_ms
-            .retain(|key, _| blobs.contains_key(key));
+        let DbState {
+            blobs,
+            blob_written_ms,
+            ..
+        } = &mut *state;
+        blob_written_ms.retain(|key, _| blobs.contains_key(key));
         Ok((before - state.blobs.len()) as u64)
     }
 

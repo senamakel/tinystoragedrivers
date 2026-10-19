@@ -173,3 +173,49 @@ async fn cleanup_pages_include_expired_physical_blobs() {
     assert_eq!(page.items[0].meta.key, "expired/physical");
     assert_eq!(page.items[0].written_at_ms, Some(10));
 }
+
+#[tokio::test]
+async fn deletion_error_does_not_report_a_completed_sweep() {
+    use serde_json::json;
+
+    use crate::{CollectionSpec, Fence, MemoryStorage, Precondition, Scope, StorageBackend};
+
+    let storage = MemoryStorage::new();
+    let scope = Scope::local();
+    let docs = storage.for_scope(&scope).unwrap().documents().clone();
+    docs.ensure_collection(&CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    docs.put("leases", "sweeper", json!({"epoch": 1}), Precondition::None)
+        .await
+        .unwrap();
+    let fence = Fence::epoch(scope.clone(), "leases", "sweeper", "epoch", 1);
+    let fenced = storage.for_scope_fenced(&scope, &fence).unwrap();
+    fenced
+        .blobs()
+        .put("guarded/orphan", vec![1], None)
+        .await
+        .unwrap();
+
+    let result = sweep_unreferenced(fenced.blobs().as_ref(), "guarded/", u64::MAX, move |_| {
+        let docs = docs.clone();
+        async move {
+            docs.put("leases", "sweeper", json!({"epoch": 2}), Precondition::None)
+                .await?;
+            Ok(false)
+        }
+    })
+    .await;
+
+    assert_eq!(result.unwrap_err().kind(), crate::ErrorKind::Fenced);
+    assert!(
+        storage
+            .for_scope(&scope)
+            .unwrap()
+            .blobs()
+            .head("guarded/orphan")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

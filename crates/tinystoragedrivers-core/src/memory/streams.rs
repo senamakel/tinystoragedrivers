@@ -109,8 +109,9 @@ impl MemoryStreams {
             len: bytes.len() as u64,
             content_type: Some("application/zstd".to_owned()),
         };
-        state.blobs.insert(blob_key, (meta, bytes, None));
-        state.blob_written_ms.insert(blob_key, (self.clock)());
+        let written_at_ms = (self.clock)();
+        state.blobs.insert(blob_key.clone(), (meta, bytes, None));
+        state.blob_written_ms.insert(blob_key, written_at_ms);
         Ok(outcome)
     }
 
