@@ -1,6 +1,7 @@
 //! URL parsing, redaction and driver selection.
 
 use super::*;
+use crate::BlobConfig;
 use tinystoragedrivers_core::ErrorKind;
 
 #[test]
@@ -45,7 +46,9 @@ fn parses_every_form() {
         StorageConfig::parse("mongodb+srv://h.example/app?retryWrites=true").unwrap(),
         StorageConfig::MongoDb {
             uri: "mongodb+srv://h.example/app?retryWrites=true".into(),
-            database: "app".into()
+            database: "app".into(),
+            require_fencing: false,
+            require_transactions: false,
         }
     );
     assert_eq!(
@@ -89,6 +92,41 @@ fn parses_an_encoded_blob_backend_and_preserves_record_options() {
         assert!(!shown.contains(secret), "{shown} exposed {secret}");
         assert!(!format!("{config:?}").contains(secret));
     }
+}
+
+#[test]
+fn composite_mongodb_records_keep_capability_requirements_and_driver_options() {
+    let blobs_url = percent_encode("file:/tmp/blobstore");
+    let url = format!(
+        "mongodb://records-host/app?retryWrites=true&require_fencing=true&appName=tsd&require_transactions=true&blobs={blobs_url}"
+    );
+
+    let config = StorageConfig::parse(&url).unwrap();
+    let StorageConfig::Composite { records, blobs } = config else {
+        panic!("expected a composite configuration")
+    };
+    let StorageConfig::MongoDb {
+        uri,
+        require_fencing,
+        require_transactions,
+        ..
+    } = *records
+    else {
+        panic!("expected MongoDB records configuration")
+    };
+
+    assert!(require_fencing);
+    assert!(require_transactions);
+    assert_eq!(
+        uri,
+        "mongodb://records-host/app?retryWrites=true&appName=tsd"
+    );
+    assert_eq!(
+        blobs.as_ref(),
+        &BlobConfig::Backend(StorageConfig::File {
+            dir: "/tmp/blobstore".into(),
+        })
+    );
 }
 
 #[test]
@@ -215,6 +253,58 @@ fn percent_encode(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[test]
+fn mongo_url_options_are_removed_without_disturbing_driver_options() {
+    let config = StorageConfig::parse(
+        "mongodb://user:secret@host/db?retryWrites=true&require_fencing=true&appName=tsd&require_transactions=true",
+    )
+    .unwrap();
+    let StorageConfig::MongoDb {
+        uri,
+        require_fencing,
+        require_transactions,
+        ..
+    } = &config
+    else {
+        panic!("expected a MongoDB configuration")
+    };
+    assert_eq!(
+        uri,
+        "mongodb://user:secret@host/db?retryWrites=true&appName=tsd"
+    );
+    assert!(*require_fencing);
+    assert!(*require_transactions);
+    assert_eq!(
+        config.to_string(),
+        "mongodb://user:***@host/db?retryWrites=true&appName=tsd&require_fencing=true&require_transactions=true"
+    );
+
+    let options_only = StorageConfig::parse("mongodb://host/db?require_fencing=false").unwrap();
+    let StorageConfig::MongoDb {
+        uri,
+        require_fencing,
+        ..
+    } = options_only
+    else {
+        panic!("expected a MongoDB configuration")
+    };
+    assert_eq!(uri, "mongodb://host/db");
+    assert!(!require_fencing);
+}
+
+#[test]
+fn mongo_url_requirement_options_reject_invalid_and_duplicate_values() {
+    for url in [
+        "mongodb://host/db?require_fencing=yes",
+        "mongodb://host/db?require_transactions=1",
+        "mongodb://host/db?require_fencing=true&require_fencing=false",
+        "mongodb://host/db?require_transactions=true&require_transactions=true",
+    ] {
+        let error = StorageConfig::parse(url).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput, "{url}");
+    }
 }
 
 #[test]
@@ -373,4 +463,65 @@ async fn opens_a_mongodb_url_with_the_driver() {
         "the driver, not the missing-feature arm, answered: {error}"
     );
     assert!(!error.to_string().contains("s3cret"), "{error}");
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test]
+async fn live_mongodb_url_enforces_required_capabilities() {
+    let Some(uri) = std::env::var("TSD_MONGO_URL")
+        .ok()
+        .filter(|uri| !uri.is_empty())
+    else {
+        eprintln!(
+            "live_mongodb_url_enforces_required_capabilities: TSD_MONGO_URL is not set; skipping"
+        );
+        return;
+    };
+    let separator = if uri.contains('?') { '&' } else { '?' };
+    let url =
+        format!("{uri}{separator}require_fencing=true&require_transactions=true&retryWrites=true");
+    let backend = open(&StorageConfig::parse(&url).unwrap()).await.unwrap();
+    assert!(
+        backend
+            .capabilities()
+            .contains(tinystoragedrivers_core::Capability::Fencing)
+    );
+    assert!(
+        backend
+            .capabilities()
+            .contains(tinystoragedrivers_core::Capability::Transactions)
+    );
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test]
+async fn live_mongodb_url_refuses_missing_standalone_requirements() {
+    let Some(uri) = std::env::var("TSD_MONGO_STANDALONE_URL")
+        .ok()
+        .filter(|uri| !uri.is_empty())
+    else {
+        eprintln!(
+            "live_mongodb_url_refuses_missing_standalone_requirements: TSD_MONGO_STANDALONE_URL is not set; skipping"
+        );
+        return;
+    };
+    let separator = if uri.contains('?') { '&' } else { '?' };
+    for (requirement, capability) in [
+        (
+            "require_fencing=true",
+            tinystoragedrivers_core::Capability::Fencing,
+        ),
+        (
+            "require_transactions=true",
+            tinystoragedrivers_core::Capability::Transactions,
+        ),
+    ] {
+        let url = format!("{uri}{separator}{requirement}");
+        let config = StorageConfig::parse(&url).unwrap();
+        let error = open(&config).await.unwrap_err();
+        assert_eq!(
+            error.kind(),
+            tinystoragedrivers_core::ErrorKind::Unsupported(capability)
+        );
+    }
 }

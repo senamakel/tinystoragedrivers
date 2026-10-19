@@ -39,6 +39,10 @@ pub enum StorageConfig {
         uri: String,
         /// The database name taken from the URI path.
         database: String,
+        /// Whether opening requires the deployment to support fencing.
+        require_fencing: bool,
+        /// Whether opening requires the deployment to support transactions.
+        require_transactions: bool,
     },
     /// JSON and JSONL files under a directory.
     File {
@@ -62,13 +66,17 @@ impl StorageConfig {
     /// `mongodb://…/<database>` and `mongodb+srv://…/<database>`;
     /// `file:<dir>`. Add one percent-encoded `blobs=<URL>` query option to
     /// select an independent blob backend; nested composite blob URLs are not
-    /// supported.
+    /// supported. MongoDB URLs also accept the host options
+    /// `require_fencing=true|false` and
+    /// `require_transactions=true|false`; these are removed before the MongoDB
+    /// driver parses the connection string.
     ///
     /// # Errors
     ///
     /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) for an
-    /// empty or unrecognized URL, an empty path, a malformed or duplicate
-    /// `blobs` option, or a `MongoDB` URI without a database name.
+    /// empty or unrecognized URL, an empty path, a `MongoDB` URI without a
+    /// database name, a repeated or invalid MongoDB host option, or a malformed
+    /// or duplicate `blobs` option.
     pub fn parse(url: &str) -> Result<Self> {
         let url = url.trim();
         if url.is_empty() {
@@ -118,9 +126,12 @@ impl StorageConfig {
                 redact(url)
             )));
         }
+        let (uri, require_fencing, require_transactions) = parse_mongo_requirements(url)?;
         Ok(Self::MongoDb {
-            uri: url.to_owned(),
+            uri,
             database: database.to_owned(),
+            require_fencing,
+            require_transactions,
         })
     }
 
@@ -243,6 +254,61 @@ fn non_empty_path(path: &str, driver: &str) -> Result<PathBuf> {
     }
 }
 
+/// Extract host-owned capability requirements while leaving every MongoDB
+/// driver option in the connection string unchanged.
+fn parse_mongo_requirements(url: &str) -> Result<(String, bool, bool)> {
+    let Some((prefix, query)) = url.split_once('?') else {
+        return Ok((url.to_owned(), false, false));
+    };
+    let mut require_fencing = false;
+    let mut require_transactions = false;
+    let mut saw_fencing = false;
+    let mut saw_transactions = false;
+    let mut driver_options = Vec::new();
+
+    for option in query.split('&') {
+        let (key, value) = option.split_once('=').unwrap_or((option, ""));
+        match key {
+            "require_fencing" => {
+                if saw_fencing {
+                    return Err(StorageError::invalid_input(
+                        "MongoDB URL repeats the require_fencing option",
+                    ));
+                }
+                saw_fencing = true;
+                require_fencing = parse_requirement_value(key, value)?;
+            }
+            "require_transactions" => {
+                if saw_transactions {
+                    return Err(StorageError::invalid_input(
+                        "MongoDB URL repeats the require_transactions option",
+                    ));
+                }
+                saw_transactions = true;
+                require_transactions = parse_requirement_value(key, value)?;
+            }
+            _ => driver_options.push(option),
+        }
+    }
+
+    let uri = if driver_options.is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}?{}", driver_options.join("&"))
+    };
+    Ok((uri, require_fencing, require_transactions))
+}
+
+fn parse_requirement_value(option: &str, value: &str) -> Result<bool> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(StorageError::invalid_input(format!(
+            "MongoDB URL option `{option}` must be true or false"
+        ))),
+    }
+}
+
 /// The pieces of `scheme://[userinfo@]hosts[/path][?query]`.
 struct UriParts<'a> {
     scheme: &'a str,
@@ -348,7 +414,23 @@ impl fmt::Display for StorageConfig {
         match self {
             Self::Memory => f.write_str("memory"),
             Self::Sqlite { path } => write!(f, "sqlite:{}", path.display()),
-            Self::MongoDb { uri, .. } => f.write_str(&redact(uri)),
+            Self::MongoDb {
+                uri,
+                require_fencing,
+                require_transactions,
+                ..
+            } => {
+                f.write_str(&redact(uri))?;
+                let mut separator = if uri.contains('?') { '&' } else { '?' };
+                if *require_fencing {
+                    write!(f, "{separator}require_fencing=true")?;
+                    separator = '&';
+                }
+                if *require_transactions {
+                    write!(f, "{separator}require_transactions=true")?;
+                }
+                Ok(())
+            }
             Self::File { dir } => write!(f, "file:{}", dir.display()),
             Self::Composite { records, blobs } => {
                 let rendered_records = records.to_string();
@@ -401,9 +483,30 @@ pub async fn open(config: &StorageConfig) -> Result<Arc<dyn StorageBackend>> {
             tinystoragedrivers_sqlite::SqliteStorage::open(path)?,
         )),
         #[cfg(feature = "mongodb")]
-        StorageConfig::MongoDb { uri, database } => Ok(Arc::new(
-            tinystoragedrivers_mongodb::MongoStorage::connect(uri, database).await?,
-        )),
+        StorageConfig::MongoDb {
+            uri,
+            database,
+            require_fencing,
+            require_transactions,
+        } => {
+            let options = tinystoragedrivers_mongodb::MongoOpenOptions::new();
+            let options = if *require_fencing {
+                options.require_fencing()
+            } else {
+                options
+            };
+            let options = if *require_transactions {
+                options.require_transactions()
+            } else {
+                options
+            };
+            Ok(Arc::new(
+                tinystoragedrivers_mongodb::MongoStorage::connect_with_options(
+                    uri, database, options,
+                )
+                .await?,
+            ))
+        }
         StorageConfig::Composite { records, blobs } => crate::open_composite(records, blobs).await,
         #[allow(
             unreachable_patterns,

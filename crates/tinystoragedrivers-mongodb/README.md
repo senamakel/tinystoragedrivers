@@ -9,6 +9,13 @@ One MongoDB database is shared by every tenant, and the driver enforces the
 Requires MongoDB 5.0 or newer. The client is the official `mongodb` crate
 with rustls (never OpenSSL), matching the copy OpenHuman already links.
 
+By default, opening reports the capabilities detected from the deployment.
+`MongoStorage::connect_with_options` can require fencing or transactions and
+returns `Unsupported` with the missing capability when a standalone server
+does not provide it. The facade accepts the same requirements as
+`require_fencing=true` and `require_transactions=true` MongoDB URL options; it
+removes these host options before parsing the remaining connection string.
+
 ## Storage layout
 
 | Port | MongoDB |
@@ -119,6 +126,9 @@ id that was itself resolved under the scope.
 replica set) enables the `live_*` tests: the conformance suite with and
 without transactions, a differential test against the memory driver over
 documents chosen to trip MongoDB's semantics, and focused behavior tests.
+`TSD_MONGO_STANDALONE_URL` enables focused live checks that standalone MongoDB
+reports no transaction-dependent capabilities and refuses required fencing
+or transactions. CI runs these checks against a separate standalone server.
 Without it they print a note and pass; the pure translation, naming and
 error-mapping logic is unit-tested without a server.
 
