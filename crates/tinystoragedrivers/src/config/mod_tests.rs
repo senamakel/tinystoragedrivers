@@ -93,6 +93,41 @@ fn parses_an_encoded_blob_backend_and_preserves_record_options() {
     }
 }
 
+#[test]
+fn composite_mongodb_records_keep_capability_requirements_and_driver_options() {
+    let blobs_url = percent_encode("file:/tmp/blobstore");
+    let url = format!(
+        "mongodb://records-host/app?retryWrites=true&require_fencing=true&appName=tsd&require_transactions=true&blobs={blobs_url}"
+    );
+
+    let config = StorageConfig::parse(&url).unwrap();
+    let StorageConfig::Composite { records, blobs } = config else {
+        panic!("expected a composite configuration")
+    };
+    let StorageConfig::MongoDb {
+        uri,
+        require_fencing,
+        require_transactions,
+        ..
+    } = *records
+    else {
+        panic!("expected MongoDB records configuration")
+    };
+
+    assert!(require_fencing);
+    assert!(require_transactions);
+    assert_eq!(
+        uri,
+        "mongodb://records-host/app?retryWrites=true&appName=tsd"
+    );
+    assert_eq!(
+        blobs.as_ref(),
+        &BlobConfig::Backend(StorageConfig::File {
+            dir: "/tmp/blobstore".into(),
+        })
+    );
+}
+
 #[cfg(feature = "s3")]
 #[test]
 fn parses_an_encoded_s3_blob_backend_without_connecting() {
