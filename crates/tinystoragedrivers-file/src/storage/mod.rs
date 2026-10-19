@@ -27,6 +27,7 @@
 //! replacement is atomic, but a compare-and-swap, claim or fenced write can
 //! race another process.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -34,14 +35,15 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tinystoragedrivers_core::{
-    Capabilities, Capability, Clock, Fence, Result, Scope, ScopedStorage, StorageBackend,
+    Capabilities, Capability, Clock, Fence, PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage,
+    PurgeStatus, Result, Scope, ScopeGeneration, ScopePurge, ScopedStorage, StorageBackend,
     StorageError,
 };
 
 use crate::blobs::FileBlobs;
 use crate::documents::FileDocuments;
 use crate::encode::dir_components;
-use crate::fsio::io_error;
+use crate::fsio::{io_error, read_json, write_json};
 use crate::scopes;
 use crate::streams::FileStreams;
 
@@ -62,6 +64,7 @@ pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::CollectionValidation)
     .with(Capability::BlobTtl)
     .with(Capability::ScopeEnumeration)
+    .with(Capability::ScopePurge)
     .with(Capability::StreamSeal);
 
 fn system_clock() -> u64 {
@@ -93,6 +96,15 @@ pub(crate) struct Db {
     dir: PathBuf,
     lock: Arc<Mutex<()>>,
     clock: Clock,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct FilePurgeState {
+    generation: u64,
+    #[serde(default)]
+    pending: Option<PurgeReceipt>,
+    #[serde(default)]
+    receipts: HashMap<String, PurgeReceipt>,
 }
 
 impl fmt::Debug for Db {
@@ -127,6 +139,33 @@ impl Db {
     /// The directory holding one scope's data.
     pub(crate) fn scope_dir(&self, scope: &Scope) -> PathBuf {
         self.scopes_dir().join(dir_components(scope.as_str()))
+    }
+
+    fn purge_state_path(&self, scope: &Scope) -> PathBuf {
+        self.dir
+            .join("_meta")
+            .join("purges")
+            .join(dir_components(scope.as_str()))
+            .with_extension("json")
+    }
+
+    fn purge_state(&self, scope: &Scope) -> Result<FilePurgeState> {
+        Ok(read_json(&self.purge_state_path(scope))?.unwrap_or_default())
+    }
+
+    fn save_purge_state(&self, scope: &Scope, state: &FilePurgeState) -> Result<()> {
+        write_json(&self.purge_state_path(scope), state)
+    }
+
+    pub(crate) fn check_generation(&self, scope: &Scope, expected: ScopeGeneration) -> Result<()> {
+        let state = self.purge_state(scope)?;
+        if state.pending.is_some() || state.generation != expected.0 {
+            return Err(StorageError::new(
+                tinystoragedrivers_core::ErrorKind::ScopeGenerationRejected,
+                "scope writer generation has been revoked",
+            ));
+        }
+        Ok(())
     }
 
     /// Hold the directory lock. It guards no in-memory state (everything is on
@@ -224,26 +263,42 @@ impl FileStorage {
     }
 
     fn handles(&self, scope: &Scope, fence: Option<&Arc<Fencing>>) -> ScopedStorage {
-        ScopedStorage::new(
+        self.handles_generation(scope, fence, ScopeGeneration::default())
+    }
+
+    fn handles_generation(
+        &self,
+        scope: &Scope,
+        fence: Option<&Arc<Fencing>>,
+        generation: ScopeGeneration,
+    ) -> ScopedStorage {
+        let ports = ScopedStorage::new(
             scope.clone(),
             self.driver(),
-            Arc::new(FileDocuments::new(
-                Arc::clone(&self.db),
-                scope.clone(),
-                fence.cloned(),
-                self.existing,
-            )),
-            Arc::new(FileStreams::new(
-                Arc::clone(&self.db),
-                scope.clone(),
-                fence.cloned(),
-            )),
-            Arc::new(FileBlobs::new(
-                Arc::clone(&self.db),
-                scope.clone(),
-                fence.cloned(),
-            )),
-        )
+            Arc::new(
+                FileDocuments::new(
+                    Arc::clone(&self.db),
+                    scope.clone(),
+                    fence.cloned(),
+                    self.existing,
+                )
+                .with_generation(generation),
+            ),
+            Arc::new(
+                FileStreams::new(Arc::clone(&self.db), scope.clone(), fence.cloned())
+                    .with_generation(generation),
+            ),
+            Arc::new(
+                FileBlobs::new(Arc::clone(&self.db), scope.clone(), fence.cloned())
+                    .with_generation(generation),
+            ),
+        );
+        ports.with_purge(Arc::new(FilePurge {
+            db: Arc::clone(&self.db),
+            scope: scope.clone(),
+            generation,
+            fence: fence.cloned(),
+        }))
     }
 
     /// Remove the blobs of `scope` whose lifetime has passed and return how
@@ -254,7 +309,21 @@ impl FileStorage {
     ///
     /// A filesystem error.
     pub async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
+        let scope_for_state = scope.clone();
+        let generation = self
+            .db
+            .run(move |db| {
+                let state = db.purge_state(&scope_for_state)?;
+                if state.pending.is_some() {
+                    return Err(StorageError::scope_generation_rejected(
+                        "scope purge is pending",
+                    ));
+                }
+                Ok(ScopeGeneration(state.generation))
+            })
+            .await?;
         FileBlobs::new(Arc::clone(&self.db), scope.clone(), None)
+            .with_generation(generation)
             .sweep_expired()
             .await
     }
@@ -266,6 +335,127 @@ impl FileStorage {
     }
 }
 
+#[derive(Debug)]
+struct FilePurge {
+    db: Arc<Db>,
+    scope: Scope,
+    generation: ScopeGeneration,
+    fence: Option<Arc<Fencing>>,
+}
+
+#[async_trait::async_trait]
+impl ScopePurge for FilePurge {
+    fn supports_binding_validation(&self) -> bool {
+        true
+    }
+
+    fn supports_generation_validation(&self) -> bool {
+        true
+    }
+
+    async fn validate_generation(&self) -> Result<()> {
+        let scope = self.scope.clone();
+        let generation = self.generation;
+        self.db
+            .run(move |db| db.check_generation(&scope, generation))
+            .await
+    }
+
+    async fn validate_binding(&self) -> Result<()> {
+        let scope = self.scope.clone();
+        let generation = self.generation;
+        let fence = self.fence.clone();
+        self.db
+            .run(move |db| {
+                crate::documents::guard(db, fence.as_deref())?;
+                db.check_generation(&scope, generation)
+            })
+            .await
+    }
+
+    async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
+        request.validate()?;
+        if request.mode == PurgeMode::Atomic {
+            return Err(StorageError::unsupported(
+                Capability::AtomicScopePurge,
+                "file storage cannot atomically purge a scope",
+            ));
+        }
+        let scope = self.scope.clone();
+        let operation_id = request.operation_id.clone();
+        let generation = self.generation;
+        let fence = self.fence.clone();
+        self.db
+            .run(move |db| {
+                crate::documents::guard(db, fence.as_deref())?;
+                let mut state = db.purge_state(&scope)?;
+                if let Some(receipt) = state.receipts.get(&operation_id) {
+                    return Ok(receipt.clone());
+                }
+                if let Some(pending) = &state.pending {
+                    if pending.operation_id != operation_id {
+                        return Err(StorageError::unavailable("another scope purge is pending"));
+                    }
+                } else {
+                    db.check_generation(&scope, generation)?;
+                    let next = generation.0.checked_add(1).ok_or_else(|| {
+                        StorageError::backend("scope generation space is exhausted")
+                    })?;
+                    state.pending = Some(PurgeReceipt {
+                        operation_id: operation_id.clone(),
+                        generation: ScopeGeneration(next),
+                        status: PurgeStatus::Pending,
+                        stage: PurgeStage::Records,
+                    });
+                    db.save_purge_state(&scope, &state)?;
+                }
+                let path = db.scope_dir(&scope);
+                if path.exists() {
+                    std::fs::remove_dir_all(&path).map_err(io_error("remove purged scope"))?;
+                }
+                let generation = state
+                    .pending
+                    .as_ref()
+                    .map(|receipt| receipt.generation)
+                    .ok_or_else(|| StorageError::backend("purge state lost its pending receipt"))?;
+                let receipt = PurgeReceipt {
+                    operation_id,
+                    generation,
+                    status: PurgeStatus::Complete,
+                    stage: PurgeStage::Complete,
+                };
+                state.generation = receipt.generation.0;
+                state.pending = None;
+                state
+                    .receipts
+                    .insert(receipt.operation_id.clone(), receipt.clone());
+                db.save_purge_state(&scope, &state)?;
+                Ok(receipt)
+            })
+            .await
+    }
+
+    async fn status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
+        let scope = self.scope.clone();
+        let operation_id = operation_id.to_owned();
+        let fence = self.fence.clone();
+        self.db
+            .run(move |db| {
+                crate::documents::guard(db, fence.as_deref())?;
+                let state = db.purge_state(&scope)?;
+                if state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.operation_id == operation_id)
+                {
+                    return Ok(state.pending);
+                }
+                Ok(state.receipts.get(&operation_id).cloned())
+            })
+            .await
+    }
+}
+
 #[async_trait::async_trait]
 impl StorageBackend for FileStorage {
     fn driver(&self) -> &'static str {
@@ -274,6 +464,14 @@ impl StorageBackend for FileStorage {
 
     fn capabilities(&self) -> Capabilities {
         CAPABILITIES
+    }
+
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        true
+    }
+
+    fn supports_scope_purge_generation_validation(&self) -> bool {
+        true
     }
 
     /// Lists the scopes that have a stored file by walking `scopes/`. A walk
@@ -303,6 +501,14 @@ impl StorageBackend for FileStorage {
         Ok(self.handles(scope, None))
     }
 
+    fn for_scope_generation(
+        &self,
+        scope: &Scope,
+        generation: ScopeGeneration,
+    ) -> Result<ScopedStorage> {
+        Ok(self.handles_generation(scope, None, generation))
+    }
+
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
         fence.validate()?;
         Ok(self.handles(
@@ -310,6 +516,22 @@ impl StorageBackend for FileStorage {
             Some(&Arc::new(Fencing {
                 fence: fence.clone(),
             })),
+        ))
+    }
+
+    fn for_scope_fenced_generation(
+        &self,
+        scope: &Scope,
+        generation: ScopeGeneration,
+        fence: &Fence,
+    ) -> Result<ScopedStorage> {
+        fence.validate()?;
+        Ok(self.handles_generation(
+            scope,
+            Some(&Arc::new(Fencing {
+                fence: fence.clone(),
+            })),
+            generation,
         ))
     }
 }

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Native data-access admission generation, issued by purge rather than model input.
+/// A successful purge bound to generation `N` issues `N + 1`; implementations
+/// reject the operation if that increment overflows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ScopeGeneration(pub u64);
@@ -77,7 +79,10 @@ pub enum PurgeStage {
 pub struct PurgeReceipt {
     /// Host-issued operation identity.
     pub operation_id: String,
-    /// Generation for subsequent explicitly admitted handles.
+    /// Generation a successful operation issues for subsequent handles. A purge
+    /// bound to generation `N` issues exactly `N + 1`; a pending receipt carries
+    /// this candidate generation while admission remains closed. Replay returns
+    /// the originally issued generation.
     pub generation: ScopeGeneration,
     /// Completion of this database only, never an implicit root-wide reset.
     pub status: PurgeStatus,
@@ -94,7 +99,46 @@ pub struct PurgeReceipt {
 /// deny all generations while pending and require trusted writer quiescence.
 #[async_trait]
 pub trait ScopePurge: Send + Sync + fmt::Debug {
-    /// Erase the bound scope and revoke its old handles.
+    /// Whether this bound handle implements generation and fence validation.
+    /// Defaults to false for existing purge ports that predate this contract.
+    fn supports_binding_validation(&self) -> bool {
+        false
+    }
+
+    /// Whether this port can validate generation revocation independently of
+    /// an optional writer fence. Read admission may remain open when a fence
+    /// is absent or stale, while a purged generation must still be rejected.
+    fn supports_generation_validation(&self) -> bool {
+        false
+    }
+
+    /// Validate only that the bound generation is still admitted.
+    ///
+    /// # Errors
+    /// Unsupported generation validation, revoked generation or backend failure.
+    async fn validate_generation(&self) -> Result<()> {
+        Err(StorageError::unsupported(
+            Capability::ScopePurge,
+            "this driver cannot validate a scope generation",
+        ))
+    }
+
+    /// Validate that the bound generation is still admitted and that its
+    /// native fence (when present) remains current, without changing state.
+    ///
+    /// # Errors
+    /// Unsupported validation, a pending/revoked generation, stale fence or
+    /// backend failure.
+    async fn validate_binding(&self) -> Result<()> {
+        Err(StorageError::unsupported(
+            Capability::ScopePurge,
+            "this driver cannot validate a scope purge binding",
+        ))
+    }
+
+    /// Erase the bound scope and revoke its old handles. On success, the receipt
+    /// carries the next generation, exactly one greater than the generation
+    /// bound to this purge operation.
     ///
     /// # Errors
     /// Unsupported guarantees, rejected scope generation or native fence, invalid input,

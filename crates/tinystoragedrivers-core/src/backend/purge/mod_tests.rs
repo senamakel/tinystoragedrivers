@@ -114,3 +114,24 @@ async fn optional_status_defaults_to_typed_unsupported() {
         ErrorKind::Unsupported(Capability::ScopePurge)
     );
 }
+
+#[tokio::test]
+async fn legacy_purge_ports_do_not_claim_generation_or_fence_validation() {
+    let purge = StatusUnsupported;
+    assert!(!purge.supports_generation_validation());
+    assert!(!purge.supports_binding_validation());
+    assert_eq!(
+        purge.validate_generation().await.unwrap_err().kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    assert_eq!(
+        purge.validate_binding().await.unwrap_err().kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+}
+
+#[test]
+fn unsupported_generation_refusal_is_typed() {
+    let error = unsupported_generation::<()>(&Scope::local(), ScopeGeneration(1)).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported(Capability::ScopePurge));
+}
