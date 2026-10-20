@@ -424,7 +424,10 @@ async fn reopened_storage_removes_an_uncommitted_new_blob_pair() {
     drop(storage);
     let reopened = FileStorage::open_with_clock(dir.path(), Arc::new(|| 10_000)).unwrap();
     let recovered_storage = reopened.for_scope(&Scope::local()).unwrap();
-    assert!(recovered_storage.blobs().list("").await.unwrap().is_empty());
+    assert_eq!(
+        recovered_storage.blobs().list("").await.unwrap(),
+        [] as [tinystoragedrivers_core::BlobMeta; 0]
+    );
     assert!(
         recovered_storage
             .blobs()

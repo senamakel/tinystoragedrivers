@@ -305,7 +305,10 @@ async fn an_expired_source_is_not_migrated_or_resurrected() {
         .unwrap();
 
     assert!(storage.blobs().get("juice/ccr/a").await.unwrap().is_none());
-    assert!(storage.blobs().list("juice/ccr/").await.unwrap().is_empty());
+    assert_eq!(
+        storage.blobs().list("juice/ccr/").await.unwrap(),
+        [] as [crate::BlobMeta; 0]
+    );
 }
 
 #[tokio::test]
