@@ -116,3 +116,76 @@ async fn registration_debug_and_shutdown_cover_the_missing_monitor_path() {
     );
     registration.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn setup_failure_shutdown_joins_monitor_without_closing_the_shared_connection() {
+    let bus = tinybus::transport::memory::MemoryBus::new();
+    let broker = tinybus::broker::Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let service = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let service_peer = service.unique_name().unwrap();
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let changes = observer
+        .add_match(
+            tinybus::MatchRule::new()
+                .signals()
+                .sender(tinybus::BusName::new(tinybus::BUS_NAME).unwrap())
+                .interface(tinybus::InterfaceName::new(tinybus::BUS_INTERFACE).unwrap())
+                .member(tinybus::MemberName::new("NameOwnerChanged").unwrap()),
+        )
+        .await
+        .unwrap();
+    let inner = Arc::new(
+        GovernedStorage::new(
+            Arc::new(TestEnvironment {
+                resolve_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(TestAudit),
+            tinystoragedrivers_busproxy::GovernedEndpointLimits::default(),
+        )
+        .register(
+            service.clone(),
+            Arc::new(RejectAllCallers),
+            Handle::current(),
+        ),
+    );
+    inner.mark_setup_pending();
+    let monitor = tokio::spawn(monitor_owner_changes(
+        changes,
+        service_peer.clone(),
+        Arc::clone(&inner),
+        None,
+    ));
+    let monitor_abort = monitor.abort_handle();
+    let retained_inner = Arc::clone(&inner);
+    let registration = StorageRegistration {
+        inner: Some(inner),
+        monitor: Some(monitor),
+        runtime: Handle::current(),
+        cleanup_probe: None,
+    };
+
+    registration.shutdown_for_setup_failure().await.unwrap();
+
+    assert!(monitor_abort.is_finished());
+    assert!(matches!(
+        retained_inner
+            .register_lease(
+                tinystoragedrivers_busproxy::HostStorageContext::new(TestContext),
+                service_peer.clone(),
+            )
+            .await,
+        Err(HostFailure::Denied("registration-shutdown"))
+    ));
+    assert_eq!(
+        observer.name_owner(service_peer.as_str()).await.unwrap(),
+        Some(service_peer),
+        "setup cleanup withdraws local registration state but leaves connection teardown to TinyBus"
+    );
+    assert!(observer.name_owner(tinybus::BUS_NAME).await.is_ok());
+    service.close().await.unwrap();
+}

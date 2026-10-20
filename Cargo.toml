@@ -4,7 +4,11 @@ resolver = "3"
 # package, each directory named for the package it holds. There is no root
 # package: `crates/tinystoragedrivers` is the facade a host depends on, and the
 # ports and drivers it forwards are ordinary members beside it.
-members = ["crates/*", "crates/tinystoragedrivers-tinybus/test-cdylib"]
+members = [
+    "crates/*",
+    "crates/tinystoragedrivers-tinybus/test-cdylib",
+    "crates/tinystoragedrivers-tinybus/migration-cdylib",
+]
 # `worktrees/` holds `git worktree` checkouts of this same repository; each
 # contains a full copy of this manifest and every crate under it, so without
 # this entry cargo walks into them and reports duplicate packages.
@@ -19,7 +23,7 @@ exclude = [
 # true`, so the version the release workflow bumps is written in exactly one
 # place and every crate moves together.
 [workspace.package]
-version = "1.8.0"
+version = "1.9.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-only"
@@ -29,9 +33,9 @@ repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 # Pure declarations and transform wire contracts, shared without runtime dependencies.
 tinystoragedrivers-schema = { path = "crates/tinystoragedrivers-schema" }
 # Minimal document wire clients and confined host callbacks; never linked by core.
-tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "207a9a7df15e44fdba00a807d0f7eaf21904ba0e", default-features = false }
+tinybus = { version = "0.3.9", git = "https://github.com/tinyhumansai/tinybus", rev = "3792a1d85f3dd171682dc45d310ee0f03836f038", default-features = false }
 # Generate the trusted static linked export owned by the TinyBus storage adapter.
-tinybus-module = { git = "https://github.com/tinyhumansai/tinybus", rev = "207a9a7df15e44fdba00a807d0f7eaf21904ba0e", package = "tinybus-module", features = ["static-link"] }
+tinybus-module = { version = "0.3.9", git = "https://github.com/tinyhumansai/tinybus", rev = "3792a1d85f3dd171682dc45d310ee0f03836f038", package = "tinybus-module", features = ["static-link"] }
 tinystoragedrivers-bus = { path = "crates/tinystoragedrivers-bus" }
 # Bus client implementing the storage ports, plus the reference server adapter.
 tinystoragedrivers-client = { path = "crates/tinystoragedrivers-client" }
