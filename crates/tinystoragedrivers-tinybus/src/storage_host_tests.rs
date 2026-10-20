@@ -2518,6 +2518,48 @@ async fn another_peer_cannot_accept_a_governed_download_stream() {
     assert!(observer.name_owner(tinybus::BUS_NAME).await.is_ok());
 }
 
+async fn assert_canceled_owner_transfer_cleanup(
+    observer: &Connection,
+    endpoint_drops: &AtomicUsize,
+) {
+    let mut last_name_state = "not observed";
+    let mut last_endpoint_drops = 0;
+    let cleanup = async {
+        loop {
+            let name_released = match observer
+                .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
+                .await
+            {
+                Ok(None) => {
+                    last_name_state = "released";
+                    true
+                }
+                Ok(Some(_)) => {
+                    last_name_state = "owned";
+                    false
+                }
+                Err(_) => {
+                    last_name_state = "query error";
+                    false
+                }
+            };
+            last_endpoint_drops = endpoint_drops.load(Ordering::Acquire);
+            if name_released && last_endpoint_drops == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    let cleanup_result = tokio::time::timeout(Duration::from_secs(2), cleanup).await;
+    let current_endpoint_drops = endpoint_drops.load(Ordering::Acquire);
+    assert!(
+        cleanup_result.is_ok(),
+        "canceled owner-transfer cleanup timed out: name_owner_state={last_name_state}, \
+         last_observed_endpoint_drops={last_endpoint_drops}, \
+         current_endpoint_drops={current_endpoint_drops}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_host_live() {
     let bus = MemoryBus::new();
@@ -2584,20 +2626,7 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
     attaching.abort();
     assert!(attaching.await.unwrap_err().is_cancelled());
     let _ = continue_setup.send(());
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let name_released = observer
-                .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
-                .await
-                .is_ok_and(|owner| owner.is_none());
-            if name_released && endpoint_drops.load(Ordering::Acquire) == 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("canceled owner transfer retained the name or legacy endpoint");
+    assert_canceled_owner_transfer_cleanup(&observer, &endpoint_drops).await;
     assert_eq!(observer.unique_name().unwrap(), observer_peer);
     assert!(observer.name_owner(tinybus::BUS_NAME).await.is_ok());
     assert!(
