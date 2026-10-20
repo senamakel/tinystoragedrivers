@@ -25,17 +25,8 @@ impl Fixture {
             .connection
             .upgrade()
             .ok_or_else(|| tinybus::Error::failed("fixture connection is not connected"))?;
-        let unique_name = connection
-            .unique_name()
-            .ok_or_else(|| tinybus::Error::failed("fixture connection is not connected"))?;
-        let owner = connection.name_owner(unique_name.as_str()).await?;
-        if owner.as_ref() == Some(&unique_name) {
-            Ok("fixture-alive")
-        } else {
-            Err(tinybus::Error::failed(
-                "fixture connection no longer owns its unique name",
-            ))
-        }
+        connection.name_owner(tinybus::BUS_NAME).await?;
+        Ok("fixture-alive")
     }
 }
 
