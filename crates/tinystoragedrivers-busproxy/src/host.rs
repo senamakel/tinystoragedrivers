@@ -765,3 +765,7 @@ fn validate_lease_root(root: &str) -> tinybus::Result<()> {
 #[cfg(test)]
 #[path = "host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "host_lifecycle_tests.rs"]
+mod lifecycle_tests;
