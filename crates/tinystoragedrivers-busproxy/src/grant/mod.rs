@@ -310,8 +310,19 @@ impl StorageGrant {
 
     fn blobs(&self, selector: &str, request: &Value) -> Result<Plan, Denied> {
         match selector {
-            "Get" | "GetStream" | "GetRange" | "Head" | "PresignGet" | "Put" | "PutStream"
-            | "Delete" | "PresignPut" => {
+            "Get"
+            | "GetStream"
+            | "GetWithExpiry"
+            | "GetStreamWithExpiry"
+            | "GetRange"
+            | "Head"
+            | "PresignGet"
+            | "Put"
+            | "PutStream"
+            | "PutUntil"
+            | "PutStreamUntil"
+            | "Delete"
+            | "PresignPut" => {
                 let key = text(request, "key")?;
                 validate_user_blob_key(key).map_err(|_| Denied::Malformed)?;
                 Self::prefix(&self.blob_prefixes, key)?;
@@ -491,7 +502,12 @@ fn validate_request(object: Object, selector: &str, request: &Value) -> Result<(
         (Object::Streams, "Streams") => check!(wire::ListStreamsRequest),
         (Object::Blobs, "Put") => check!(wire::PutBlobRequest),
         (Object::Blobs, "PutStream") => check!(wire::PutBlobStreamRequest),
-        (Object::Blobs, "Get" | "GetStream" | "Head" | "Delete") => check!(wire::BlobKeyRequest),
+        (Object::Blobs, "PutUntil") => check!(wire::PutBlobUntilRequest),
+        (Object::Blobs, "PutStreamUntil") => check!(wire::PutBlobStreamUntilRequest),
+        (
+            Object::Blobs,
+            "Get" | "GetStream" | "GetWithExpiry" | "GetStreamWithExpiry" | "Head" | "Delete",
+        ) => check!(wire::BlobKeyRequest),
         (Object::Blobs, "GetRange") => check!(wire::GetRangeRequest),
         (Object::Blobs, "List") => check!(wire::ListBlobsRequest),
         (Object::Blobs, "PresignGet" | "PresignPut") => check!(wire::PresignRequest),
@@ -518,7 +534,10 @@ fn is_write(object: Object, selector: &str) -> Result<bool, Denied> {
             | "DeleteStream"
             | "Seal",
         )
-        | (Object::Blobs, "Put" | "PutStream" | "Delete" | "PresignPut")
+        | (
+            Object::Blobs,
+            "Put" | "PutStream" | "PutUntil" | "PutStreamUntil" | "Delete" | "PresignPut",
+        )
         | (Object::Secrets, "Set" | "Delete") => true,
         (
             Object::Documents,
@@ -536,7 +555,15 @@ fn is_write(object: Object, selector: &str) -> Result<bool, Denied> {
         | (Object::Streams, "ReadWindow" | "Len" | "Streams" | "Info")
         | (
             Object::Blobs,
-            "Get" | "GetStream" | "GetRange" | "Head" | "List" | "PresignGet" | "Capabilities",
+            "Get"
+            | "GetStream"
+            | "GetWithExpiry"
+            | "GetStreamWithExpiry"
+            | "GetRange"
+            | "Head"
+            | "List"
+            | "PresignGet"
+            | "Capabilities",
         )
         | (Object::Secrets, "Get" | "List") => false,
         _ => return Err(Denied::Malformed),

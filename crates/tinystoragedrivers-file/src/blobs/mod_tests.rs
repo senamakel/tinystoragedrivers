@@ -245,3 +245,357 @@ async fn a_plain_put_clears_the_deadline() {
     now.store(u64::MAX / 2, Ordering::SeqCst);
     assert_eq!(blobs.get("k").await.unwrap().unwrap().bytes, [2]);
 }
+
+#[tokio::test]
+async fn absolute_deadlines_are_reported_and_expired_on_arrival_stays_invisible() {
+    use std::sync::atomic::Ordering;
+
+    let (_dir, _storage, blobs, now) = open_driven();
+    blobs
+        .put_until("absolute", vec![1, 2], Some("a/b"), Some(10_250))
+        .await
+        .unwrap();
+    let source = blobs.get_with_expiry("absolute").await.unwrap().unwrap();
+    assert_eq!(source.blob.bytes, [1, 2]);
+    assert_eq!(source.expires_at_ms, Some(10_250));
+    now.store(10_250, Ordering::SeqCst);
+    assert!(blobs.get_with_expiry("absolute").await.unwrap().is_none());
+
+    blobs
+        .put_until("already-expired", vec![3], None, Some(10_250))
+        .await
+        .unwrap();
+    assert!(
+        blobs
+            .get_with_expiry("already-expired")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn failed_sidecar_publication_keeps_the_previous_bytes_and_expiry_pair() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        data: dir.path().join("blob"),
+        meta: dir.path().join("blob.meta.json"),
+        now: 1_000,
+    };
+    store_in(
+        &paths,
+        "key",
+        b"old bytes",
+        Some("text/plain".to_owned()),
+        Some(6_000),
+    )
+    .unwrap();
+
+    let error = store_in_with_sidecar_publisher(
+        &paths,
+        "key",
+        b"replacement bytes",
+        Some("application/octet-stream".to_owned()),
+        Some(9_000),
+        |_staged, _published| Err(StorageError::backend("injected sidecar rename failure")),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+
+    let visible = source(&paths, "key").unwrap().unwrap();
+    assert_eq!(visible.blob.bytes, b"old bytes");
+    assert_eq!(
+        visible.blob.meta.content_type.as_deref(),
+        Some("text/plain")
+    );
+    assert_eq!(visible.expires_at_ms, Some(6_000));
+}
+
+#[tokio::test]
+async fn reopened_storage_rolls_back_a_blob_pair_interrupted_after_data_publish() {
+    let (dir, storage, blobs, _now) = open_driven();
+    blobs
+        .put_until(
+            "key",
+            b"old bytes".to_vec(),
+            Some("text/plain"),
+            Some(16_000),
+        )
+        .await
+        .unwrap();
+    let (data, meta) = files(&storage, "key");
+    let paths = Paths {
+        data: data.clone(),
+        meta: meta.clone(),
+        now: 10_000,
+    };
+    let transaction = transaction_paths(&paths, "key", "999-1").unwrap();
+    write_atomic(&transaction.staged_data, b"replacement bytes").unwrap();
+    write_json(
+        &transaction.staged_meta,
+        &Sidecar {
+            key: "key".into(),
+            content_type: Some("application/octet-stream".into()),
+            expires_at_ms: Some(19_000),
+        },
+    )
+    .unwrap();
+    copy_atomic(&data, &transaction.backup_data).unwrap();
+    copy_atomic(&meta, &transaction.backup_meta).unwrap();
+    write_json(
+        &transaction.marker,
+        &BlobJournal {
+            key: "key".into(),
+            token: "999-1".into(),
+            staged_len: b"replacement bytes".len() as u64,
+            staged_sidecar: Sidecar {
+                key: "key".into(),
+                content_type: Some("application/octet-stream".into()),
+                expires_at_ms: Some(19_000),
+            },
+            had_data: true,
+            had_meta: true,
+            committed: false,
+        },
+    )
+    .unwrap();
+    copy_atomic(&transaction.staged_data, &data).unwrap();
+    copy_atomic(&transaction.staged_meta, &meta).unwrap();
+    // A prior recovery restored only the payload before crashing; the marker
+    // and backups remain so the reopened handle must finish rollback.
+    copy_atomic(&transaction.backup_data, &data).unwrap();
+
+    drop(blobs);
+    drop(storage);
+    let reopened = FileStorage::open_with_clock(dir.path(), Arc::new(|| 10_000)).unwrap();
+    let recovered = reopened
+        .for_scope(&Scope::local())
+        .unwrap()
+        .blobs()
+        .get_with_expiry("key")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.blob.bytes, b"old bytes");
+    assert_eq!(recovered.expires_at_ms, Some(16_000));
+    assert!(!transaction.marker.exists());
+}
+
+#[tokio::test]
+async fn reopened_storage_removes_an_uncommitted_new_blob_pair() {
+    let (dir, storage, blobs, _now) = open_driven();
+    let (data, meta) = files(&storage, "new-key");
+    let paths = Paths {
+        data: data.clone(),
+        meta: meta.clone(),
+        now: 1_000,
+    };
+    let transaction = transaction_paths(&paths, "new-key", "999-2").unwrap();
+    write_atomic(&transaction.staged_data, b"uncommitted").unwrap();
+    write_json(
+        &transaction.staged_meta,
+        &Sidecar {
+            key: "new-key".into(),
+            content_type: None,
+            expires_at_ms: None,
+        },
+    )
+    .unwrap();
+    write_json(
+        &transaction.marker,
+        &BlobJournal {
+            key: "new-key".into(),
+            token: "999-2".into(),
+            staged_len: b"uncommitted".len() as u64,
+            staged_sidecar: Sidecar {
+                key: "new-key".into(),
+                content_type: None,
+                expires_at_ms: None,
+            },
+            had_data: false,
+            had_meta: false,
+            committed: false,
+        },
+    )
+    .unwrap();
+    copy_atomic(&transaction.staged_data, &data).unwrap();
+
+    drop(blobs);
+    drop(storage);
+    let reopened = FileStorage::open_with_clock(dir.path(), Arc::new(|| 10_000)).unwrap();
+    let recovered_storage = reopened.for_scope(&Scope::local()).unwrap();
+    assert!(recovered_storage.blobs().list("").await.unwrap().is_empty());
+    assert!(
+        recovered_storage
+            .blobs()
+            .get("new-key")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!meta.exists());
+    assert!(!data.exists());
+    assert!(!transaction.marker.exists());
+}
+
+#[tokio::test]
+async fn reopened_storage_finishes_a_committed_blob_pair_before_cleanup() {
+    let (dir, storage, blobs, _now) = open_driven();
+    blobs
+        .put_until(
+            "key",
+            b"old bytes".to_vec(),
+            Some("text/plain"),
+            Some(16_000),
+        )
+        .await
+        .unwrap();
+    let (data, meta) = files(&storage, "key");
+    let paths = Paths {
+        data: data.clone(),
+        meta: meta.clone(),
+        now: 10_000,
+    };
+    let transaction = transaction_paths(&paths, "key", "999-3").unwrap();
+    write_atomic(&transaction.staged_data, b"committed bytes").unwrap();
+    write_json(
+        &transaction.staged_meta,
+        &Sidecar {
+            key: "key".into(),
+            content_type: Some("application/octet-stream".into()),
+            expires_at_ms: Some(19_000),
+        },
+    )
+    .unwrap();
+    copy_atomic(&data, &transaction.backup_data).unwrap();
+    copy_atomic(&meta, &transaction.backup_meta).unwrap();
+    write_json(
+        &transaction.marker,
+        &BlobJournal {
+            key: "key".into(),
+            token: "999-3".into(),
+            staged_len: b"committed bytes".len() as u64,
+            staged_sidecar: Sidecar {
+                key: "key".into(),
+                content_type: Some("application/octet-stream".into()),
+                expires_at_ms: Some(19_000),
+            },
+            had_data: true,
+            had_meta: true,
+            committed: true,
+        },
+    )
+    .unwrap();
+    copy_atomic(&transaction.staged_data, &data).unwrap();
+    copy_atomic(&transaction.staged_meta, &meta).unwrap();
+
+    drop(blobs);
+    drop(storage);
+    let reopened = FileStorage::open_with_clock(dir.path(), Arc::new(|| 10_000)).unwrap();
+    let recovered = reopened
+        .for_scope(&Scope::local())
+        .unwrap()
+        .blobs()
+        .get_with_expiry("key")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.blob.bytes, b"committed bytes");
+    assert_eq!(recovered.expires_at_ms, Some(19_000));
+    assert!(!transaction.marker.exists());
+}
+
+#[tokio::test]
+async fn scope_recovery_removes_only_orphaned_blob_transaction_artifacts() {
+    let (_dir, storage, blobs, _now) = open_driven();
+    blobs
+        .put("ordinary", b"preserve me".to_vec(), Some("text/plain"))
+        .await
+        .unwrap();
+    let (data, meta) = files(&storage, "orphan");
+    let paths = Paths {
+        data,
+        meta,
+        now: 1_000,
+    };
+    let transaction = transaction_paths(&paths, "orphan", "999-1").unwrap();
+    write_atomic(&transaction.staged_data, b"orphan staged data").unwrap();
+    write_json(
+        &transaction.staged_meta,
+        &Sidecar {
+            key: "orphan".into(),
+            content_type: None,
+            expires_at_ms: None,
+        },
+    )
+    .unwrap();
+    write_atomic(&transaction.backup_data, b"orphan old data").unwrap();
+    write_json(
+        &transaction.backup_meta,
+        &Sidecar {
+            key: "orphan".into(),
+            content_type: None,
+            expires_at_ms: None,
+        },
+    )
+    .unwrap();
+
+    let listed: Vec<_> = blobs
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|meta| meta.key)
+        .collect();
+    assert_eq!(listed, ["ordinary"]);
+    assert!(!transaction.staged_data.exists());
+    assert!(!transaction.staged_meta.exists());
+    assert!(!transaction.backup_data.exists());
+    assert!(!transaction.backup_meta.exists());
+    assert_eq!(
+        blobs.get("ordinary").await.unwrap().unwrap().bytes,
+        b"preserve me"
+    );
+}
+
+#[tokio::test]
+async fn failed_scope_recovery_keeps_artifacts_referenced_by_its_journal() {
+    let (_dir, storage, blobs, _now) = open_driven();
+    blobs
+        .put_until("keep", b"old pair".to_vec(), None, Some(6_000))
+        .await
+        .unwrap();
+    let (data, meta) = files(&storage, "keep");
+    let paths = Paths {
+        data: data.clone(),
+        meta: meta.clone(),
+        now: 1_000,
+    };
+    let transaction = transaction_paths(&paths, "keep", "999-2").unwrap();
+    write_atomic(&transaction.staged_data, b"replacement").unwrap();
+    let staged_sidecar = Sidecar {
+        key: "keep".into(),
+        content_type: Some("application/octet-stream".into()),
+        expires_at_ms: Some(9_000),
+    };
+    write_json(&transaction.staged_meta, &staged_sidecar).unwrap();
+    write_json(
+        &transaction.marker,
+        &BlobJournal {
+            key: "keep".into(),
+            token: "999-2".into(),
+            staged_len: b"replacement".len() as u64,
+            staged_sidecar,
+            had_data: true,
+            had_meta: true,
+            committed: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(blobs.list("").await.unwrap_err().kind(), ErrorKind::Backend);
+    assert!(transaction.marker.exists());
+    assert!(transaction.staged_data.exists());
+    assert!(transaction.staged_meta.exists());
+    assert_eq!(std::fs::read(data).unwrap(), b"old pair");
+}

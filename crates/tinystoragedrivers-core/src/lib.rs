@@ -86,8 +86,9 @@ pub use backend::{
     ScopedStorage, StorageBackend,
 };
 pub use blob::{
-    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, MAX_BLOB_KEY_LEN, TreeEntry, TreeFile,
-    clamp_range, validate_blob_key, validate_user_blob_key, validate_user_blob_prefix,
+    Blob, BlobMeta, BlobReader, BlobSource, BlobSourceStream, BlobStore, BlobStream,
+    MAX_BLOB_KEY_LEN, TreeEntry, TreeFile, clamp_range, validate_blob_key, validate_user_blob_key,
+    validate_user_blob_prefix,
 };
 #[cfg(any(test, feature = "blocking"))]
 pub use blocking::Blocking;

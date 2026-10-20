@@ -52,9 +52,9 @@ cap over streams, and watch signals). Port gaps landed: keyset cursors
 (already in the drivers), FTS ranking and reindex semantics, TTL visibility,
 claim/CAS run-ledger patterns (all pinned by conformance), the blob tree view,
 and the Vector decision (stays in TinyMemory). The S3 driver and its CI lane
-already exist. Still to come under tinyhumansai/openhuman#7635: a `TinyBus`
-proxy transport and the module-side server registration, native blob expiry,
-and the release.
+already exist. Native blob expiry and its versioned migration wire selectors
+are implemented in this TSD source; the remaining epic work includes a
+`TinyBus` proxy transport, module-side server registration and release.
 
 ## Current step
 

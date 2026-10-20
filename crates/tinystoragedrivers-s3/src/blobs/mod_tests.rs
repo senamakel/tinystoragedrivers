@@ -588,6 +588,43 @@ async fn blob_lifetimes_follow_the_clock_and_are_stored_as_object_metadata() {
     );
 }
 
+#[tokio::test]
+async fn absolute_expiry_is_preserved_by_buffered_and_streaming_reads() {
+    use std::sync::atomic::Ordering;
+
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let blobs = handle(objects, "absolute-expiry").with_clock(driven_absolute_clock);
+    DRIVEN_ABSOLUTE.store(5_000, Ordering::SeqCst);
+    blobs
+        .put_until("k", vec![1, 2, 3], Some("a/b"), Some(5_100))
+        .await
+        .unwrap();
+    let source = blobs.get_with_expiry("k").await.unwrap().unwrap();
+    assert_eq!(source.blob.bytes, [1, 2, 3]);
+    assert_eq!(source.expires_at_ms, Some(5_100));
+    let mut source = blobs.get_stream_with_expiry("k").await.unwrap().unwrap();
+    assert_eq!(source.expires_at_ms, Some(5_100));
+    let mut bytes = Vec::new();
+    source.reader.read_to_end(&mut bytes).await.unwrap();
+    assert_eq!(bytes, [1, 2, 3]);
+
+    DRIVEN_ABSOLUTE.store(5_099, Ordering::SeqCst);
+    assert!(blobs.get("k").await.unwrap().is_some());
+    DRIVEN_ABSOLUTE.store(5_100, Ordering::SeqCst);
+    assert!(blobs.get_with_expiry("k").await.unwrap().is_none());
+    blobs
+        .put_until("already-expired", vec![4], None, Some(5_100))
+        .await
+        .unwrap();
+    assert!(blobs.get("already-expired").await.unwrap().is_none());
+}
+
+static DRIVEN_ABSOLUTE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn driven_absolute_clock() -> u64 {
+    DRIVEN_ABSOLUTE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 static DRIVEN_B: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn driven_clock_b() -> u64 {

@@ -42,6 +42,28 @@ fn a_file_lapses_at_its_expiry_instant() {
 }
 
 #[test]
+fn source_expiry_is_absent_only_for_known_permanent_files() {
+    assert_eq!(blob_expiry(&file(1, "permanent", None)).unwrap(), None);
+    assert_eq!(
+        blob_expiry(&file(2, "expiring", Some(6_000))).unwrap(),
+        Some(6_000)
+    );
+    let malformed: FilesCollectionDocument = mongodb::bson::from_document(doc! {
+        "_id": 3,
+        "length": 1_i64,
+        "chunkSize": 4,
+        "uploadDate": DateTime::now(),
+        "filename": "malformed",
+        "metadata": {"_scope": "s", "expires_at_ms": "unknown"},
+    })
+    .unwrap();
+    assert_eq!(
+        blob_expiry(&malformed).unwrap_err().kind(),
+        tinystoragedrivers_core::ErrorKind::Serialization
+    );
+}
+
+#[test]
 fn a_lapsed_newest_file_hides_its_key_and_older_versions() {
     // `files` orders by key, then newest first.
     let files = vec![

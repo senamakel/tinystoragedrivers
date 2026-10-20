@@ -14,9 +14,9 @@ use object_store::{
     aws::AmazonS3Builder, path::Path, signer::Signer,
 };
 use tinystoragedrivers_core::{
-    Blob, BlobBackend, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability,
-    ErrorKind, Result, Scope, ScopeGeneration, StorageError, async_trait, validate_blob_key,
-    validate_user_blob_key, validate_user_blob_prefix,
+    Blob, BlobBackend, BlobMeta, BlobReader, BlobSource, BlobSourceStream, BlobStore, BlobStream,
+    Capabilities, Capability, ErrorKind, Result, Scope, ScopeGeneration, StorageError, async_trait,
+    validate_blob_key, validate_user_blob_key, validate_user_blob_prefix,
 };
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
@@ -502,6 +502,20 @@ fn lapsed(attributes: &Attributes, now: u64) -> bool {
         .is_some_and(|at| at <= now)
 }
 
+/// Read an expiry attribute strictly so malformed metadata is never treated as
+/// a permanent object during a schema migration.
+fn expiry(attributes: &Attributes) -> Result<Option<u64>> {
+    attributes
+        .get(&Attribute::Metadata(EXPIRES_AT.into()))
+        .map(|value| {
+            value
+                .as_ref()
+                .parse::<u64>()
+                .map_err(|_| StorageError::serialization("malformed blob expiry metadata"))
+        })
+        .transpose()
+}
+
 fn metadata(key: &str, len: u64, attributes: &Attributes) -> BlobMeta {
     BlobMeta {
         key: key.to_owned(),
@@ -566,15 +580,28 @@ impl S3Blobs {
     async fn store(
         &self,
         key: &str,
-        mut reader: BlobReader,
+        reader: BlobReader,
         len: u64,
         content_type: Option<&str>,
         ttl: Option<Duration>,
     ) -> Result<BlobMeta> {
-        let path = self.path(key)?;
+        self.path(key)?;
         let expires_at = ttl.map(|ttl| {
             (self.clock)().saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
         });
+        self.store_until(key, reader, len, content_type, expires_at)
+            .await
+    }
+
+    async fn store_until(
+        &self,
+        key: &str,
+        mut reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        expires_at: Option<u64>,
+    ) -> Result<BlobMeta> {
+        let path = self.path(key)?;
         let attrs = attributes(content_type, expires_at);
         if len <= PART_SIZE as u64 {
             let mut data = Vec::new();
@@ -706,6 +733,24 @@ impl BlobStore for S3Blobs {
         .await
     }
 
+    async fn put_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        let len = bytes.len() as u64;
+        self.store_until(
+            key,
+            Box::pin(std::io::Cursor::new(bytes)),
+            len,
+            content_type,
+            expires_at_ms,
+        )
+        .await
+    }
+
     async fn put_stream(
         &self,
         key: &str,
@@ -727,39 +772,70 @@ impl BlobStore for S3Blobs {
         self.store(key, reader, len, content_type, Some(ttl)).await
     }
 
+    async fn put_stream_until(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.store_until(key, reader, len, content_type, expires_at_ms)
+            .await
+    }
+
     async fn get_stream(&self, key: &str) -> Result<Option<BlobStream>> {
+        Ok(self
+            .get_stream_with_expiry(key)
+            .await?
+            .map(|source| BlobStream {
+                meta: source.meta,
+                reader: source.reader,
+            }))
+    }
+
+    async fn get_stream_with_expiry(&self, key: &str) -> Result<Option<BlobSourceStream>> {
         let path = self.path(key)?;
         let result = match self.store.get(&path).await {
             Ok(result) => result,
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(error) => return Err(map_error(error)),
         };
-        if lapsed(&result.attributes, (self.clock)()) {
+        let expires_at_ms = expiry(&result.attributes)?;
+        if expires_at_ms.is_some_and(|at| at <= (self.clock)()) {
             return Ok(None);
         }
         let meta = metadata(key, result.meta.size, &result.attributes);
         let stream = result
             .into_stream()
             .map_err(|_| std::io::Error::other("object store read failed"));
-        Ok(Some(BlobStream {
+        Ok(Some(BlobSourceStream {
             meta,
+            expires_at_ms,
             reader: Box::pin(StreamReader::new(stream)),
         }))
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
-        let Some(mut stream) = self.get_stream(key).await? else {
+        Ok(self.get_with_expiry(key).await?.map(|source| source.blob))
+    }
+
+    async fn get_with_expiry(&self, key: &str) -> Result<Option<BlobSource>> {
+        let Some(mut source) = self.get_stream_with_expiry(key).await? else {
             return Ok(None);
         };
         let mut bytes = Vec::new();
-        stream
+        source
             .reader
             .read_to_end(&mut bytes)
             .await
             .map_err(|_| StorageError::backend("object store read failed"))?;
-        Ok(Some(Blob {
-            meta: stream.meta,
-            bytes,
+        Ok(Some(BlobSource {
+            blob: Blob {
+                meta: source.meta,
+                bytes,
+            },
+            expires_at_ms: source.expires_at_ms,
         }))
     }
 

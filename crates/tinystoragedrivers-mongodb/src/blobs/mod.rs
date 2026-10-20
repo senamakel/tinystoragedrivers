@@ -31,8 +31,9 @@ use mongodb::bson::{Bson, Document, doc};
 use mongodb::gridfs::{FilesCollectionDocument, GridFsBucket};
 use mongodb::options::{FindOptions, GridFsBucketOptions, IndexOptions};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, StorageError, clamp_range,
-    is_reserved_blob_key, validate_blob_key, validate_user_blob_key, validate_user_blob_prefix,
+    Blob, BlobMeta, BlobSource, BlobStore, Capabilities, Capability, Result, Scope, StorageError,
+    clamp_range, is_reserved_blob_key, validate_blob_key, validate_user_blob_key,
+    validate_user_blob_prefix,
 };
 
 use crate::backend::Shared;
@@ -113,6 +114,22 @@ pub(crate) fn blob_meta(file: &FilesCollectionDocument) -> BlobMeta {
             .as_ref()
             .and_then(|metadata| metadata.get_str("content_type").ok())
             .map(str::to_owned),
+    }
+}
+
+/// Read the stored expiry strictly: malformed metadata is not permanence.
+fn blob_expiry(file: &FilesCollectionDocument) -> Result<Option<u64>> {
+    let Some(metadata) = file.metadata.as_ref() else {
+        return Ok(None);
+    };
+    match metadata.get(EXPIRES_AT) {
+        None => Ok(None),
+        Some(Bson::Int64(at)) => u64::try_from(*at)
+            .map(Some)
+            .map_err(|_| StorageError::serialization("blob expiry is outside the supported range")),
+        Some(_) => Err(StorageError::serialization(
+            "malformed blob expiry metadata",
+        )),
     }
 }
 
@@ -388,6 +405,31 @@ impl MongoBlobs {
                 .now()
                 .saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
         });
+        self.store_at(key, bytes, content_type, expires_at_ms).await
+    }
+
+    async fn store_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        if expires_at_ms.is_some_and(|at| i64::try_from(at).is_err()) {
+            return Err(StorageError::invalid_input(
+                "blob expiry exceeds the mongodb timestamp range",
+            ));
+        }
+        self.store_at(key, bytes, content_type, expires_at_ms).await
+    }
+
+    async fn store_at(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
         crate::purge::admitted!(self, {
             self.check_key(key)?;
             self.writable("a blob put")?;
@@ -455,6 +497,17 @@ impl BlobStore for MongoBlobs {
         self.store(key, bytes, content_type, Some(ttl)).await
     }
 
+    async fn put_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.store_until(key, bytes, content_type, expires_at_ms)
+            .await
+    }
+
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         crate::purge::admitted!(self, {
             self.check_key(key)?;
@@ -469,6 +522,29 @@ impl BlobStore for MongoBlobs {
                         bytes,
                     }));
                 }
+            }
+            Err(replaced_too_often())
+        })
+    }
+
+    async fn get_with_expiry(&self, key: &str) -> Result<Option<BlobSource>> {
+        crate::purge::admitted!(self, {
+            self.check_key(key)?;
+            let bucket = self.bucket().await?;
+            for _ in 0..READ_ATTEMPTS {
+                let Some(file) = self.newest(&bucket, key).await? else {
+                    return Ok(None);
+                };
+                let Some(bytes) = Self::download(&bucket, &file).await? else {
+                    continue;
+                };
+                return Ok(Some(BlobSource {
+                    blob: Blob {
+                        meta: blob_meta(&file),
+                        bytes,
+                    },
+                    expires_at_ms: blob_expiry(&file)?,
+                }));
             }
             Err(replaced_too_often())
         })

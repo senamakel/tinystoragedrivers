@@ -1060,3 +1060,44 @@ async fn unknown_external_operation_failure_is_not_hidden_or_marked_done() {
         1
     );
 }
+
+#[tokio::test]
+async fn external_blob_transform_preserves_the_source_deadline() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    let now = std::sync::Arc::new(AtomicU64::new(1_000));
+    let clock = std::sync::Arc::clone(&now);
+    let backend =
+        MemoryStorage::with_clock(std::sync::Arc::new(move || clock.load(Ordering::SeqCst)));
+    let registry = Registry::compose_with_declarations([], [all_external()]).unwrap();
+    registry.prepare(&backend).await.unwrap();
+    let storage = backend.for_scope(&Scope::local()).unwrap();
+    storage
+        .blobs()
+        .put_expiring(
+            "old/a",
+            vec![0, 255, 42],
+            Some("application/octet-stream"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    now.store(4_000, Ordering::SeqCst);
+
+    registry
+        .migrate_with_executor(&storage, &MigrateOptions::new(), &Echo)
+        .await
+        .unwrap();
+    let moved = storage.blobs().get("shop/files/a").await.unwrap().unwrap();
+    assert_eq!(moved.bytes, [0, 255, 42]);
+    assert_eq!(
+        moved.meta.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+
+    now.store(5_999, Ordering::SeqCst);
+    assert!(storage.blobs().get("shop/files/a").await.unwrap().is_some());
+    now.store(6_000, Ordering::SeqCst);
+    assert!(storage.blobs().get("shop/files/a").await.unwrap().is_none());
+}

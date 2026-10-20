@@ -1,7 +1,8 @@
 //! The blob step runner over the memory driver.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use crate::schema::{MigrateOptions, Owner, Registry, Schema, ScopeClass, Step};
 use crate::{ErrorKind, MemoryStorage, Scope, ScopedStorage, StorageBackend, StorageError};
@@ -10,6 +11,15 @@ const LEGACY: &str = "tinyjuice_ccr/";
 
 fn storage() -> ScopedStorage {
     MemoryStorage::new().for_scope(&Scope::local()).unwrap()
+}
+
+fn driven_storage() -> (MemoryStorage, Arc<AtomicU64>) {
+    let now = Arc::new(AtomicU64::new(1_000));
+    let clock = Arc::clone(&now);
+    (
+        MemoryStorage::with_clock(Arc::new(move || clock.load(Ordering::SeqCst))),
+        now,
+    )
 }
 
 fn registry(step: Step) -> Registry {
@@ -204,4 +214,181 @@ async fn refuses_a_target_outside_the_prefix_and_keeps_the_source() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert_eq!(storage.blobs().list(LEGACY).await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn renaming_an_expiring_blob_preserves_its_original_deadline() {
+    let (backend, now) = driven_storage();
+    let storage = backend.for_scope(&Scope::local()).unwrap();
+    storage
+        .blobs()
+        .put_expiring(
+            "tinyjuice_ccr/a",
+            b"abc".to_vec(),
+            Some("text/plain"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    now.store(4_000, Ordering::SeqCst);
+
+    registry(rename_step(Arc::new(AtomicUsize::new(0)), None))
+        .migrate(&storage, &MigrateOptions::new())
+        .await
+        .unwrap();
+    let moved = storage.blobs().get("juice/ccr/a").await.unwrap().unwrap();
+    assert_eq!(moved.bytes, b"cba");
+    assert_eq!(moved.meta.content_type.as_deref(), Some("text/plain"));
+
+    now.store(5_999, Ordering::SeqCst);
+    assert!(storage.blobs().get("juice/ccr/a").await.unwrap().is_some());
+    now.store(6_000, Ordering::SeqCst);
+    assert!(storage.blobs().get("juice/ccr/a").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn does_not_resurrect_a_source_that_expires_during_its_transform() {
+    let (backend, now) = driven_storage();
+    let storage = backend.for_scope(&Scope::local()).unwrap();
+    storage
+        .blobs()
+        .put_expiring(
+            "tinyjuice_ccr/a",
+            b"abc".to_vec(),
+            Some("text/plain"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    now.store(4_000, Ordering::SeqCst);
+
+    let transform_clock = Arc::clone(&now);
+    let step = Step::blobs(
+        "ccr_v2",
+        "juice/ccr/",
+        1,
+        2,
+        move |key, content_type, bytes| {
+            transform_clock.store(6_000, Ordering::SeqCst);
+            let token = key.strip_prefix(LEGACY).unwrap();
+            Ok(Some((format!("juice/ccr/{token}"), content_type, bytes)))
+        },
+    )
+    .source_prefix(LEGACY);
+    registry(step)
+        .migrate(&storage, &MigrateOptions::new())
+        .await
+        .unwrap();
+
+    assert!(storage.blobs().get("juice/ccr/a").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_expired_source_is_not_migrated_or_resurrected() {
+    let (backend, now) = driven_storage();
+    let storage = backend.for_scope(&Scope::local()).unwrap();
+    storage
+        .blobs()
+        .put_expiring(
+            "tinyjuice_ccr/a",
+            b"abc".to_vec(),
+            Some("text/plain"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    now.store(6_000, Ordering::SeqCst);
+
+    registry(rename_step(Arc::new(AtomicUsize::new(0)), None))
+        .migrate(&storage, &MigrateOptions::new())
+        .await
+        .unwrap();
+
+    assert!(storage.blobs().get("juice/ccr/a").await.unwrap().is_none());
+    assert!(storage.blobs().list("juice/ccr/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_identical_resume_target_with_the_same_deadline_is_accepted() {
+    let (backend, now) = driven_storage();
+    let storage = backend.for_scope(&Scope::local()).unwrap();
+    storage
+        .blobs()
+        .put_expiring(
+            "tinyjuice_ccr/a",
+            b"abc".to_vec(),
+            Some("text/plain"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    now.store(4_000, Ordering::SeqCst);
+    // This models a previous attempt that wrote identical bytes with the same
+    // absolute deadline (4,000 + 2,000 = 6,000).
+    storage
+        .blobs()
+        .put_expiring(
+            "juice/ccr/a",
+            b"cba".to_vec(),
+            Some("text/plain"),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+
+    registry(rename_step(Arc::new(AtomicUsize::new(0)), None))
+        .migrate(&storage, &MigrateOptions::new())
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .blobs()
+            .get("tinyjuice_ccr/a")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    now.store(5_999, Ordering::SeqCst);
+    assert!(storage.blobs().get("juice/ccr/a").await.unwrap().is_some());
+    now.store(6_000, Ordering::SeqCst);
+    assert!(storage.blobs().get("juice/ccr/a").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn identical_target_bytes_with_a_different_deadline_conflict_and_keep_source() {
+    let (backend, now) = driven_storage();
+    let storage = backend.for_scope(&Scope::local()).unwrap();
+    storage
+        .blobs()
+        .put_expiring(
+            "tinyjuice_ccr/a",
+            b"abc".to_vec(),
+            Some("text/plain"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    now.store(4_000, Ordering::SeqCst);
+    // Same transformed content, but this target is permanent rather than
+    // expiring at the source's original deadline of 6,000.
+    storage
+        .blobs()
+        .put("juice/ccr/a", b"cba".to_vec(), Some("text/plain"))
+        .await
+        .unwrap();
+
+    let error = registry(rename_step(Arc::new(AtomicUsize::new(0)), None))
+        .migrate(&storage, &MigrateOptions::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert!(
+        storage
+            .blobs()
+            .get("tinyjuice_ccr/a")
+            .await
+            .unwrap()
+            .is_some(),
+        "a lifetime mismatch must not delete the live source"
+    );
 }

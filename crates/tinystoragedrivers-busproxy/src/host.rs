@@ -14,7 +14,8 @@ use tinybus::{
     StreamRef, WeakConnection,
 };
 use tinystoragedrivers_bus::{
-    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind, WatchChanged,
+    BlobKeyRequest, BlobStreamHead, BlobStreamHeadWithExpiry, PutBlobStreamRequest,
+    PutBlobStreamUntilRequest, StorageFailure, StorageKind, WatchChanged,
 };
 use tinystoragedrivers_client::{Admission, Object};
 use tokio::runtime::Handle;
@@ -108,6 +109,33 @@ pub trait StorageEndpoint: Send + Sync + 'static {
         sender: Option<&BusName>,
         request: BlobKeyRequest,
     ) -> Result<Option<(BlobStreamHead, BlobReader)>, HostFailure>;
+
+    /// `Blobs.PutStreamUntil`: store a body with the exact absolute expiry.
+    /// The default keeps existing endpoints compatible and fails closed.
+    async fn put_blob_stream_until(
+        &self,
+        sender: Option<&BusName>,
+        head: PutBlobStreamUntilRequest,
+        body: BlobReader,
+    ) -> Result<Value, HostFailure> {
+        let _ = (sender, head, body);
+        Err(HostFailure::Storage(StorageFailure {
+            kind: StorageKind::Unsupported,
+        }))
+    }
+
+    /// `Blobs.GetStreamWithExpiry`: return a body stream and absolute expiry
+    /// from the same source snapshot. The default fails closed.
+    async fn get_blob_stream_with_expiry(
+        &self,
+        sender: Option<&BusName>,
+        request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHeadWithExpiry, BlobReader)>, HostFailure> {
+        let _ = (sender, request);
+        Err(HostFailure::Storage(StorageFailure {
+            kind: StorageKind::Unsupported,
+        }))
+    }
 
     /// The watch invalidations of `sender`'s binding. The host calls this just
     /// before it forwards a caller's first `WatchOpen`, so no signal is missed;
@@ -270,6 +298,35 @@ impl ObjectService {
             .await
     }
 
+    /// `PutStreamUntil`: `[PutBlobStreamUntilRequest, StreamRef]`.
+    async fn put_stream_until(
+        &self,
+        args: Value,
+        sender: Option<&BusName>,
+    ) -> Result<Value, HostFailure> {
+        let mut items = arguments(args)?;
+        let (Some(stream), Some(head), None) = (items.pop(), items.pop(), items.pop()) else {
+            return Err(invalid());
+        };
+        let head: PutBlobStreamUntilRequest =
+            serde_json::from_value(head).map_err(|_| invalid())?;
+        let stream: StreamRef = serde_json::from_value(stream).map_err(|_| invalid())?;
+        if stream.len.is_some_and(|declared| declared != head.len) {
+            return Err(invalid());
+        }
+        let Some(caller) = sender else {
+            return Err(HostFailure::Denied("unauthenticated-caller"));
+        };
+        let reader = self
+            .connection()?
+            .accept_stream_from(&stream, caller)
+            .map_err(|_| invalid())?;
+        self.shared
+            .endpoint
+            .put_blob_stream_until(sender, head, blob_reader(reader))
+            .await
+    }
+
     /// `GetStream`: `[BlobKeyRequest]`, replying `null` or `[head, StreamRef]`
     /// with the body streamed to the caller.
     async fn get_stream(
@@ -310,6 +367,44 @@ impl ObjectService {
         });
         Ok(reply)
     }
+
+    /// `GetStreamWithExpiry`: `[BlobKeyRequest]`, replying `null` or
+    /// `[BlobStreamHeadWithExpiry, StreamRef]` with the body streamed to the
+    /// caller.
+    async fn get_stream_with_expiry(
+        &self,
+        args: Value,
+        sender: Option<&BusName>,
+    ) -> Result<Value, HostFailure> {
+        let request: BlobKeyRequest =
+            serde_json::from_value(request_of(args)?).map_err(|_| invalid())?;
+        let Some(caller) = sender else {
+            return Err(HostFailure::Denied("unauthenticated-caller"));
+        };
+        let found = self
+            .shared
+            .endpoint
+            .get_blob_stream_with_expiry(sender, request)
+            .await?;
+        let Some((head, mut body)) = found else {
+            return Ok(Value::Null);
+        };
+        let len = head.meta.len;
+        let writer = self
+            .connection()?
+            .open_stream(caller, StreamDescriptor::with_len(len))
+            .await
+            .map_err(|_| {
+                HostFailure::Storage(StorageFailure {
+                    kind: StorageKind::Unavailable,
+                })
+            })?;
+        let reply = json!([wire_value(&head), wire_value(&writer.stream_ref())]);
+        tokio::spawn(async move {
+            let _ = pump(writer, &mut body, len).await;
+        });
+        Ok(reply)
+    }
 }
 
 #[async_trait]
@@ -344,7 +439,11 @@ impl Interface for ObjectService {
         let selector = member.as_str();
         let outcome = match (self.object, selector) {
             (Object::Blobs, "PutStream") => self.put_stream(args, sender).await,
+            (Object::Blobs, "PutStreamUntil") => self.put_stream_until(args, sender).await,
             (Object::Blobs, "GetStream") => self.get_stream(args, sender).await,
+            (Object::Blobs, "GetStreamWithExpiry") => {
+                self.get_stream_with_expiry(args, sender).await
+            }
             _ => {
                 if let (Object::Documents, "WatchOpen", Some(sender)) =
                     (self.object, selector, sender)

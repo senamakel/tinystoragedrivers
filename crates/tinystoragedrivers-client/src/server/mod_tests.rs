@@ -2,14 +2,78 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use tinystoragedrivers_bus::StorageKind;
-use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
+use tinystoragedrivers_bus::{MAX_INLINE_BLOB_BYTES, StorageKind};
+use tinystoragedrivers_core::{
+    Blob, BlobMeta, BlobSource, BlobStore, MemoryStorage, Result as StorageResult, Scope,
+    ScopedStorage, StorageBackend,
+};
 
 use super::*;
 
 fn server() -> StorageServer {
     let backend = MemoryStorage::new();
     StorageServer::new(backend.for_scope(&Scope::local()).unwrap())
+}
+
+#[derive(Debug)]
+struct OversizedBlobHead {
+    expiry_reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl BlobStore for OversizedBlobHead {
+    async fn put(
+        &self,
+        _key: &str,
+        _bytes: Vec<u8>,
+        _content_type: Option<&str>,
+    ) -> StorageResult<BlobMeta> {
+        unreachable!("the read-budget test never writes")
+    }
+
+    async fn get(&self, _key: &str) -> StorageResult<Option<Blob>> {
+        unreachable!("the read-budget test must reject from its head")
+    }
+
+    async fn get_range(
+        &self,
+        _key: &str,
+        _range: std::ops::Range<u64>,
+    ) -> StorageResult<Option<Vec<u8>>> {
+        unreachable!("the read-budget test never reads ranges")
+    }
+
+    async fn delete(&self, _key: &str) -> StorageResult<bool> {
+        unreachable!("the read-budget test never deletes")
+    }
+
+    async fn list(&self, _prefix: &str) -> StorageResult<Vec<BlobMeta>> {
+        unreachable!("the read-budget test never lists")
+    }
+
+    async fn get_with_expiry(&self, key: &str) -> StorageResult<Option<BlobSource>> {
+        self.expiry_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some(BlobSource {
+            blob: Blob {
+                meta: BlobMeta {
+                    key: key.to_owned(),
+                    len: (MAX_INLINE_BLOB_BYTES + 1) as u64,
+                    content_type: None,
+                },
+                bytes: vec![0; MAX_INLINE_BLOB_BYTES + 1],
+            },
+            expires_at_ms: None,
+        }))
+    }
+
+    async fn head(&self, key: &str) -> StorageResult<Option<BlobMeta>> {
+        Ok(Some(BlobMeta {
+            key: key.to_owned(),
+            len: (MAX_INLINE_BLOB_BYTES + 1) as u64,
+            content_type: None,
+        }))
+    }
 }
 
 async fn kind(server: &StorageServer, object: &str, selector: &str, request: Value) -> StorageKind {
@@ -50,6 +114,64 @@ async fn a_forged_scope_or_grant_field_is_a_decode_failure() {
             "{forged}"
         );
     }
+}
+
+#[tokio::test]
+async fn expiry_blob_selectors_reject_authority_and_legacy_ttl_fields() {
+    let server = server();
+    assert_eq!(
+        kind(
+            &server,
+            "Blobs",
+            "GetWithExpiry",
+            json!({"key":"k","scope":"other"})
+        )
+        .await,
+        StorageKind::InvalidInput
+    );
+    assert_eq!(
+        kind(
+            &server,
+            "Blobs",
+            "PutUntil",
+            json!({"key":"k","bytes":[],"expires_at_ms":6000,"ttl_ms":10})
+        )
+        .await,
+        StorageKind::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn oversized_expiry_reads_are_rejected_before_materializing_blob_bytes() {
+    let backend = MemoryStorage::new();
+    let base = backend.for_scope(&Scope::local()).unwrap();
+    let expiry_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let storage = ScopedStorage::new(
+        Scope::local(),
+        "memory",
+        Arc::clone(base.documents()),
+        Arc::clone(base.streams()),
+        Arc::new(OversizedBlobHead {
+            expiry_reads: Arc::clone(&expiry_reads),
+        }),
+    );
+    let server = StorageServer::new(storage);
+
+    assert_eq!(
+        kind(
+            &server,
+            "Blobs",
+            "GetWithExpiry",
+            json!({"key":"too-large"}),
+        )
+        .await,
+        StorageKind::InvalidInput
+    );
+    assert_eq!(
+        expiry_reads.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the size limit must be checked before the full-body expiry read"
+    );
 }
 
 #[tokio::test]

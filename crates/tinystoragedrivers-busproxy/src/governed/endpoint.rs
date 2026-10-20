@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tinybus::{BusName, Connection, module::ModuleId};
 use tinystoragedrivers_bus::{
-    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind,
-    WatchChanged, WatchNotice, WatchReset,
+    BlobKeyRequest, BlobStreamHead, BlobStreamHeadWithExpiry, PutBlobStreamRequest,
+    PutBlobStreamUntilRequest, StorageFailure, StorageKind, WatchChanged, WatchNotice, WatchReset,
 };
 use tinystoragedrivers_client::{Admission, Object, StorageServer};
 use tinystoragedrivers_core::BlobReader;
@@ -1461,6 +1461,37 @@ where
         serde_json::to_value(value).map_err(|_| invalid())
     }
 
+    async fn put_blob_stream_until(
+        &self,
+        sender: Option<&BusName>,
+        head: PutBlobStreamUntilRequest,
+        body: BlobReader,
+    ) -> Result<Value, HostFailure> {
+        if head.len > self.limits.max_blob_bytes {
+            self.audit(Object::Blobs, "denied", true);
+            return Err(invalid());
+        }
+        let (module, resolved, ticket) = self.resolved(sender).await?;
+        let request = serde_json::to_value(&head).map_err(|_| invalid())?;
+        let plan = resolved
+            .grant
+            .authorize(Object::Blobs, "PutStreamUntil", &request)
+            .map_err(map_denied)?;
+        let write = matches!(plan, crate::Plan::Forward { write: true, .. });
+        if write {
+            guarded(self.environment.admit_write(&self.context, &module)).await??;
+        }
+        self.publish_server(sender, &resolved, ticket).await?;
+        let value = guarded(resolved.server.put_blob_stream_until(head, body)).await??;
+        self.revalidate_after_backend(
+            sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
+            &resolved,
+            ticket,
+        )
+        .await?;
+        serde_json::to_value(value).map_err(|_| invalid())
+    }
+
     async fn get_blob_stream(
         &self,
         sender: Option<&BusName>,
@@ -1474,6 +1505,35 @@ where
             .map_err(map_denied)?;
         self.publish_server(sender, &resolved, ticket).await?;
         let found = guarded(resolved.server.get_blob_stream(request)).await??;
+        self.revalidate_after_backend(
+            sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
+            &resolved,
+            ticket,
+        )
+        .await?;
+        if found
+            .as_ref()
+            .is_some_and(|(head, _)| head.meta.len > self.limits.max_blob_bytes)
+        {
+            self.audit(Object::Blobs, "denied", false);
+            return Err(invalid());
+        }
+        Ok(found)
+    }
+
+    async fn get_blob_stream_with_expiry(
+        &self,
+        sender: Option<&BusName>,
+        request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHeadWithExpiry, BlobReader)>, HostFailure> {
+        let (_module, resolved, ticket) = self.resolved(sender).await?;
+        let value = serde_json::to_value(&request).map_err(|_| invalid())?;
+        resolved
+            .grant
+            .authorize(Object::Blobs, "GetStreamWithExpiry", &value)
+            .map_err(map_denied)?;
+        self.publish_server(sender, &resolved, ticket).await?;
+        let found = guarded(resolved.server.get_blob_stream_with_expiry(request)).await??;
         self.revalidate_after_backend(
             sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
             &resolved,

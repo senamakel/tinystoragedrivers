@@ -93,9 +93,14 @@ Versioned JSON **objects** in named collections.
   - `Ttl`: documents whose `ttl_field` (epoch ms) has passed read as absent.
     Expired documents are invisible to `get`, `query`, `count`, `claim` and
     `search` alike, and rewriting a document with a later expiry keeps it
-    alive. Blobs have no expiry of their own: a cache of blobs keeps one
-    document per blob in a TTL collection and removes the blob when the
-    document expires (`delete_tree` removes a whole prefix).
+    alive.
+  - `BlobTtl`: `put_expiring` and `put_stream_expiring` start a relative blob
+    lifetime at write time. Blob schema migration uses the additive
+    `BlobStore::get_with_expiry` and `put_until` methods to retain the stored
+    absolute deadline instead of restarting a relative TTL. A missing deadline
+    means known permanence; defaults for drivers that cannot inspect or retain
+    expiry refuse as unsupported rather than treating it as permanent. No
+    absolute-expiry capability is advertised separately.
   - `RecordMetadata`: every document carries `Versioned::meta`
     (`Meta { schema, created_ms, updated_ms, expires_ms }`), described in
     [`schema-v2.md`](schema-v2.md). `put_with(.., WriteOptions { schema,

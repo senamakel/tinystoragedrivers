@@ -470,6 +470,24 @@ async fn fenced_composite_blobs_allow_reads_but_refuse_every_mutation() {
     );
     assert!(blobs.get_stream("existing").await.unwrap().is_some());
     assert_eq!(
+        blobs
+            .get_with_expiry("existing")
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at_ms,
+        None
+    );
+    assert_eq!(
+        blobs
+            .get_stream_with_expiry("existing")
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at_ms,
+        None
+    );
+    assert_eq!(
         blobs.get_range("existing", 1..3).await.unwrap().unwrap(),
         [2, 3]
     );
@@ -492,12 +510,26 @@ async fn fenced_composite_blobs_allow_reads_but_refuse_every_mutation() {
             .await
             .unwrap_err(),
         blobs
+            .put_until("existing", vec![9], None, Some(u64::MAX))
+            .await
+            .unwrap_err(),
+        blobs
             .put_stream_expiring(
                 "existing",
                 Box::pin(std::io::Cursor::new(vec![9])),
                 1,
                 None,
                 Duration::from_secs(60),
+            )
+            .await
+            .unwrap_err(),
+        blobs
+            .put_stream_until(
+                "existing",
+                Box::pin(std::io::Cursor::new(vec![9])),
+                1,
+                None,
+                Some(u64::MAX),
             )
             .await
             .unwrap_err(),
@@ -550,7 +582,39 @@ async fn generation_admitted_blobs_forward_every_blob_operation() {
             Duration::from_secs(5),
         )
         .await;
+    store
+        .put_until("absolute", vec![8], None, None)
+        .await
+        .unwrap();
+    store
+        .put_stream_until(
+            "absolute-stream",
+            Box::pin(std::io::Cursor::new(vec![9])),
+            1,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     assert!(store.get("plain").await.unwrap().is_some());
+    assert_eq!(
+        store
+            .get_with_expiry("absolute")
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at_ms,
+        None
+    );
+    assert_eq!(
+        store
+            .get_stream_with_expiry("absolute-stream")
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at_ms,
+        None
+    );
     assert!(store.get_stream("plain").await.unwrap().is_some());
     assert_eq!(store.get_range("plain", 0..1).await.unwrap().unwrap(), [1]);
     assert!(store.head("plain").await.unwrap().is_some());

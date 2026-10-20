@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// Blobs object name under [`crate::STORAGE_INTERFACE`].
 pub const BLOBS_OBJECT: &str = "Blobs";
 /// Finite selector set; servers must reject every other selector.
-pub const BLOBS_SELECTORS: [&str; 11] = [
+pub const BLOBS_SELECTORS: [&str; 15] = [
     "Put",
     "PutStream",
     "Get",
@@ -31,6 +31,10 @@ pub const BLOBS_SELECTORS: [&str; 11] = [
     "PresignGet",
     "PresignPut",
     "Capabilities",
+    "GetWithExpiry",
+    "GetStreamWithExpiry",
+    "PutUntil",
+    "PutStreamUntil",
 ];
 
 /// Return whether `selector` belongs to the fixed Blobs selector set.
@@ -84,6 +88,38 @@ pub struct PutBlobStreamRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
 }
+/// Absolute-deadline inline write. This is additive to `PutBlobRequest`, whose
+/// `ttl_ms` retains its relative-lifetime meaning.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutBlobUntilRequest {
+    /// Blob key.
+    pub key: String,
+    /// Bytes, at most `MAX_INLINE_BLOB_BYTES`.
+    pub bytes: Vec<u8>,
+    /// MIME type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// Absolute Unix epoch millisecond deadline; absent means permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+}
+/// Absolute-deadline streamed write metadata; the body is a `TinyBus` stream
+/// argument of exactly `len` bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutBlobStreamUntilRequest {
+    /// Blob key.
+    pub key: String,
+    /// Declared body length.
+    pub len: u64,
+    /// MIME type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// Absolute Unix epoch millisecond deadline; absent means permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+}
 /// Request addressing one blob (`Get`, `GetStream`, `Head`, `Delete`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,12 +136,35 @@ pub struct BlobBody {
     /// Bytes; a blob over `MAX_INLINE_BLOB_BYTES` must use `GetStream`.
     pub bytes: Vec<u8>,
 }
+/// Inline read result with the source's absolute expiry from the same read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobWithExpiry {
+    /// Metadata.
+    pub meta: BlobInfo,
+    /// Absolute Unix epoch millisecond deadline; absent means permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    /// Bytes; an oversized blob must use `GetStreamWithExpiry`.
+    pub bytes: Vec<u8>,
+}
 /// Streamed read reply metadata; the body follows as a `TinyBus` stream.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlobStreamHead {
     /// Metadata.
     pub meta: BlobInfo,
+}
+/// Streamed read metadata with the source's absolute expiry from the same
+/// backend snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobStreamHeadWithExpiry {
+    /// Metadata.
+    pub meta: BlobInfo,
+    /// Absolute Unix epoch millisecond deadline; absent means permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
 }
 /// Ranged inline read of `[start, end)`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

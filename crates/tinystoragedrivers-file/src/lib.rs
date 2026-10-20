@@ -7,7 +7,7 @@
 //!   (a deleted document leaves a `{"id", "version"}` tombstone so its id never
 //!   reuses a version);
 //! - streams: one JSONL file each, a `{"offset", "value"}` line per entry;
-//! - blobs: the raw bytes, with a small JSON sidecar for the content type.
+//! - blobs: the raw bytes, with a small JSON sidecar for content type and expiry.
 //!
 //! It is meant for desktop JSON stores (artifacts, costs, app state, turn
 //! states, thread transcripts) that are small per user and want to stay

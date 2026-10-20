@@ -1,9 +1,10 @@
 //! Every port operation, once, through the client and a loopback server.
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::json;
-use tinystoragedrivers_bus::{StorageFailure, StorageKind};
+use tinystoragedrivers_bus::{BlobKeyRequest, MAX_INLINE_BLOB_BYTES, StorageFailure, StorageKind};
 use tinystoragedrivers_core::{
     Capability, CollectionSpec, Cursor, ErrorKind, ExpectedDocument, Filter, MemoryStorage,
     Precondition, Query, ReadCheck, Scope, ScopedStorage, Sort, StorageBackend, WriteOp,
@@ -339,6 +340,74 @@ async fn blobs_cover_every_operation() {
         .unwrap_err();
     assert_eq!(bad_ttl.kind(), ErrorKind::InvalidInput);
     assert_ne!(format!("{bus:?}"), "");
+}
+
+#[tokio::test]
+async fn bus_blobs_preserve_absolute_expiry_over_inline_and_stream_transfers() {
+    let now = Arc::new(AtomicU64::new(1_000));
+    let clock = Arc::clone(&now);
+    let backend = MemoryStorage::with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let scoped = backend.for_scope(&Scope::local()).unwrap();
+    scoped
+        .blobs()
+        .put_expiring(
+            "small",
+            b"bytes".to_vec(),
+            Some("text/plain"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let server = Arc::new(StorageServer::new(scoped));
+    let transport = Arc::new(Loopback::new(server, Admission::Private));
+    let bus = BusStorage::connect(transport.clone(), Scope::local())
+        .await
+        .unwrap();
+    let blobs = bus.for_scope(&Scope::local()).unwrap().blobs().clone();
+
+    let source = blobs.get_with_expiry("small").await.unwrap().unwrap();
+    assert_eq!(source.blob.bytes, b"bytes");
+    assert_eq!(source.expires_at_ms, Some(6_000));
+    let inline = transport
+        .get_blob_with_expiry(BlobKeyRequest {
+            key: "small".into(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(inline.expires_at_ms, Some(6_000));
+    blobs
+        .put_until("inline-write", b"exact".to_vec(), None, Some(6_000))
+        .await
+        .unwrap();
+    assert_eq!(
+        blobs
+            .get_with_expiry("inline-write")
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at_ms,
+        Some(6_000)
+    );
+
+    let large_bytes = vec![9; MAX_INLINE_BLOB_BYTES + 1];
+    blobs
+        .put_until(
+            "large",
+            large_bytes.clone(),
+            Some("application/octet-stream"),
+            Some(6_000),
+        )
+        .await
+        .unwrap();
+    let large = blobs.get_with_expiry("large").await.unwrap().unwrap();
+    assert_eq!(large.blob.bytes, large_bytes);
+    assert_eq!(large.expires_at_ms, Some(6_000));
+    assert!(transport.streamed_bytes() > 0);
+
+    now.store(6_000, Ordering::SeqCst);
+    assert!(blobs.get_with_expiry("small").await.unwrap().is_none());
+    assert!(blobs.get_with_expiry("large").await.unwrap().is_none());
 }
 
 #[test]

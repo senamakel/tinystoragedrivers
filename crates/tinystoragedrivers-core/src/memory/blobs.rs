@@ -80,6 +80,33 @@ impl MemoryBlobs {
         content_type: Option<&str>,
         ttl: Option<Duration>,
     ) -> Result<BlobMeta> {
+        self.store_with_expiry(key, bytes, content_type, move |this| {
+            ttl.map(|ttl| {
+                (this.clock)().saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+            })
+        })
+    }
+
+    fn store_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.store_with_expiry(key, bytes, content_type, |_| expires_at_ms)
+    }
+
+    fn store_with_expiry<F>(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expiry: F,
+    ) -> Result<BlobMeta>
+    where
+        F: FnOnce(&Self) -> Option<u64>,
+    {
         validate_user_blob_key(key)?;
         let meta = BlobMeta {
             key: key.to_owned(),
@@ -89,9 +116,7 @@ impl MemoryBlobs {
         let mut state = self.db.lock()?;
         self.guard(&state)?;
         // A plain write never reads the clock; only a lifetime needs it.
-        let expires_at = ttl.map(|ttl| {
-            (self.clock)().saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
-        });
+        let expires_at = expiry(self);
         if let Some(at) = expires_at {
             // Expired blobs are invisible; drop them where a lifetime write
             // already reads the clock so they do not accumulate.
@@ -157,6 +182,16 @@ impl BlobStore for MemoryBlobs {
         self.store(key, bytes, content_type, Some(ttl))
     }
 
+    async fn put_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.store_until(key, bytes, content_type, expires_at_ms)
+    }
+
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         validate_user_blob_key(key)?;
         let state = self.db.lock()?;
@@ -165,6 +200,21 @@ impl BlobStore for MemoryBlobs {
             meta: meta.clone(),
             bytes: bytes.clone(),
         }))
+    }
+
+    async fn get_with_expiry(&self, key: &str) -> Result<Option<crate::BlobSource>> {
+        validate_user_blob_key(key)?;
+        let state = self.db.lock()?;
+        state.check_generation(self.scope.as_str(), self.generation)?;
+        Ok(self
+            .live(&state, key)
+            .map(|(meta, bytes, expires_at_ms)| crate::BlobSource {
+                blob: Blob {
+                    meta: meta.clone(),
+                    bytes: bytes.clone(),
+                },
+                expires_at_ms: *expires_at_ms,
+            }))
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
