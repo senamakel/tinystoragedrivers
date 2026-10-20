@@ -17,9 +17,13 @@ use tinystoragedrivers_busproxy::{
 };
 use tinystoragedrivers_client::StorageServer;
 use tinystoragedrivers_core::{
-    MemoryStorage, Precondition, Scope, StorageBackend,
+    MemoryStorage, Precondition, Scope, StorageBackend, StorageError,
     schema::Registry,
-    schema::delivery::{MigrationDeliveryClient, MigrationExchangeRequest, MigrationTransport},
+    schema::delivery::{
+        ExchangeErrorKind, MigrationDeliveryClient, MigrationExchangeReply,
+        MigrationExchangeRequest, MigrationPayload, MigrationTransport, StreamPlanRequest,
+        TransformFuture,
+    },
 };
 use tinystoragedrivers_secrets::{DerivedKeys, DocumentSecrets};
 
@@ -199,7 +203,7 @@ async fn load_compiled_fixture(
 
 async fn verify_selected_controller_protocol(
     fixture: &CompiledFixture,
-    module: &MigrationModuleClient,
+    module: MigrationModuleClient,
 ) -> TestResult<()> {
     let raw_schema = fixture
         .controller
@@ -267,7 +271,73 @@ async fn verify_selected_controller_protocol(
             .is_err(),
         "the client must not forward owner-mismatched requests"
     );
+
+    verify_unsupported_stream_transform(module).await?;
     Ok(())
+}
+
+async fn verify_unsupported_stream_transform(module: MigrationModuleClient) -> TestResult<()> {
+    let replies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let transport = Arc::new(RecordingMigrationTransport {
+        module,
+        replies: Arc::clone(&replies),
+    });
+    let delivery = MigrationDeliveryClient::new(transport);
+    let unsupported = delivery
+        .transform(
+            "fixture",
+            MigrationPayload::StreamPlan(StreamPlanRequest {
+                operation: "fixture-stream-v1".to_owned(),
+                version: 1,
+                source: "legacy/events".to_owned(),
+            }),
+        )
+        .await;
+    let Err(unsupported) = unsupported else {
+        return Err(test_failure(
+            "unsupported stream transform unexpectedly succeeded",
+        ));
+    };
+    assert_eq!(
+        unsupported.kind(),
+        tinystoragedrivers_core::ErrorKind::InvalidInput
+    );
+    assert!(
+        replies
+            .lock()
+            .map_err(|_| test_failure("exchange reply recorder poisoned"))?
+            .iter()
+            .any(|reply| matches!(
+                reply,
+                MigrationExchangeReply::Error {
+                    kind: ExchangeErrorKind::TransformFailed
+                }
+            )),
+        "the selected confidential Exchange must return the sanitized transform failure"
+    );
+    Ok(())
+}
+
+struct RecordingMigrationTransport {
+    module: MigrationModuleClient,
+    replies: Arc<std::sync::Mutex<Vec<MigrationExchangeReply>>>,
+}
+
+impl MigrationTransport for RecordingMigrationTransport {
+    fn exchange<'a>(
+        &'a self,
+        owner: &'a str,
+        request: MigrationExchangeRequest,
+    ) -> TransformFuture<'a, MigrationExchangeReply> {
+        Box::pin(async move {
+            let reply = self.module.exchange(owner, request).await?;
+            self.replies
+                .lock()
+                .map_err(|_| StorageError::unavailable("migration reply recorder poisoned"))?
+                .push(reply.clone());
+            Ok(reply)
+        })
+    }
 }
 
 async fn migrate_fixture_record(module: MigrationModuleClient) -> TestResult<()> {
@@ -373,7 +443,8 @@ async fn compiled_owner_migrates_before_storage_lease_and_rejects_other_senders(
         .map(PathBuf::from)
         .ok_or_else(|| test_failure("TSD_MIGRATION_TEST_MODULE is not set"))?;
     let (fixture, module) = load_compiled_fixture(&source).await?;
-    verify_selected_controller_protocol(&fixture, &module).await?;
+    verify_selected_controller_protocol(&fixture, module).await?;
+    let module = MigrationModuleClient::discover(&fixture.controller, &fixture.module_peer).await?;
     migrate_fixture_record(module).await?;
     let outsider_migration = verify_other_senders_denied(&fixture).await?;
 
