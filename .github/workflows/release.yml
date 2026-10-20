@@ -14,7 +14,8 @@ on:
           - current
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  # The temporary epic release and main release share one immutable tag space.
+  group: release-main
   cancel-in-progress: false
 
 permissions:
@@ -28,12 +29,14 @@ env:
 jobs:
   prepare:
     name: Prepare release
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/epic/8056-modules-wiring' }}
     runs-on: ubuntu-latest
     env:
       # The MongoDB driver's `live_*` tests run against this server, and the
       # coverage gate counts them, exactly as in CI.
       TSD_MONGO_URL: mongodb://localhost:27017/tsd_test?directConnection=true
+      # The RabbitMQ driver's `live_*` tests are also included in coverage.
+      TSD_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/%2f
     outputs:
       crate_name: ${{ steps.version.outputs.crate_name }}
       next_version: ${{ steps.version.outputs.next_version }}
@@ -59,6 +62,9 @@ jobs:
       - name: Start a MongoDB replica set
         run: .github/scripts/start-mongo-replset.sh 27017
 
+      - name: Start RabbitMQ
+        run: .github/scripts/start-rabbitmq.sh 5672
+
       - name: Test release version and proof lockfile updates
         run: python3 .github/scripts/release_version_tests.py
 
@@ -73,6 +79,9 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+
+      - name: Install native Linux syscall observation
+        run: sudo apt-get install --yes strace
 
       - name: Require 90% line coverage in every source file
         run: .github/scripts/check-file-coverage.sh 90 target/coverage.json

@@ -1,6 +1,7 @@
 """Exercise release lockfiles with real offline Cargo resolution and Git staging."""
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -153,6 +154,152 @@ class ReleaseLocks(unittest.TestCase):
         self.assertFalse((self.root / new_lock).exists())
         self.assertEqual((self.root / "unrelated.txt").read_bytes(), unrelated)
         self.assertEqual(self.run_command("git", "diff", "--cached", "--name-only").stdout, "")
+
+
+class ReleaseWorkflowAdmission(unittest.TestCase):
+    workflow = ROOT / ".github/workflows/release.yml"
+
+    def test_release_concurrency_group_serializes_main_and_epic_runs(self):
+        text = self.workflow.read_text()
+        concurrency = re.search(r"(?ms)^concurrency:\n(.*?)(?=^permissions:\n)", text)
+        self.assertIsNotNone(concurrency, "release workflow must declare concurrency")
+        group = re.search(r"(?m)^  group: (.+)$", concurrency.group(1))
+        cancel = re.search(r"(?m)^  cancel-in-progress: (.+)$", concurrency.group(1))
+        self.assertIsNotNone(group, "release workflow must declare its concurrency group")
+        self.assertIsNotNone(cancel, "release workflow must declare cancellation behavior")
+
+        def group_for_ref(ref):
+            return group.group(1).replace("${{ github.ref_name }}", ref)
+
+        self.assertEqual(group_for_ref("main"), group_for_ref("epic/8056-modules-wiring"))
+        self.assertEqual(group_for_ref("main"), "release-main")
+        self.assertEqual(cancel.group(1), "false")
+
+    def test_offline_git_tag_collision_leaves_the_losing_branch_bumped(self):
+        text = self.workflow.read_text()
+        branch_push = 'git push origin "HEAD:${GITHUB_REF_NAME}"'
+        tag_push = 'git push origin "${RELEASE_TAG}"'
+        self.assertIn(branch_push, text)
+        self.assertIn(tag_push, text)
+        self.assertLess(text.index(branch_push), text.index(tag_push))
+
+        def git(cwd, *args, check=True):
+            result = subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if check:
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    f"git {args!r} failed:\n{result.stdout}\n{result.stderr}",
+                )
+            return result
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            remote.mkdir()
+            seed.mkdir()
+            git(remote, "init", "--bare", "--initial-branch=main")
+            git(seed, "init", "--initial-branch=main")
+            git(seed, "config", "user.name", "Release fixture")
+            git(seed, "config", "user.email", "release-fixture@example.invalid")
+            (seed / "Cargo.toml").write_text(
+                '[workspace.package]\nversion = "1.7.0"\n'
+            )
+            git(seed, "add", "Cargo.toml")
+            git(seed, "commit", "-m", "Initial 1.7.0")
+            git(seed, "remote", "add", "origin", str(remote))
+            git(seed, "push", "origin", "HEAD:refs/heads/main")
+            epic_branch = "epic/8056-modules-wiring"
+            git(seed, "checkout", "-b", epic_branch)
+            (seed / "epic.txt").write_text("epic-only source\n")
+            git(seed, "add", "epic.txt")
+            git(seed, "commit", "-m", "Epic-only source")
+            git(seed, "push", "origin", f"HEAD:refs/heads/{epic_branch}")
+
+            jobs = {}
+            commits = {}
+            for branch, name in [("main", "main-job"), (epic_branch, "epic-job")]:
+                clone = root / name
+                git(root, "clone", "--branch", branch, str(remote), str(clone))
+                git(clone, "config", "user.name", "Release fixture")
+                git(clone, "config", "user.email", "release-fixture@example.invalid")
+                manifest = clone / "Cargo.toml"
+                manifest.write_text(manifest.read_text().replace('1.7.0', '1.8.0'))
+                git(clone, "add", "Cargo.toml")
+                git(clone, "commit", "-m", "Release v1.8.0")
+                commits[branch] = git(clone, "rev-parse", "HEAD").stdout.strip()
+                git(clone, "push", "origin", f"HEAD:refs/heads/{branch}")
+                git(clone, "tag", "-a", "v1.8.0", "-m", "Release v1.8.0")
+                jobs[branch] = clone
+
+            git(jobs["main"], "push", "origin", "refs/tags/v1.8.0")
+            losing_tag = git(
+                jobs[epic_branch], "push", "origin", "refs/tags/v1.8.0", check=False
+            )
+            self.assertNotEqual(losing_tag.returncode, 0)
+
+            self.assertEqual(
+                git(remote, "rev-parse", "refs/heads/main").stdout.strip(),
+                commits["main"],
+            )
+            self.assertEqual(
+                git(remote, "rev-parse", f"refs/heads/{epic_branch}").stdout.strip(),
+                commits[epic_branch],
+            )
+            tag_commit = git(remote, "rev-parse", "refs/tags/v1.8.0^{commit}").stdout.strip()
+            self.assertEqual(tag_commit, commits["main"])
+            self.assertNotEqual(tag_commit, commits[epic_branch])
+
+    def test_release_prepare_admits_only_main_and_the_exact_epic_branch(self):
+        text = self.workflow.read_text()
+        prepare = re.search(r"(?ms)^  prepare:\n(.*?)(?=^  github-release:\n)", text)
+        self.assertIsNotNone(prepare, "release prepare job must exist")
+        condition = re.search(r"(?m)^    if: \$\{\{ (.+) \}\}$", prepare.group(1))
+        self.assertIsNotNone(condition, "release prepare job must have a ref guard")
+        expression = condition.group(1)
+        expected = (
+            "github.ref == 'refs/heads/main' || "
+            "github.ref == 'refs/heads/epic/8056-modules-wiring'"
+        )
+        self.assertEqual(expression, expected)
+
+        admitted_refs = set(re.findall(r"github\.ref == '([^']+)'", expression))
+        self.assertEqual(
+            admitted_refs,
+            {"refs/heads/main", "refs/heads/epic/8056-modules-wiring"},
+        )
+        self.assertTrue(all(ref in admitted_refs for ref in [
+            "refs/heads/main",
+            "refs/heads/epic/8056-modules-wiring",
+        ]))
+        self.assertFalse(any(ref in admitted_refs for ref in [
+            "refs/heads/epic-8056-tsd-release18",
+            "refs/heads/epic/8056-other",
+            "refs/tags/v1.8.0",
+        ]))
+
+    def test_release_coverage_starts_rabbitmq_before_running_the_full_profile(self):
+        text = self.workflow.read_text()
+        rabbit_url = "TSD_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/%2f"
+        rabbit_start = "run: .github/scripts/start-rabbitmq.sh 5672"
+        coverage = "run: .github/scripts/check-file-coverage.sh 90 target/coverage.json"
+        self.assertTrue(rabbit_url in text, "release coverage requires the RabbitMQ URL")
+        self.assertTrue(rabbit_start in text, "release coverage must start RabbitMQ")
+        self.assertLess(text.index(rabbit_start), text.index(coverage))
+
+    def test_release_installs_strace_before_native_coverage_proofs(self):
+        text = self.workflow.read_text()
+        strace_install = "run: sudo apt-get install --yes strace"
+        coverage = "run: .github/scripts/check-file-coverage.sh 90 target/coverage.json"
+        self.assertTrue(strace_install in text, "native coverage requires strace")
+        self.assertLess(text.index(strace_install), text.index(coverage))
 
 
 if __name__ == "__main__":
