@@ -16,7 +16,7 @@ source_root="${workspace_root}crates/"
 python3 .github/scripts/test_file_coverage_policy.py
 python3 .github/scripts/test_governed_cdylib_coverage.py
 python3 .github/scripts/test_migration_cdylib_llvm_cov.py
-python3 .github/scripts/test_migration_cdylib_llvm_cov.py
+python3 .github/scripts/test_migration_cdylib_marker_handoff.py
 
 cargo llvm-cov \
   --locked \
@@ -38,7 +38,7 @@ python3 .github/scripts/native_profile_tests.py
 python3 .github/scripts/check-native-io-fault.py
 python3 .github/scripts/check-native-key-race.py
 python3 .github/scripts/check-native-secret-service.py --coverage
-module_cdylib="$(cat target/migration-module-cdylib-path.txt)"
+module_cdylib="$(python3 .github/scripts/migration_cdylib_path.py "$(pwd -P)")"
 # The adapter executes inside a loaded cdylib, so its counters are in a separate
 # LLVM object. Keep cargo llvm-cov's complete workspace object list and append
 # this instrumented module when exporting the final unmodified coverage report.
