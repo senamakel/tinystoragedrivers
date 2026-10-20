@@ -5,7 +5,10 @@ use futures_util::TryStreamExt;
 use mongodb::event::{EventHandler, command::CommandEvent};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tinystoragedrivers_core::{CollectionSpec, ErrorKind, Filter, Precondition};
+use tinystoragedrivers_core::{
+    BackendBlobs, Capability, CollectionSpec, CompositeStorage, ErrorKind, Filter, MemoryStorage,
+    Precondition, Scope, StorageBackend,
+};
 
 fn fixture_prefix() -> String {
     format!(
@@ -23,6 +26,68 @@ async fn configured_fixture(url: &str) -> (MongoStorage, String) {
     assert_eq!(root.shared.db.name(), database);
     let prefix = fixture_prefix();
     (root.fixture_named(&prefix).unwrap(), prefix)
+}
+
+#[tokio::test]
+async fn live_atomic_write_option_capability_tracks_transaction_support() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, _) = configured_fixture(&url).await;
+    let documents = storage
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    let backend_capabilities = storage.capabilities();
+    let document_capabilities = documents.capabilities();
+    assert!(backend_capabilities.contains(Capability::Transactions));
+    for capability in [
+        Capability::Transactions,
+        Capability::ValidatedBatch,
+        Capability::AtomicWriteOptions,
+    ] {
+        assert_eq!(
+            backend_capabilities.contains(capability),
+            document_capabilities.contains(capability),
+            "MongoStorage and its scoped DocumentStore must agree about {capability}"
+        );
+    }
+    assert!(backend_capabilities.contains(Capability::AtomicWriteOptions));
+
+    let composite = CompositeStorage::new(
+        Arc::new(storage.clone()),
+        Arc::new(BackendBlobs::new(Arc::new(MemoryStorage::new()))),
+    );
+    assert!(
+        composite
+            .capabilities()
+            .contains(Capability::AtomicWriteOptions)
+    );
+
+    let without_transactions = storage.without_transactions();
+    let no_transaction_documents = without_transactions
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    for capabilities in [
+        without_transactions.capabilities(),
+        no_transaction_documents.capabilities(),
+    ] {
+        assert!(!capabilities.contains(Capability::Transactions));
+        assert!(!capabilities.contains(Capability::ValidatedBatch));
+        assert!(!capabilities.contains(Capability::AtomicWriteOptions));
+    }
+    let without_transactions_composite = CompositeStorage::new(
+        Arc::new(without_transactions),
+        Arc::new(BackendBlobs::new(Arc::new(MemoryStorage::new()))),
+    );
+    assert!(
+        !without_transactions_composite
+            .capabilities()
+            .contains(Capability::AtomicWriteOptions)
+    );
 }
 
 fn default_fixture(fixture: &MongoStorage) -> MongoStorage {

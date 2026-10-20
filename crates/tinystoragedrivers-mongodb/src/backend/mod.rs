@@ -474,6 +474,7 @@ impl StorageBackend for MongoStorage {
         };
         if self.shared.transactions {
             base.with(Capability::Transactions)
+                .with(Capability::AtomicWriteOptions)
                 .with(Capability::ValidatedBatch)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
