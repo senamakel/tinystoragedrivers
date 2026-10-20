@@ -429,3 +429,7 @@ async fn a_released_and_rebound_caller_gets_a_fresh_signal_forwarder() {
     let second = epoch_of().expect("the rebound caller is forwarded");
     assert_ne!(first, second, "the stale forwarder is replaced on rebind");
 }
+
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;

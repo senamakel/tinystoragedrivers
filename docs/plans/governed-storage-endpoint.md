@@ -343,7 +343,7 @@ integration test under `tests/`.
 
 ### 6. Close streams, watches, and runtime-hop races
 
-Files: `busproxy/src/host.rs`, focused host/stream/watch tests, governed cache
+Files: `busproxy/src/host/mod.rs`, focused host/stream/watch tests, governed cache
 tests, and TinyBus attachment tests.
 
 - Port the proven hop/relay behavior with context captured before each hop.
