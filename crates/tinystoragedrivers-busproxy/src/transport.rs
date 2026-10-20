@@ -16,7 +16,9 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::StorageDescriptor;
-use crate::chunks::{PumpError, blob_reader, pump};
+use crate::chunks::{
+    PumpError, PumpFailureState, PumpSourceFailure, blob_reader, pump_with_failure_state,
+};
 use crate::names::OBJECT_ROOT;
 use crate::names::{
     ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, host_name, interface, member, wire_value,
@@ -56,6 +58,43 @@ pub struct BusTransport {
     timeout: Duration,
     signals: broadcast::Sender<WatchChanged>,
     forwarder: JoinHandle<()>,
+}
+
+/// Join the host call and body pump while preserving a classified local reader
+/// error over the backend response induced by aborting that stream. If the host
+/// fails before a local reader error is known, the other future is cancelled.
+async fn join_streamed_put<C, S>(
+    calling: C,
+    sending: S,
+    failure_state: PumpFailureState,
+) -> Result<Value, WireError>
+where
+    C: std::future::Future<Output = Result<Value, WireError>>,
+    S: std::future::Future<Output = Result<(), WireError>>,
+{
+    match tokio::try_join!(calling, sending) {
+        Ok((reply, ())) => Ok(reply),
+        Err(error) => Err(failure_state
+            .known()
+            .map_or(error, source_failure_wire_error)),
+    }
+}
+
+fn source_failure_wire_error(failure: PumpSourceFailure) -> WireError {
+    match failure {
+        PumpSourceFailure::Short => WireError::Storage(StorageFailure {
+            kind: StorageKind::InvalidInput,
+        }),
+        PumpSourceFailure::Source => WireError::Transport("blob source failed".into()),
+    }
+}
+
+fn pump_wire_error(error: PumpError) -> WireError {
+    match error {
+        PumpError::Short => source_failure_wire_error(PumpSourceFailure::Short),
+        PumpError::Source => source_failure_wire_error(PumpSourceFailure::Source),
+        PumpError::Bus(error) => transport_error(&error),
+    }
 }
 
 impl fmt::Debug for BusTransport {
@@ -352,19 +391,14 @@ impl StorageTransport for BusTransport {
             "PutStream",
             json!([wire_value(&head), wire_value(&writer.stream_ref())]),
         )?;
-        // The call and the body are in flight together: the host reads the
-        // stream while it answers, so neither can wait for the other. The
-        // first failure wins and the other half is dropped.
+        // The host reads the stream while this call is in flight, so neither
+        // the call nor the body can wait for the other to start.
+        let failure_state = PumpFailureState::default();
+        let send_failure_state = failure_state.clone();
         let sending = async {
-            pump(writer, &mut body, len)
+            pump_with_failure_state(writer, &mut body, len, &send_failure_state)
                 .await
-                .map_err(|error| match error {
-                    PumpError::Short => WireError::Storage(StorageFailure {
-                        kind: StorageKind::InvalidInput,
-                    }),
-                    PumpError::Source => WireError::Transport("blob source failed".into()),
-                    PumpError::Bus(error) => transport_error(&error),
-                })
+                .map_err(pump_wire_error)
         };
         let calling = async {
             self.connection
@@ -372,8 +406,7 @@ impl StorageTransport for BusTransport {
                 .await
                 .map_err(wire_error)
         };
-        let (reply, ()) = tokio::try_join!(calling, sending)?;
-        Ok(reply)
+        join_streamed_put(calling, sending, failure_state).await
     }
 
     async fn get_blob_stream(
@@ -419,16 +452,12 @@ impl StorageTransport for BusTransport {
             "PutStreamUntil",
             json!([wire_value(&head), wire_value(&writer.stream_ref())]),
         )?;
+        let failure_state = PumpFailureState::default();
+        let send_failure_state = failure_state.clone();
         let sending = async {
-            pump(writer, &mut body, len)
+            pump_with_failure_state(writer, &mut body, len, &send_failure_state)
                 .await
-                .map_err(|error| match error {
-                    PumpError::Short => WireError::Storage(StorageFailure {
-                        kind: StorageKind::InvalidInput,
-                    }),
-                    PumpError::Source => WireError::Transport("blob source failed".into()),
-                    PumpError::Bus(error) => transport_error(&error),
-                })
+                .map_err(pump_wire_error)
         };
         let calling = async {
             self.connection
@@ -436,8 +465,7 @@ impl StorageTransport for BusTransport {
                 .await
                 .map_err(wire_error)
         };
-        let (reply, ()) = tokio::try_join!(calling, sending)?;
-        Ok(reply)
+        join_streamed_put(calling, sending, failure_state).await
     }
 
     async fn get_blob_with_expiry(
