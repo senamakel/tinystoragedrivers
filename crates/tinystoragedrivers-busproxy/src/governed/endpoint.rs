@@ -21,6 +21,8 @@ use tokio::sync::{Semaphore, broadcast};
 use tokio::task::JoinHandle;
 
 use crate::host::{ServedLease, serve_lease_on, serve_on};
+#[cfg(feature = "test-stream-diagnostics")]
+use crate::test_support::{RegistrationShutdownProbe, RegistrationShutdownStage};
 use crate::{
     Denied, HostFailure, HostStorageContext, ServedStorage, StorageCall, StorageEndpoint,
     StorageGrant,
@@ -143,6 +145,8 @@ pub struct GovernedStorage<E, A, C> {
     max_leases: usize,
     max_concurrent_bindings: usize,
     legacy_endpoint: Option<Arc<dyn StorageEndpoint>>,
+    #[cfg(feature = "test-stream-diagnostics")]
+    shutdown_probe: Option<RegistrationShutdownProbe>,
     marker: std::marker::PhantomData<fn() -> C>,
 }
 
@@ -164,6 +168,8 @@ impl<E, A, C> Clone for GovernedStorage<E, A, C> {
             max_leases: self.max_leases,
             max_concurrent_bindings: self.max_concurrent_bindings,
             legacy_endpoint: self.legacy_endpoint.clone(),
+            #[cfg(feature = "test-stream-diagnostics")]
+            shutdown_probe: self.shutdown_probe.clone(),
             marker: std::marker::PhantomData,
         }
     }
@@ -226,6 +232,8 @@ where
             max_leases: 1024,
             max_concurrent_bindings: 64,
             legacy_endpoint: None,
+            #[cfg(feature = "test-stream-diagnostics")]
+            shutdown_probe: None,
             marker: std::marker::PhantomData,
         }
     }
@@ -235,6 +243,15 @@ where
     #[must_use]
     pub fn with_legacy_endpoint(mut self, endpoint: Arc<dyn StorageEndpoint>) -> Self {
         self.legacy_endpoint = Some(endpoint);
+        self
+    }
+
+    /// Attach a test-only content-free observer to this registration's shutdown.
+    #[cfg(feature = "test-stream-diagnostics")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_shutdown_probe(mut self, probe: RegistrationShutdownProbe) -> Self {
+        self.shutdown_probe = Some(probe);
         self
     }
 
@@ -268,6 +285,8 @@ where
             max_leases: self.max_leases,
             binding_slots: Arc::new(Semaphore::new(self.max_concurrent_bindings)),
             legacy_endpoint: self.legacy_endpoint.clone(),
+            #[cfg(feature = "test-stream-diagnostics")]
+            shutdown_probe: self.shutdown_probe.clone(),
             runtime,
         })
     }
@@ -282,6 +301,8 @@ struct RegistrationConfig<E, A> {
     max_leases: usize,
     binding_slots: Arc<Semaphore>,
     legacy_endpoint: Option<Arc<dyn StorageEndpoint>>,
+    #[cfg(feature = "test-stream-diagnostics")]
+    shutdown_probe: Option<RegistrationShutdownProbe>,
     runtime: Handle,
 }
 
@@ -303,6 +324,8 @@ pub struct StorageRegistration<E, A, C> {
     shutdown_lock: tokio::sync::Mutex<()>,
     legacy_endpoint: Option<Arc<dyn StorageEndpoint>>,
     legacy: Mutex<Option<ServedStorage>>,
+    #[cfg(feature = "test-stream-diagnostics")]
+    shutdown_probe: Option<RegistrationShutdownProbe>,
     runtime: Handle,
     marker: std::marker::PhantomData<fn() -> C>,
 }
@@ -339,6 +362,8 @@ where
             shutdown_lock: tokio::sync::Mutex::new(()),
             legacy_endpoint: config.legacy_endpoint,
             legacy: Mutex::new(None),
+            #[cfg(feature = "test-stream-diagnostics")]
+            shutdown_probe: config.shutdown_probe,
             runtime: config.runtime,
             marker: std::marker::PhantomData,
         }
@@ -610,14 +635,32 @@ where
             served.shutdown().await;
         }
         let legacy = self.legacy.lock().ok().and_then(|mut legacy| legacy.take());
-        if let Some(legacy) = legacy {
-            legacy.shutdown().await?;
-        }
-        let result = self.connection.close().await;
-        if result.is_ok() {
+        let legacy_result = if let Some(legacy) = legacy {
+            #[cfg(feature = "test-stream-diagnostics")]
+            self.probe_shutdown_stage(RegistrationShutdownStage::LegacyShutdownStarted);
+            let result = legacy.shutdown().await;
+            #[cfg(feature = "test-stream-diagnostics")]
+            self.probe_shutdown_stage(RegistrationShutdownStage::LegacyShutdownReturned);
+            result
+        } else {
+            Ok(())
+        };
+        #[cfg(feature = "test-stream-diagnostics")]
+        self.probe_shutdown_stage(RegistrationShutdownStage::ConnectionCloseStarted);
+        let close_result = self.connection.close().await;
+        #[cfg(feature = "test-stream-diagnostics")]
+        self.probe_shutdown_stage(RegistrationShutdownStage::ConnectionCloseReturned);
+        if close_result.is_ok() {
             self.cleanup_complete.store(true, Ordering::Release);
         }
-        result
+        legacy_result.and(close_result)
+    }
+
+    #[cfg(feature = "test-stream-diagnostics")]
+    fn probe_shutdown_stage(&self, stage: RegistrationShutdownStage) {
+        if let Some(probe) = &self.shutdown_probe {
+            let _ = probe.send(stage);
+        }
     }
 }
 
