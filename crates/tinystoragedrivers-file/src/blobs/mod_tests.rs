@@ -68,6 +68,10 @@ async fn a_sidecar_for_another_key_is_a_collision() {
         ErrorKind::Backend
     );
     assert_eq!(
+        blobs.get_with_expiry(&key).await.unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+    assert_eq!(
         blobs.put(&key, vec![], None).await.unwrap_err().kind(),
         ErrorKind::Backend
     );
