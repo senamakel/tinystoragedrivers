@@ -958,8 +958,8 @@ dependencies = [
 
 [[package]]
 name = "tinybus"
-version = "0.3.3"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=207a9a7df15e44fdba00a807d0f7eaf21904ba0e#207a9a7df15e44fdba00a807d0f7eaf21904ba0e"
+version = "0.3.7"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=2dc32b80efa58ed48bf2f40c721d1d018c8aeae1#2dc32b80efa58ed48bf2f40c721d1d018c8aeae1"
 dependencies = [
  "async-trait",
  "flate2",
@@ -981,8 +981,8 @@ dependencies = [
 
 [[package]]
 name = "tinybus-module"
-version = "0.3.3"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=207a9a7df15e44fdba00a807d0f7eaf21904ba0e#207a9a7df15e44fdba00a807d0f7eaf21904ba0e"
+version = "0.3.7"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=2dc32b80efa58ed48bf2f40c721d1d018c8aeae1#2dc32b80efa58ed48bf2f40c721d1d018c8aeae1"
 dependencies = [
  "async-trait",
  "serde",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-bus"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-busproxy"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-client"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-core"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-schema"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "async-trait",
  "atomicwrites",
@@ -1076,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-tinybus"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "async-trait",
  "serde",

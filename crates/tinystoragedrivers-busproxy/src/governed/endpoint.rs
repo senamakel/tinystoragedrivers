@@ -321,6 +321,7 @@ pub struct StorageRegistration<E, A, C> {
     leases: Arc<LeaseEntries>,
     closed: AtomicBool,
     cleanup_complete: AtomicBool,
+    setup_pending: AtomicBool,
     shutdown_lock: tokio::sync::Mutex<()>,
     legacy_endpoint: Option<Arc<dyn StorageEndpoint>>,
     legacy: Mutex<Option<ServedStorage>>,
@@ -359,6 +360,7 @@ where
             leases: Arc::new(Mutex::new(HashMap::new())),
             closed: AtomicBool::new(false),
             cleanup_complete: AtomicBool::new(false),
+            setup_pending: AtomicBool::new(false),
             shutdown_lock: tokio::sync::Mutex::new(()),
             legacy_endpoint: config.legacy_endpoint,
             legacy: Mutex::new(None),
@@ -386,6 +388,40 @@ where
             .map_err(|_| HostFailure::Denied("host-unavailable"))?;
         *legacy = Some(served);
         Ok(())
+    }
+
+    /// Mark this registration as owned by an in-progress linked module setup.
+    ///
+    /// If setup is canceled, TinyBus owns closing the module connection and
+    /// dropping this registration must only withdraw local services.
+    #[doc(hidden)]
+    pub fn mark_setup_pending(&self) {
+        self.setup_pending.store(true, Ordering::Release);
+    }
+
+    /// Mark that setup transferred this registration to its external owner.
+    #[doc(hidden)]
+    pub fn mark_setup_complete(&self) {
+        self.setup_pending.store(false, Ordering::Release);
+    }
+
+    /// Whether TinyBus still owns setup and connection teardown.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn setup_is_pending(&self) -> bool {
+        self.setup_pending.load(Ordering::Acquire)
+    }
+
+    /// Whether setup is pending and TinyBus has already revoked this peer's
+    /// admission, so the SDK owns connection teardown.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn setup_teardown_is_owned(&self) -> bool {
+        self.setup_is_pending()
+            && self
+                .connection
+                .unique_name()
+                .is_some_and(|peer| !self.service_peer_is_live(&peer))
     }
 
     /// Publish the four exact objects for a captured context and intended peer.
@@ -619,6 +655,27 @@ where
     /// # Errors
     /// Returns a sanitized bus failure if the linked service connection cannot be closed.
     pub async fn shutdown(&self) -> tinybus::Result<()> {
+        self.shutdown_inner(true).await
+    }
+
+    /// Withdraw local resources during a linked setup failure without closing
+    /// the SDK-owned module connection. TinyBus closes that connection when
+    /// the setup callback returns its failure.
+    ///
+    /// # Errors
+    /// Returns a sanitized failure if setup does not own this registration or
+    /// local lease bookkeeping is unavailable.
+    #[doc(hidden)]
+    pub async fn shutdown_for_setup_failure(&self) -> tinybus::Result<()> {
+        if !self.setup_is_pending() {
+            return Err(tinybus::Error::failed(
+                "setup failure cleanup requires pending setup ownership",
+            ));
+        }
+        self.shutdown_inner(false).await
+    }
+
+    async fn shutdown_inner(&self, close_connection: bool) -> tinybus::Result<()> {
         let _shutdown = self.shutdown_lock.lock().await;
         self.closed.store(true, Ordering::Release);
         let drained = {
@@ -638,13 +695,25 @@ where
         let legacy_result = if let Some(legacy) = legacy {
             #[cfg(feature = "test-stream-diagnostics")]
             self.probe_shutdown_stage(RegistrationShutdownStage::LegacyShutdownStarted);
-            let result = legacy.shutdown().await;
+            let result = if close_connection {
+                legacy.shutdown().await
+            } else {
+                legacy.withdraw_before_connection_close().await;
+                Ok(())
+            };
             #[cfg(feature = "test-stream-diagnostics")]
             self.probe_shutdown_stage(RegistrationShutdownStage::LegacyShutdownReturned);
             result
         } else {
             Ok(())
         };
+        if !close_connection {
+            // Local paths and leases are withdrawn now. If this future is
+            // canceled earlier, Drop retries local cleanup while leaving the
+            // TinyBus-owned module connection alone.
+            self.cleanup_complete.store(true, Ordering::Release);
+            return legacy_result;
+        }
         #[cfg(feature = "test-stream-diagnostics")]
         self.probe_shutdown_stage(RegistrationShutdownStage::ConnectionCloseStarted);
         let close_result = self.connection.close().await;
@@ -670,6 +739,10 @@ impl<E, A, C> Drop for StorageRegistration<E, A, C> {
             return;
         }
         self.closed.store(true, Ordering::Release);
+        let setup_teardown_is_owned = self.setup_pending.load(Ordering::Acquire)
+            && self.connection.unique_name().is_some_and(|peer| {
+                peer.is_unique() && self.callers.module_for_sender(&peer).is_none()
+            });
         let leases = self
             .leases
             .lock()
@@ -689,9 +762,15 @@ impl<E, A, C> Drop for StorageRegistration<E, A, C> {
                 served.shutdown().await;
             }
             if let Some(legacy) = legacy {
-                let _ = legacy.shutdown().await;
+                if setup_teardown_is_owned {
+                    legacy.withdraw_before_connection_close().await;
+                } else {
+                    let _ = legacy.shutdown().await;
+                }
             }
-            let _ = connection.close().await;
+            if !setup_teardown_is_owned {
+                let _ = connection.close().await;
+            }
         });
     }
 }

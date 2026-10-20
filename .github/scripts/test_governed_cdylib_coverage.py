@@ -58,13 +58,18 @@ class GovernedCdylibCoverageTests(unittest.TestCase):
                 "elif args[0] == 'build':\n"
                 " if int(os.environ.get('FAKE_BUILD_EXIT', '0')) != 0: sys.exit(int(os.environ['FAKE_BUILD_EXIT']))\n"
                 " if os.environ.get('FAKE_OMIT_ARTIFACT') != '1':\n"
-                "  p=os.path.join(os.environ['FAKE_TARGET'], 'debug', 'deps', 'libtinystoragedrivers_governed_consumer_fixture.' + os.environ['FAKE_SUFFIX'])\n"
+                "  pkg=args[args.index('-p')+1]\n"
+                "  target='tinystoragedrivers_migration_module_fixture' if 'migration-module-fixture' in pkg else 'tinystoragedrivers_governed_consumer_fixture'\n"
+                "  package=target.replace('_','-')\n"
+                "  p=os.path.join(os.environ['FAKE_TARGET'], 'debug', 'deps', 'lib' + target + '.' + os.environ['FAKE_SUFFIX'])\n"
                 "  os.makedirs(os.path.dirname(p), exist_ok=True)\n"
                 "  open(p, 'w').write('fixture')\n"
-                "  print(json.dumps({'reason':'compiler-artifact','package_id':'path+file:///fixture#tinystoragedrivers-governed-consumer-fixture@1.5.0','target':{'name':'tinystoragedrivers_governed_consumer_fixture','kind':['cdylib']},'filenames':[p]}))\n"
+                "  print(json.dumps({'reason':'compiler-artifact','package_id':'path+file:///fixture#' + package + '@1.8.0','target':{'name':target,'kind':['cdylib']},'filenames':[p]}))\n"
                 "elif args[0:2] == ['llvm-cov','test']:\n"
-                " open(os.environ['FAKE_INVOCATION'], 'w').write(' '.join(args))\n"
-                " print(os.environ['FAKE_TEST_OUTPUT'], end='')\n"
+                " with open(os.environ['FAKE_INVOCATION'], 'a') as invocation: invocation.write(' '.join(args) + '\\n')\n"
+                " output=os.environ['FAKE_TEST_OUTPUT']\n"
+                " if any('migration_tests::' in arg for arg in args): output=output.replace(os.environ['FAKE_GOVERNED_TEST_NAME'], os.environ['FAKE_MIGRATION_TEST_NAME'])\n"
+                " print(output, end='')\n"
                 " sys.exit(int(os.environ.get('FAKE_TEST_EXIT', '0')))\n"
                 "else:\n"
                 " print('unexpected cargo command', args, file=sys.stderr)\n"
@@ -77,6 +82,8 @@ class GovernedCdylibCoverageTests(unittest.TestCase):
                 "FAKE_TARGET": str(target),
                 "FAKE_SUFFIX": "dylib" if sys.platform == "darwin" else "dll" if os.name == "nt" else "so",
                 "FAKE_TEST_OUTPUT": output,
+                "FAKE_GOVERNED_TEST_NAME": TEST_NAME,
+                "FAKE_MIGRATION_TEST_NAME": "migration_tests::compiled_owner_migrates_before_storage_lease_and_rejects_other_senders",
                 "FAKE_TEST_EXIT": str(exit_code),
                 "FAKE_BUILD_EXIT": str(build_exit),
                 "FAKE_OMIT_ARTIFACT": "1" if omit_artifact else "0",

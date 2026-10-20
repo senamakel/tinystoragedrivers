@@ -473,6 +473,201 @@ async fn dropping_a_live_registration_cleans_leases_and_legacy_route_on_retained
     host.shutdown(Duration::from_secs(1)).await;
 }
 
+#[cfg(feature = "test-stream-diagnostics")]
+struct NormalShutdownErrorFixture {
+    _broker_task: tokio::task::JoinHandle<tinybus::Result<()>>,
+    host: ModuleHost,
+    caller: tinybus::Connection,
+    service: tinybus::Connection,
+    observer: tinybus::Connection,
+    service_peer: BusName,
+    registration: StorageRegistration<RelayEnvironment, RelayAudit, RelayContext>,
+    shutdown_stages: mpsc::UnboundedReceiver<crate::test_support::RegistrationShutdownStage>,
+    name_changes: tokio::sync::broadcast::Receiver<tinybus::Message>,
+}
+
+#[cfg(feature = "test-stream-diagnostics")]
+async fn normal_shutdown_error_fixture() -> NormalShutdownErrorFixture {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let (caller_tx, caller_rx) = tokio::sync::oneshot::channel();
+    host.attach_linked_with_setup(
+        relay_test_caller::linked_module().unwrap(),
+        json!({}),
+        move |connection| async move {
+            caller_tx
+                .send(connection.clone())
+                .map_err(|_| tinybus::Error::failed("shutdown caller receiver closed"))
+        },
+    )
+    .await
+    .unwrap();
+    let caller = tokio::time::timeout(Duration::from_secs(2), caller_rx)
+        .await
+        .expect("linked caller setup did not finish")
+        .unwrap();
+    let caller_peer = caller.unique_name().unwrap();
+    let module = host
+        .sender_lookup()
+        .module_for_sender(&caller_peer)
+        .unwrap();
+
+    let service = tinybus::Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let service_peer = service.unique_name().unwrap();
+    let observer = tinybus::Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let name_changes = observer
+        .add_match(
+            tinybus::MatchRule::new()
+                .signals()
+                .sender(tinybus::BusName::new(tinybus::BUS_NAME).unwrap())
+                .interface(tinybus::InterfaceName::new(tinybus::BUS_INTERFACE).unwrap())
+                .member(tinybus::MemberName::new("NameOwnerChanged").unwrap()),
+        )
+        .await
+        .unwrap();
+    let collection = WireCollectionSpec {
+        name: "records".to_owned(),
+        indexes: vec![],
+        ttl_field: None,
+        search: None,
+    };
+    let storage = MemoryStorage::new();
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    scoped
+        .documents()
+        .ensure_collection(&CollectionSpec::new("records"))
+        .await
+        .unwrap();
+    let server = Arc::new(StorageServer::new(scoped));
+    let environment = Arc::new(RelayEnvironment {
+        epoch: AtomicU64::new(1),
+        collection,
+        servers: [(1, server)].into_iter().collect(),
+    });
+    let policy = GovernedStorage::new(
+        Arc::clone(&environment),
+        Arc::new(RelayAudit),
+        GovernedEndpointLimits::default(),
+    )
+    .with_legacy_endpoint(Arc::new(DropCountingLegacyEndpoint(Arc::new(
+        AtomicU64::new(0),
+    ))));
+    let (shutdown_probe, shutdown_stages) = mpsc::unbounded_channel();
+    let registration = policy.with_shutdown_probe(shutdown_probe).register(
+        service.clone(),
+        Arc::new(RelayCallerDirectory {
+            peer: caller_peer,
+            module,
+        }),
+        tokio::runtime::Handle::current(),
+    );
+    registration.install_legacy().await.unwrap();
+
+    NormalShutdownErrorFixture {
+        _broker_task: broker_task,
+        host,
+        caller,
+        service,
+        observer,
+        service_peer,
+        registration,
+        shutdown_stages,
+        name_changes,
+    }
+}
+
+#[cfg(feature = "test-stream-diagnostics")]
+async fn wait_for_service_peer_detach(
+    changes: &mut tokio::sync::broadcast::Receiver<tinybus::Message>,
+    service_peer: &BusName,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let message = changes
+                .recv()
+                .await
+                .expect("broker name-change stream closed");
+            let serde_json::Value::Array(arguments) = message.body else {
+                continue;
+            };
+            if arguments.len() == 3
+                && arguments[0].as_str() == Some(service_peer.as_str())
+                && arguments[1].as_str() == Some(service_peer.as_str())
+                && arguments[2].is_null()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("connection close must detach the service peer");
+}
+
+#[cfg(feature = "test-stream-diagnostics")]
+#[tokio::test(flavor = "multi_thread")]
+async fn normal_shutdown_closes_connection_after_real_legacy_release_error() {
+    let NormalShutdownErrorFixture {
+        _broker_task,
+        host,
+        caller,
+        service,
+        observer,
+        service_peer,
+        registration,
+        mut shutdown_stages,
+        mut name_changes,
+    } = normal_shutdown_error_fixture().await;
+
+    // This is a successful broker operation from the actual name owner. The
+    // subsequent registration shutdown therefore receives a real
+    // NameHasNoOwner reply from its ReleaseName call.
+    service.release_name(crate::HOST_NAME).await.unwrap();
+    let shutdown = registration.shutdown().await;
+    assert!(
+        matches!(
+            &shutdown,
+            Err(tinybus::Error::MethodFailed { name, .. })
+                if name == tinybus::Error::NameHasNoOwner(
+                    tinybus::BusName::new(crate::HOST_NAME).unwrap()
+                ).wire_name()
+        ),
+        "normal shutdown should preserve the real ReleaseName failure: {shutdown:?}"
+    );
+
+    let mut observed_stages = Vec::new();
+    while let Ok(stage) = shutdown_stages.try_recv() {
+        observed_stages.push(stage);
+    }
+    assert_eq!(
+        observed_stages,
+        [
+            crate::test_support::RegistrationShutdownStage::LegacyShutdownStarted,
+            crate::test_support::RegistrationShutdownStage::LegacyShutdownReturned,
+            crate::test_support::RegistrationShutdownStage::ConnectionCloseStarted,
+            crate::test_support::RegistrationShutdownStage::ConnectionCloseReturned,
+        ],
+        "normal shutdown must attempt connection close after legacy ReleaseName fails"
+    );
+    wait_for_service_peer_detach(&mut name_changes, &service_peer).await;
+    assert_eq!(observer.name_owner(crate::HOST_NAME).await.unwrap(), None);
+    assert_eq!(
+        observer.name_owner(service_peer.as_str()).await.unwrap(),
+        None
+    );
+    assert!(
+        host.sender_lookup()
+            .module_for_sender(&caller.unique_name().unwrap())
+            .is_some()
+    );
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
 #[test]
 fn a_newer_async_binding_resolution_fences_a_late_completion() {
     let gate = ResolutionGate::new();

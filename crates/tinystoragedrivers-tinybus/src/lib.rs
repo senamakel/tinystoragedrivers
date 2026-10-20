@@ -27,6 +27,9 @@ use tinystoragedrivers_core::DocumentStore;
 mod storage_host;
 pub use storage_host::{StorageRegistration, attach_storage};
 
+#[cfg(feature = "migration-delivery")]
+pub mod migration;
+
 /// Declare the exact callback interface and finite member allowlist.
 ///
 /// # Errors
@@ -216,3 +219,7 @@ mod tests;
 #[cfg(test)]
 #[path = "storage_host_tests.rs"]
 mod storage_host_tests;
+
+#[cfg(all(test, feature = "migration-delivery"))]
+#[path = "migration_tests.rs"]
+mod migration_tests;

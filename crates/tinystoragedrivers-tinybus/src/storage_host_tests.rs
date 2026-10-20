@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tinybus::{Connection, broker::Broker, module::ModuleHost, transport::memory::MemoryBus};
+use tinybus::{
+    BusName, Connection, InterfaceName, MatchRule, MemberName, broker::Broker, module::ModuleHost,
+    transport::memory::MemoryBus,
+};
 use tinystoragedrivers_bus::{CollectionSpec, Precondition, PutRequest, StorageNeeds};
 use tinystoragedrivers_busproxy::{
     AuditEvent, AuditSink, Environment, GovernedEndpointLimits, GovernedStorage, GrantPolicy,
@@ -1091,6 +1094,10 @@ async fn attach_rolls_back_legacy_name_collisions_and_observer_refusal() {
         .await
         .unwrap();
     rejected_observer.close().await.unwrap();
+    let probe = Connection::connect(observer_bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let mut owner_changes = subscribe_to_name_owner_changes(&probe).await.unwrap();
     let observer_endpoint = GovernedStorage::new(
         test_environment(collection),
         Arc::new(TestAudit::default()),
@@ -1107,9 +1114,10 @@ async fn attach_rolls_back_legacy_name_collisions_and_observer_refusal() {
         .is_err(),
         "failure to subscribe to owner changes must roll back the registration"
     );
-    let probe = Connection::connect(observer_bus.connect().await.unwrap())
-        .await
-        .unwrap();
+    assert!(
+        wait_for_host_name_release(&mut owner_changes).await,
+        "failed setup did not publish the storage service name release"
+    );
     assert_eq!(
         probe
             .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
@@ -1120,6 +1128,39 @@ async fn attach_rolls_back_legacy_name_collisions_and_observer_refusal() {
     );
     assert!(probe.name_owner(tinybus::BUS_NAME).await.is_ok());
     observer_host.shutdown(Duration::from_secs(1)).await;
+}
+
+async fn subscribe_to_name_owner_changes(
+    connection: &Connection,
+) -> tinybus::Result<tokio::sync::broadcast::Receiver<tinybus::Message>> {
+    let rule = tinybus::MatchRule::new()
+        .signals()
+        .sender(tinybus::BusName::new(tinybus::BUS_NAME)?)
+        .interface(tinybus::InterfaceName::new(tinybus::BUS_INTERFACE)?)
+        .member(tinybus::MemberName::new("NameOwnerChanged")?);
+    connection.add_match(rule).await
+}
+
+async fn wait_for_host_name_release(
+    changes: &mut tokio::sync::broadcast::Receiver<tinybus::Message>,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let Ok(change) = changes.recv().await else {
+                return false;
+            };
+            let Value::Array(args) = change.body else {
+                continue;
+            };
+            if args.first().and_then(Value::as_str) == Some(tinystoragedrivers_busproxy::HOST_NAME)
+                && args.get(2) == Some(&Value::Null)
+            {
+                return true;
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2520,71 +2561,73 @@ async fn another_peer_cannot_accept_a_governed_download_stream() {
 
 async fn assert_canceled_owner_transfer_cleanup(
     observer: &Connection,
+    host: &ModuleHost,
+    service_peer: &BusName,
     endpoint_drops: &AtomicUsize,
     drop_stages: &mut mpsc::UnboundedReceiver<crate::storage_host::StorageDropStage>,
     shutdown_stages: &mut mpsc::UnboundedReceiver<
         tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage,
     >,
+    name_changes: &mut tokio::sync::broadcast::Receiver<tinybus::Message>,
 ) {
-    let mut last_name_state = "not observed";
-    let mut last_endpoint_drops = 0;
     let mut observed_drop_stages = Vec::new();
     let mut observed_shutdown_stages = Vec::new();
+    let mut shutdown_stages_closed = false;
+    let mut host_name_detached = false;
+    let mut peer_detached = false;
     let cleanup = async {
         loop {
-            let name_released = match observer
-                .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
-                .await
-            {
-                Ok(None) => {
-                    last_name_state = "released";
-                    true
-                }
-                Ok(Some(_)) => {
-                    last_name_state = "owned";
-                    false
-                }
-                Err(_) => {
-                    last_name_state = "query error";
-                    false
-                }
-            };
-            last_endpoint_drops = endpoint_drops.load(Ordering::Acquire);
-            while let Ok(stage) = drop_stages.try_recv() {
-                observed_drop_stages.push(stage);
-            }
-            while let Ok(stage) = shutdown_stages.try_recv() {
-                observed_shutdown_stages.push(stage);
-            }
-            let close_returned = observed_shutdown_stages.last()
-                == Some(
-                    &tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::ConnectionCloseReturned,
-                );
-            let shutdown_finished = observed_drop_stages.last()
-                == Some(&crate::storage_host::StorageDropStage::ShutdownFinished(
-                    crate::storage_host::ShutdownStatus::Failure,
-                ));
-            if name_released && last_endpoint_drops == 1 && close_returned && shutdown_finished {
+            let cleanup_finished = observed_drop_stages.iter().any(|stage| {
+                matches!(
+                    stage,
+                    crate::storage_host::StorageDropStage::ShutdownFinished(_)
+                )
+            });
+            if cleanup_finished && host_name_detached && peer_detached {
                 break;
             }
-            tokio::task::yield_now().await;
+            let wait_for_drop_stage = !cleanup_finished;
+            let wait_for_shutdown_stage = !cleanup_finished && !shutdown_stages_closed;
+            tokio::select! {
+                stage = drop_stages.recv(), if wait_for_drop_stage => {
+                    observed_drop_stages.push(stage.expect("registration cleanup stage sender closed"));
+                }
+                stage = shutdown_stages.recv(), if wait_for_shutdown_stage => {
+                    match stage {
+                        Some(stage) => observed_shutdown_stages.push(stage),
+                        None => shutdown_stages_closed = true,
+                    }
+                }
+                message = name_changes.recv(), if !host_name_detached || !peer_detached => {
+                    let message = message.expect("broker name-change stream closed");
+                    let Value::Array(arguments) = message.body else {
+                        continue;
+                    };
+                    if arguments.len() != 3
+                        || arguments[1].as_str() != Some(service_peer.as_str())
+                        || !arguments[2].is_null()
+                    {
+                        continue;
+                    }
+                    match arguments[0].as_str() {
+                        Some(name) if name == tinystoragedrivers_busproxy::HOST_NAME => host_name_detached = true,
+                        Some(name) if name == service_peer.as_str() => peer_detached = true,
+                        _ => {}
+                    }
+                }
+            }
         }
     };
     let cleanup_result = tokio::time::timeout(Duration::from_secs(2), cleanup).await;
-    while let Ok(stage) = drop_stages.try_recv() {
-        observed_drop_stages.push(stage);
-    }
     while let Ok(stage) = shutdown_stages.try_recv() {
         observed_shutdown_stages.push(stage);
     }
-    let current_endpoint_drops = endpoint_drops.load(Ordering::Acquire);
     assert!(
         cleanup_result.is_ok(),
-        "canceled owner-transfer cleanup timed out: name_owner_state={last_name_state}, \
-         last_observed_endpoint_drops={last_endpoint_drops}, \
-         current_endpoint_drops={current_endpoint_drops}, \
-         cleanup_stages={observed_drop_stages:?}, \
-         shutdown_stages={observed_shutdown_stages:?}"
+        "canceled owner-transfer cleanup did not finish through broker detach: \
+         registration={observed_drop_stages:?}, \
+         endpoint={observed_shutdown_stages:?}, \
+         host_name_detached={host_name_detached}, peer_detached={peer_detached}"
     );
     assert_eq!(
         observed_drop_stages,
@@ -2592,24 +2635,32 @@ async fn assert_canceled_owner_transfer_cleanup(
             crate::storage_host::StorageDropStage::OwnerDropEntered,
             crate::storage_host::StorageDropStage::CleanupTaskStarted,
             crate::storage_host::StorageDropStage::ShutdownFinished(
-                crate::storage_host::ShutdownStatus::Failure,
+                crate::storage_host::ShutdownStatus::Success,
             ),
         ],
-        "legacy shutdown failure must still complete connection cleanup"
-    );
-    eprintln!(
-        "owner-transfer cleanup diagnostic stages: owner={observed_drop_stages:?}, \
-         registration={observed_shutdown_stages:?}"
+        "setup cancellation withdraws resources without detached full shutdown"
     );
     assert_eq!(
         observed_shutdown_stages,
         [
             tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::LegacyShutdownStarted,
             tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::LegacyShutdownReturned,
-            tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::ConnectionCloseStarted,
-            tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::ConnectionCloseReturned,
         ],
-        "owner-transfer cleanup should finish each observed shutdown boundary"
+        "setup cancellation withdraws local services; TinyBus owns connection close"
+    );
+    assert_eq!(endpoint_drops.load(Ordering::Acquire), 1);
+    assert_eq!(
+        observer
+            .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
+            .await
+            .unwrap(),
+        None,
+        "TinyBus peer detach releases the legacy storage name"
+    );
+    assert!(
+        host.sender_lookup()
+            .module_for_sender(service_peer)
+            .is_none()
     );
 }
 
@@ -2631,6 +2682,16 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
         .await
         .unwrap();
     let observer_peer = observer.unique_name().unwrap();
+    let mut name_changes = observer
+        .add_match(
+            MatchRule::new()
+                .signals()
+                .sender(BusName::new(tinybus::BUS_NAME).unwrap())
+                .interface(InterfaceName::new(tinybus::BUS_INTERFACE).unwrap())
+                .member(MemberName::new("NameOwnerChanged").unwrap()),
+        )
+        .await
+        .unwrap();
     let endpoint_drops = Arc::new(AtomicUsize::new(0));
     let (shutdown_probe, mut shutdown_stages) = mpsc::unbounded_channel();
     let endpoint = GovernedStorage::new(
@@ -2672,22 +2733,23 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
         .expect("setup did not reach its owner-transfer gate")
         .unwrap();
 
-    assert!(
-        observer
-            .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
-            .await
-            .unwrap()
-            .is_some()
-    );
+    let service_peer = observer
+        .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
+        .await
+        .unwrap()
+        .expect("legacy storage service should own its name during setup");
 
     attaching.abort();
     assert!(attaching.await.unwrap_err().is_cancelled());
     let _ = continue_setup.send(());
     assert_canceled_owner_transfer_cleanup(
         &observer,
+        &host,
+        &service_peer,
         &endpoint_drops,
         &mut drop_stages,
         &mut shutdown_stages,
+        &mut name_changes,
     )
     .await;
     assert_eq!(observer.unique_name().unwrap(), observer_peer);

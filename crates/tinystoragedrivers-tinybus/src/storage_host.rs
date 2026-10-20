@@ -100,6 +100,23 @@ where
         }
         Ok(())
     }
+
+    fn mark_setup_complete(&self) {
+        if let Some(inner) = &self.inner {
+            inner.mark_setup_complete();
+        }
+    }
+
+    async fn shutdown_for_setup_failure(mut self) -> tinybus::Result<()> {
+        if let Some(monitor) = self.monitor.take() {
+            monitor.abort();
+            let _ = monitor.await;
+        }
+        if let Some(inner) = self.inner.take() {
+            inner.shutdown_for_setup_failure().await?;
+        }
+        Ok(())
+    }
 }
 
 impl<E, A, C> Drop for StorageRegistration<E, A, C>
@@ -110,34 +127,54 @@ where
 {
     fn drop(&mut self) {
         let inner = self.inner.take();
+        if inner.is_none() {
+            return;
+        }
+        let setup_teardown_is_owned = inner
+            .as_ref()
+            .is_some_and(|inner| inner.setup_teardown_is_owned());
         #[cfg(test)]
         if let Some(probe) = &self.cleanup_probe {
             let _ = probe.send(StorageDropStage::OwnerDropEntered);
         }
-        if let Some(monitor) = self.monitor.take() {
+        let monitor = self.monitor.take();
+        if let Some(monitor) = &monitor {
             monitor.abort();
         }
         #[cfg(test)]
         let cleanup_probe = self.cleanup_probe.clone();
         self.runtime.spawn(async move {
+            if let Some(monitor) = monitor {
+                let _ = monitor.await;
+            }
             #[cfg(test)]
             if let Some(probe) = &cleanup_probe {
                 let _ = probe.send(StorageDropStage::CleanupTaskStarted);
             }
-            if let Some(inner) = inner {
-                #[cfg(test)]
-                let shutdown_succeeded = matches!(inner.shutdown().await, Ok(()));
-                #[cfg(not(test))]
+            let Some(inner) = inner else {
+                return;
+            };
+            #[cfg(test)]
+            let shutdown_succeeded = if setup_teardown_is_owned {
+                inner.shutdown_for_setup_failure().await.is_ok()
+            } else {
+                inner.shutdown().await.is_ok()
+            };
+            #[cfg(not(test))]
+            if setup_teardown_is_owned {
+                let _ = inner.shutdown_for_setup_failure().await;
+            } else {
                 let _ = inner.shutdown().await;
-                #[cfg(test)]
-                if let Some(probe) = cleanup_probe {
-                    let status = if shutdown_succeeded {
-                        ShutdownStatus::Success
-                    } else {
-                        ShutdownStatus::Failure
-                    };
-                    let _ = probe.send(StorageDropStage::ShutdownFinished(status));
-                }
+            }
+            drop(inner);
+            #[cfg(test)]
+            if let Some(probe) = cleanup_probe {
+                let status = if shutdown_succeeded {
+                    ShutdownStatus::Success
+                } else {
+                    ShutdownStatus::Failure
+                };
+                let _ = probe.send(StorageDropStage::ShutdownFinished(status));
             }
         });
     }
@@ -238,8 +275,9 @@ where
                         tinybus::Error::failed("linked storage service has no unique peer")
                     })?;
                     let inner = Arc::new(endpoint.register(connection, callers, runtime.clone()));
+                    inner.mark_setup_pending();
                     if inner.install_legacy().await.is_err() {
-                        let _ = inner.shutdown().await;
+                        let _ = inner.shutdown_for_setup_failure().await;
                         return Err(tinybus::Error::failed(
                             "legacy storage registration unavailable",
                         ));
@@ -252,7 +290,7 @@ where
                     let changes = match observer.add_match(rule).await {
                         Ok(changes) => changes,
                         Err(error) => {
-                            let _ = inner.shutdown().await;
+                            let _ = inner.shutdown_for_setup_failure().await;
                             return Err(error);
                         }
                     };
@@ -278,12 +316,15 @@ where
         .await;
     match attached {
         Ok(_module_info) => match owner_rx.await {
-            Ok(owner) => Ok(owner),
+            Ok(owner) => {
+                owner.mark_setup_complete();
+                Ok(owner)
+            }
             Err(_) => Err(unavailable()),
         },
         Err(_error) => {
             if let Ok(owner) = owner_rx.await {
-                let _ = owner.shutdown().await;
+                let _ = owner.shutdown_for_setup_failure().await;
             }
             Err(unavailable())
         }

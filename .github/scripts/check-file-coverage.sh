@@ -15,6 +15,8 @@ source_root="${workspace_root}crates/"
 # the fixture source from the production denominator.
 python3 .github/scripts/test_file_coverage_policy.py
 python3 .github/scripts/test_governed_cdylib_coverage.py
+python3 .github/scripts/test_migration_cdylib_llvm_cov.py
+python3 .github/scripts/test_migration_cdylib_llvm_cov.py
 
 cargo llvm-cov \
   --locked \
@@ -24,7 +26,8 @@ cargo llvm-cov \
   --json \
   --output-path "$report"
 
-# This test loads the real compiled consumer cdylib from a linked TinyBus host.
+# These tests load the real compiled consumer and migration cdylibs through
+# TinyBus hosts. Coverage builds instrument the cdylibs as well as host tests.
 # cargo llvm-cov's --no-report run preserves and appends the actual
 # module-call execution to workspace profiles before the final per-file report.
 bash scripts/test-governed-cdylib.sh --coverage
@@ -35,5 +38,13 @@ python3 .github/scripts/native_profile_tests.py
 python3 .github/scripts/check-native-io-fault.py
 python3 .github/scripts/check-native-key-race.py
 python3 .github/scripts/check-native-secret-service.py --coverage
+module_cdylib="$(cat target/migration-module-cdylib-path.txt)"
+# The adapter executes inside a loaded cdylib, so its counters are in a separate
+# LLVM object. Keep cargo llvm-cov's complete workspace object list and append
+# this instrumented module when exporting the final unmodified coverage report.
+llvm_coverage_tools="$(python3 .github/scripts/migration_cdylib_llvm_cov.py "$(pwd -P)" "$module_cdylib")"
+export LLVM_COV="${llvm_coverage_tools%%$'\n'*}"
+export LLVM_PROFDATA="${llvm_coverage_tools#*$'\n'}"
 cargo llvm-cov report --json --output-path "$report"
+unset LLVM_COV LLVM_PROFDATA
 python3 .github/scripts/file_coverage_policy.py "$minimum" "$report" "$(pwd -P)"
