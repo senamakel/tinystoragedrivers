@@ -6,8 +6,8 @@ use mongodb::event::{EventHandler, command::CommandEvent};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tinystoragedrivers_core::{
-    BackendBlobs, Capability, CollectionSpec, CompositeStorage, ErrorKind, Filter, MemoryStorage,
-    Precondition, Scope, StorageBackend,
+    BackendBlobs, Capability, CollectionSpec, CompositeStorage, ErrorKind, ExpectedDocument,
+    Filter, MemoryStorage, Precondition, ReadCheck, Scope, StorageBackend, WriteOp,
 };
 
 fn fixture_prefix() -> String {
@@ -87,6 +87,125 @@ async fn live_atomic_write_option_capability_tracks_transaction_support() {
         !without_transactions_composite
             .capabilities()
             .contains(Capability::AtomicWriteOptions)
+    );
+}
+
+async fn monitored_admission_fixture(url: &str, scope: &Scope) -> (MongoStorage, Arc<AtomicU64>) {
+    let mut options = ClientOptions::parse(url).await.unwrap();
+    let database = options
+        .default_database
+        .clone()
+        .unwrap_or_else(|| "tsd_test".into());
+    options.selection_criteria = Some(mongodb::options::SelectionCriteria::ReadPreference(
+        mongodb::options::ReadPreference::Primary,
+    ));
+    let scope_key = crate::purge::scope_key(scope);
+    let admission_reads = Arc::new(AtomicU64::new(0));
+    let observed_reads = Arc::clone(&admission_reads);
+    let observed_scope_key = scope_key.clone();
+    options.command_event_handler = Some(EventHandler::callback(move |event| {
+        if let CommandEvent::Started(event) = event
+            && event.command_name == "find"
+            && event
+                .command
+                .get_str("find")
+                .is_ok_and(|collection| collection == crate::purge::ADMISSIONS)
+            && event.command.get_document("filter").is_ok_and(|filter| {
+                filter
+                    .get_str("_id")
+                    .is_ok_and(|id| id == observed_scope_key)
+            })
+            && !event.command.contains_key("autocommit")
+        {
+            observed_reads.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    let client = Client::with_options(options).unwrap();
+    let hello = client
+        .database("admin")
+        .run_command(doc! {"hello": 1})
+        .await
+        .unwrap();
+    let transactions = supports_transactions(&hello);
+    assert!(
+        transactions,
+        "the Mongo fixture must support transactions for atomic batches"
+    );
+    let database_handle = client.database(&database);
+    let storage = MongoStorage {
+        shared: Arc::new(Shared::new(
+            client,
+            database_handle,
+            Arc::new(|| 0),
+            transactions,
+            transactions,
+        )),
+    }
+    .fixture_named(&fixture_prefix())
+    .unwrap();
+    (storage, admission_reads)
+}
+
+#[tokio::test]
+async fn live_atomic_batches_read_scope_admission_once() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        eprintln!("live_atomic_batches_read_scope_admission_once: no local fixture configured");
+        return;
+    };
+    let scope = Scope::new(format!(
+        "atomic_batch_admission_{}",
+        mongodb::bson::oid::ObjectId::new().to_hex()
+    ))
+    .unwrap();
+    let (storage, admission_reads) = monitored_admission_fixture(&url, &scope).await;
+    let documents = storage.for_scope(&scope).unwrap().documents().clone();
+    documents
+        .ensure_collection(&CollectionSpec::new("records"))
+        .await
+        .unwrap();
+    storage
+        .shared
+        .prepare_validation(Some(&scope))
+        .await
+        .unwrap();
+
+    admission_reads.store(0, Ordering::SeqCst);
+    let checked = documents
+        .atomic_batch_checked(
+            vec![ReadCheck {
+                collection: "records".into(),
+                id: "checked-dependency".into(),
+                expected: ExpectedDocument::Absent,
+            }],
+            vec![WriteOp::Put {
+                collection: "records".into(),
+                id: "checked-result".into(),
+                doc: json!({"kind":"checked"}),
+                precondition: Precondition::Absent,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(checked.len(), 1);
+    let checked_reads = admission_reads.load(Ordering::SeqCst);
+
+    admission_reads.store(0, Ordering::SeqCst);
+    let atomic = documents
+        .atomic_batch(vec![WriteOp::Put {
+            collection: "records".into(),
+            id: "atomic-result".into(),
+            doc: json!({"kind":"atomic"}),
+            precondition: Precondition::Absent,
+        }])
+        .await
+        .unwrap();
+    assert_eq!(atomic.len(), 1);
+    let atomic_reads = admission_reads.load(Ordering::SeqCst);
+
+    assert_eq!(
+        (checked_reads, atomic_reads),
+        (2, 2),
+        "each public batch should perform only its before/after primary admission reads; observed checked={checked_reads}, atomic={atomic_reads}"
     );
 }
 
