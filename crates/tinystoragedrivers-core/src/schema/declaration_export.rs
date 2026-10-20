@@ -10,8 +10,8 @@ use super::{Schema, Step, StepBody, TransformKind};
 /// executable closures.
 ///
 /// `operation` must provide an explicit operation selector and contract
-/// version for every step that the owner intends to expose remotely. The
-/// declaration's transform family is derived from the actual step body.
+/// version for every step in the schema. The declaration's transform family
+/// is derived from the actual step body.
 ///
 /// # Errors
 /// Returns [`StorageError::invalid_input`] when a step has no external

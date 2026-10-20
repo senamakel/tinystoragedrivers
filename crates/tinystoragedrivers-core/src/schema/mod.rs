@@ -100,5 +100,4 @@ mod executor_tests;
 
 #[cfg(test)]
 #[path = "declaration_export_tests.rs"]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod declaration_export_tests;
