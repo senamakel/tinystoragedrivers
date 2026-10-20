@@ -385,6 +385,31 @@ fn blob_keys_are_validated_and_prefix_matching_is_literal() {
         slash_grant.authorize(Object::Blobs, "Get", &json!({"key":"foo/../private"})),
         Err(Denied::Malformed)
     );
+    for (selector, request) in [
+        (
+            "PutUntil",
+            json!({"key":"foo/bar","bytes":[],"expires_at_ms":6000}),
+        ),
+        (
+            "PutStreamUntil",
+            json!({"key":"foo/bar","len":0,"expires_at_ms":6000}),
+        ),
+        ("GetWithExpiry", json!({"key":"foo/bar"})),
+        ("GetStreamWithExpiry", json!({"key":"foo/bar"})),
+    ] {
+        assert!(
+            slash_grant
+                .authorize(Object::Blobs, selector, &request)
+                .is_ok()
+        );
+        let mut outside = request;
+        outside["key"] = json!("foobar/bar");
+        assert_eq!(
+            slash_grant.authorize(Object::Blobs, selector, &outside),
+            Err(Denied::Target),
+            "{selector}"
+        );
+    }
 
     let plain_prefix = ["foo"];
     let plain_grant = StorageGrant::from_needs(
@@ -420,6 +445,8 @@ fn selector_write_classification_is_complete_and_seal_is_a_write() {
         (Object::Streams, "Seal"),
         (Object::Blobs, "Put"),
         (Object::Blobs, "PutStream"),
+        (Object::Blobs, "PutUntil"),
+        (Object::Blobs, "PutStreamUntil"),
         (Object::Blobs, "Delete"),
         (Object::Blobs, "PresignPut"),
         (Object::Secrets, "Set"),
@@ -716,8 +743,18 @@ fn blob_requests() -> Vec<(&'static str, Value)> {
     vec![
         ("Put", json!({"key":"attachments/x","bytes":[]})),
         ("PutStream", json!({"key":"attachments/x","len":0})),
+        (
+            "PutUntil",
+            json!({"key":"attachments/x","bytes":[],"expires_at_ms":6000}),
+        ),
+        (
+            "PutStreamUntil",
+            json!({"key":"attachments/x","len":0,"expires_at_ms":6000}),
+        ),
         ("Get", json!({"key":"attachments/x"})),
         ("GetStream", json!({"key":"attachments/x"})),
+        ("GetWithExpiry", json!({"key":"attachments/x"})),
+        ("GetStreamWithExpiry", json!({"key":"attachments/x"})),
         ("GetRange", json!({"key":"attachments/x","start":0,"end":0})),
         ("Head", json!({"key":"attachments/x"})),
         ("Delete", json!({"key":"attachments/x"})),

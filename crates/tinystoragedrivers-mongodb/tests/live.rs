@@ -43,6 +43,54 @@ async fn live_conformance_without_transactions() {
 }
 
 #[tokio::test]
+async fn live_absolute_blob_deadlines_are_reported_and_preserved() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tinystoragedrivers_core::{Scope, StorageBackend};
+
+    let Some(url) = support::url() else {
+        return support::skip("live_absolute_blob_deadlines_are_reported_and_preserved");
+    };
+    let backend = tinystoragedrivers_mongodb::MongoStorage::connect(
+        &url,
+        &support::isolated_name("blob_expiry"),
+    )
+    .await
+    .expect("TSD_MONGO_URL is set but the server cannot be reached");
+    let now = Arc::new(AtomicU64::new(1_000));
+    let clock = Arc::clone(&now);
+    let backend = backend.with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let blobs = backend.for_scope(&Scope::local()).unwrap().blobs().clone();
+
+    blobs
+        .put_until("absolute", vec![1, 2], Some("a/b"), Some(6_000))
+        .await
+        .unwrap();
+    now.store(4_000, Ordering::SeqCst);
+    let source = blobs.get_with_expiry("absolute").await.unwrap().unwrap();
+    assert_eq!(source.blob.bytes, [1, 2]);
+    assert_eq!(source.expires_at_ms, Some(6_000));
+    now.store(5_999, Ordering::SeqCst);
+    assert!(blobs.get("absolute").await.unwrap().is_some());
+    now.store(6_000, Ordering::SeqCst);
+    assert!(blobs.get_with_expiry("absolute").await.unwrap().is_none());
+
+    blobs
+        .put_until("already-expired", vec![3], None, Some(6_000))
+        .await
+        .unwrap();
+    assert!(blobs.get("already-expired").await.unwrap().is_none());
+    assert_eq!(
+        blobs
+            .put_until("unsupported-range", vec![4], None, Some(u64::MAX))
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_core::ErrorKind::InvalidInput
+    );
+}
+
+#[tokio::test]
 async fn live_true_standalone_keeps_single_document_writes_and_refuses_checked_batches() {
     use tinystoragedrivers_core::{Capability, ErrorKind, Precondition, Scope, StorageBackend};
     let Ok(url) = std::env::var("TSD_MONGO_STANDALONE_URL") else {

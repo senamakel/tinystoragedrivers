@@ -475,7 +475,7 @@ fn test_environment(collection: CollectionSpec) -> Arc<TestEnvironment> {
 async fn governed_mutation_errors(
     transport: &tinystoragedrivers_busproxy::BusTransport,
     marker: &str,
-) -> [Option<String>; 4] {
+) -> [Option<String>; 6] {
     let document = transport
         .call(
             tinystoragedrivers_client::Object::Documents,
@@ -532,7 +532,40 @@ async fn governed_mutation_errors(
         .await
         .err()
         .map(|error| format!("{error:?}"));
-    [document, stream, secret, blob]
+    let blob_until = transport
+        .call(
+            tinystoragedrivers_client::Object::Blobs,
+            "PutUntil",
+            json!({
+                "key": format!("canary/{marker}-absolute"),
+                "bytes": [marker.as_bytes()[0]],
+                "expires_at_ms": null
+            }),
+        )
+        .await
+        .err()
+        .map(|error| format!("{error:?}"));
+    let blob_stream_until = transport
+        .put_blob_stream_until(
+            tinystoragedrivers_bus::PutBlobStreamUntilRequest {
+                key: format!("canary/{marker}-absolute-stream"),
+                len: 1,
+                content_type: None,
+                expires_at_ms: None,
+            },
+            Box::pin(std::io::Cursor::new(vec![marker.as_bytes()[0]])),
+        )
+        .await
+        .err()
+        .map(|error| format!("{error:?}"));
+    [
+        document,
+        stream,
+        secret,
+        blob,
+        blob_until,
+        blob_stream_until,
+    ]
 }
 
 #[derive(Default)]
@@ -1426,6 +1459,57 @@ async fn governed_admission_and_grant_rotation_refuse_mutations_before_backend_e
         .backend
         .for_scope(&Scope::new("governed-admission").unwrap())
         .unwrap();
+    let inline_write = transport
+        .put_blob_until(tinystoragedrivers_bus::PutBlobUntilRequest {
+            key: "canary/absolute-inline".to_owned(),
+            bytes: b"absolute".to_vec(),
+            content_type: Some("text/plain".to_owned()),
+            expires_at_ms: None,
+        })
+        .await
+        .unwrap();
+    let inline_meta: tinystoragedrivers_bus::BlobInfo =
+        serde_json::from_value(inline_write).unwrap();
+    assert_eq!(inline_meta.key, "canary/absolute-inline");
+    let inline_source = transport
+        .get_blob_with_expiry(tinystoragedrivers_bus::BlobKeyRequest {
+            key: inline_meta.key.clone(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(inline_source.bytes, b"absolute");
+    assert_eq!(inline_source.expires_at_ms, None);
+
+    let streamed_write = transport
+        .put_blob_stream_until(
+            tinystoragedrivers_bus::PutBlobStreamUntilRequest {
+                key: "canary/absolute-streamed".to_owned(),
+                len: 8,
+                content_type: Some("text/plain".to_owned()),
+                expires_at_ms: None,
+            },
+            Box::pin(std::io::Cursor::new(b"streamed".to_vec())),
+        )
+        .await
+        .unwrap();
+    let streamed_meta: tinystoragedrivers_bus::BlobInfo =
+        serde_json::from_value(streamed_write).unwrap();
+    let (streamed_head, mut streamed_body) = transport
+        .get_blob_stream_with_expiry(tinystoragedrivers_bus::BlobKeyRequest {
+            key: streamed_meta.key,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(streamed_head.expires_at_ms, None);
+    let mut streamed_bytes = Vec::new();
+    streamed_body
+        .read_to_end(&mut streamed_bytes)
+        .await
+        .unwrap();
+    assert_eq!(streamed_bytes, b"streamed");
+
     let undeclared_schema = transport
         .call(
             tinystoragedrivers_client::Object::Documents,
@@ -1454,12 +1538,12 @@ async fn governed_admission_and_grant_rotation_refuse_mutations_before_backend_e
         governed_mutation_errors(&transport, "admission-marker")
             .await
             .map(|error| error.is_some()),
-        [true; 4],
+        [true; 6],
         "all mutations must be refused"
     );
     assert_eq!(
         environment.write_admissions.load(Ordering::Acquire),
-        before_admission_denial + 4,
+        before_admission_denial + 6,
         "each routed mutation should reach write admission; failures={:?}",
         governed_mutation_errors(&transport, "admission-diagnostic").await
     );
@@ -1506,7 +1590,7 @@ async fn governed_admission_and_grant_rotation_refuse_mutations_before_backend_e
         governed_mutation_errors(&transport, "readonly-marker")
             .await
             .map(|error| error.is_some()),
-        [true; 4],
+        [true; 6],
         "a rotated read-only grant refuses every mutation path"
     );
     assert_eq!(
@@ -2434,6 +2518,48 @@ async fn another_peer_cannot_accept_a_governed_download_stream() {
     assert!(observer.name_owner(tinybus::BUS_NAME).await.is_ok());
 }
 
+async fn assert_canceled_owner_transfer_cleanup(
+    observer: &Connection,
+    endpoint_drops: &AtomicUsize,
+) {
+    let mut last_name_state = "not observed";
+    let mut last_endpoint_drops = 0;
+    let cleanup = async {
+        loop {
+            let name_released = match observer
+                .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
+                .await
+            {
+                Ok(None) => {
+                    last_name_state = "released";
+                    true
+                }
+                Ok(Some(_)) => {
+                    last_name_state = "owned";
+                    false
+                }
+                Err(_) => {
+                    last_name_state = "query error";
+                    false
+                }
+            };
+            last_endpoint_drops = endpoint_drops.load(Ordering::Acquire);
+            if name_released && last_endpoint_drops == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    let cleanup_result = tokio::time::timeout(Duration::from_secs(2), cleanup).await;
+    let current_endpoint_drops = endpoint_drops.load(Ordering::Acquire);
+    assert!(
+        cleanup_result.is_ok(),
+        "canceled owner-transfer cleanup timed out: name_owner_state={last_name_state}, \
+         last_observed_endpoint_drops={last_endpoint_drops}, \
+         current_endpoint_drops={current_endpoint_drops}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_host_live() {
     let bus = MemoryBus::new();
@@ -2500,20 +2626,7 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
     attaching.abort();
     assert!(attaching.await.unwrap_err().is_cancelled());
     let _ = continue_setup.send(());
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let name_released = observer
-                .name_owner(tinystoragedrivers_busproxy::HOST_NAME)
-                .await
-                .is_ok_and(|owner| owner.is_none());
-            if name_released && endpoint_drops.load(Ordering::Acquire) == 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("canceled owner transfer retained the name or legacy endpoint");
+    assert_canceled_owner_transfer_cleanup(&observer, &endpoint_drops).await;
     assert_eq!(observer.unique_name().unwrap(), observer_peer);
     assert!(observer.name_owner(tinybus::BUS_NAME).await.is_ok());
     assert!(

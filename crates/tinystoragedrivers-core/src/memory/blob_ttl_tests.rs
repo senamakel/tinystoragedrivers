@@ -35,6 +35,30 @@ async fn a_blob_expires_exactly_when_its_lifetime_has_elapsed() {
 }
 
 #[tokio::test]
+async fn absolute_blob_deadlines_are_not_restarted_or_visible_on_arrival() {
+    let (storage, now) = driven();
+    let blobs = storage.for_scope(&Scope::local()).unwrap().blobs().clone();
+    blobs
+        .put_until("absolute", vec![1, 2], Some("a/b"), Some(6_000))
+        .await
+        .unwrap();
+    now.store(4_000, Ordering::SeqCst);
+    let source = blobs.get_with_expiry("absolute").await.unwrap().unwrap();
+    assert_eq!(source.blob.bytes, [1, 2]);
+    assert_eq!(source.expires_at_ms, Some(6_000));
+    now.store(5_999, Ordering::SeqCst);
+    assert!(blobs.get("absolute").await.unwrap().is_some());
+    now.store(6_000, Ordering::SeqCst);
+    assert!(blobs.get_with_expiry("absolute").await.unwrap().is_none());
+
+    blobs
+        .put_until("already-expired", vec![3], None, Some(6_000))
+        .await
+        .unwrap();
+    assert!(blobs.get("already-expired").await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn a_plain_put_clears_a_lifetime_and_lapsed_blobs_are_swept_by_lifetime_writes() {
     let (storage, now) = driven();
     let scoped = storage.for_scope(&Scope::local()).unwrap();
@@ -109,6 +133,21 @@ async fn an_unsupported_default_driver_refuses_lifetimes() {
         .put_expiring("k", vec![], None, Duration::from_secs(1))
         .await
         .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(crate::Capability::BlobTtl)
+    );
+    let error = Plain.get_with_expiry("k").await.unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(crate::Capability::BlobTtl)
+    );
+    let error = Plain.get_stream_with_expiry("k").await.unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(crate::Capability::BlobTtl)
+    );
+    let error = Plain.put_until("k", vec![], None, None).await.unwrap_err();
     assert_eq!(
         error.kind(),
         ErrorKind::Unsupported(crate::Capability::BlobTtl)

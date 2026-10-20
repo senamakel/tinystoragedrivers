@@ -94,6 +94,63 @@ impl BusBlobs {
         Ok(meta(serde_json::from_value(reply)?))
     }
 
+    async fn write_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        if bytes.len() as u64 > inline_limit() {
+            let len = bytes.len() as u64;
+            return self
+                .write_stream_until(
+                    key,
+                    Box::pin(std::io::Cursor::new(bytes)),
+                    len,
+                    content_type,
+                    expires_at_ms,
+                )
+                .await;
+        }
+        let request = wire::PutBlobUntilRequest {
+            key: key.to_owned(),
+            bytes,
+            content_type: content_type.map(str::to_owned),
+            expires_at_ms,
+        };
+        let reply = self
+            .wire
+            .transport()
+            .put_blob_until(request)
+            .await
+            .map_err(|error| wire_error(error, Some(Capability::BlobTtl)))?;
+        Ok(meta(serde_json::from_value(reply)?))
+    }
+
+    async fn write_stream_until(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        let head = wire::PutBlobStreamUntilRequest {
+            key: key.to_owned(),
+            len,
+            content_type: content_type.map(str::to_owned),
+            expires_at_ms,
+        };
+        let reply = self
+            .wire
+            .transport()
+            .put_blob_stream_until(head, reader)
+            .await
+            .map_err(|error| wire_error(error, Some(Capability::BlobTtl)))?;
+        Ok(meta(serde_json::from_value(reply)?))
+    }
+
     fn require_ttl(&self, ttl_ms: Option<u64>) -> Result<()> {
         if ttl_ms.is_some() && !self.server.ttl {
             return Err(StorageError::unsupported(
@@ -183,6 +240,29 @@ impl BlobStore for BusBlobs {
             .await
     }
 
+    async fn put_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.write_until(key, bytes, content_type, expires_at_ms)
+            .await
+    }
+
+    async fn put_stream_until(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.write_stream_until(key, reader, len, content_type, expires_at_ms)
+            .await
+    }
+
     async fn get_stream(&self, key: &str) -> Result<Option<BlobStream>> {
         let found = self
             .wire
@@ -194,6 +274,25 @@ impl BlobStore for BusBlobs {
             meta: meta(head.meta),
             reader,
         }))
+    }
+
+    async fn get_stream_with_expiry(
+        &self,
+        key: &str,
+    ) -> Result<Option<tinystoragedrivers_core::BlobSourceStream>> {
+        let found = self
+            .wire
+            .transport()
+            .get_blob_stream_with_expiry(self::key(key))
+            .await
+            .map_err(|error| wire_error(error, Some(Capability::BlobTtl)))?;
+        Ok(
+            found.map(|(head, reader)| tinystoragedrivers_core::BlobSourceStream {
+                meta: meta(head.meta),
+                expires_at_ms: head.expires_at_ms,
+                reader,
+            }),
+        )
     }
 
     async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String> {
@@ -244,6 +343,28 @@ impl BlobStore for BusBlobs {
         }))
     }
 
+    async fn get_with_expiry(
+        &self,
+        key: &str,
+    ) -> Result<Option<tinystoragedrivers_core::BlobSource>> {
+        let Some(mut source) = self.get_stream_with_expiry(key).await? else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        source
+            .reader
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| StorageError::unavailable("blob stream failed"))?;
+        Ok(Some(tinystoragedrivers_core::BlobSource {
+            blob: Blob {
+                meta: source.meta,
+                bytes,
+            },
+            expires_at_ms: source.expires_at_ms,
+        }))
+    }
+
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         let Some(head) = self.head(key).await? else {
             return Ok(None);
@@ -286,3 +407,7 @@ impl BlobStore for BusBlobs {
         Ok(listed.into_iter().map(meta).collect())
     }
 }
+
+#[cfg(test)]
+#[path = "blobs_tests.rs"]
+mod tests;

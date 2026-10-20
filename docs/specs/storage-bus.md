@@ -108,14 +108,14 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 5` (crate `tinystoragedrivers-bus`).
+Contract version: `CONTRACT_VERSION = 6` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
 | --- | --- | --- |
 | `Documents` | 17, see `DOCUMENTS_SELECTORS` | private |
 | `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams`, `Seal`, `Info` | private |
-| `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities` | private |
+| `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities`, `GetWithExpiry`, `GetStreamWithExpiry`, `PutUntil`, `PutStreamUntil` | private |
 | `Secrets` | `Get`, `Set`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
 | `Queues` | `Features`, `EnsureQueue`, `Enqueue`, `Receive`, `Ack`, `Nack`, `Extend`, `Stats`, `DeadLetters`, `Redrive`, `Purge` | private |
 
@@ -126,7 +126,9 @@ Size limits (constants in the crate, enforced by the server before native I/O):
   escaping overhead cannot reach the frame.
 - `MAX_PAGE_ITEMS` and `MAX_BATCH_OPS` are 1,000 records or operations.
 - `MAX_INLINE_BLOB_BYTES` is 1 MiB (a JSON byte array can cost 4 bytes per byte): larger blobs use `PutStream` / `GetStream`
-  over a `TinyBus` stream in `BLOB_STREAM_CHUNK_BYTES` (512 KiB) chunks.
+  over a `TinyBus` stream in `BLOB_STREAM_CHUNK_BYTES` (512 KiB) chunks. The
+  expiry-aware `GetStreamWithExpiry` / `PutStreamUntil` variants use the same
+  streaming limit and bind the deadline to the same read or write as the body.
 - `MAX_PRESIGN_TTL_SECS` is 3,600.
 - `MAX_QUEUE_MESSAGE_BYTES` is 256 KiB of payload JSON text per queue message.
 
@@ -184,9 +186,9 @@ business: file and MongoDB reclaim the lapsed blob on the read that notices it
 (and expose `sweep_expired_blobs` / `sweep_expired_blobs_generation` for a
 sweeper), S3 only reclaims through `S3Blobs::sweep_expired` because object
 deletes cannot be conditional. The conformance suite asserts expiry on every
-driver that claims the capability. On the
-wire `PutBlobRequest` and `PutBlobStreamRequest` gain an optional `ttl_ms` and
-`BlobCapabilities` gains `ttl`; adding them made the contract version 3. A
+driver that claims the capability. On the wire `PutBlobRequest` and
+`PutBlobStreamRequest` gain an optional `ttl_ms` and `BlobCapabilities` gains
+`ttl`; adding them made the contract version 3. A
 SQLite database written by an earlier release gains the `expires_at_ms` column
 on the next migrating open; a read-only `existing_schema` open refuses the old
 layout like any other schema drift.
@@ -289,6 +291,28 @@ or `{"kind":"dead_letter","reason":"..."}`. `Features` replies
 - Compatibility: a version 5 module calls `Queues.Features` while connecting,
   so it needs a version 5 host; a version 4 module never names the object.
 
+Version 6 adds expiry-aware blob selectors without changing existing payload
+shapes. A version 6 client can continue using legacy blob operations against
+an older host; absolute-expiry migration fails closed if the new selector is
+not implemented. Version 5 clients never name the new selectors.
+
+The four selectors are `GetWithExpiry`, `GetStreamWithExpiry`, `PutUntil`, and
+`PutStreamUntil`. They do not change `BlobInfo`, `BlobBody`, `BlobStreamHead`,
+`PutBlobRequest`, `PutBlobStreamRequest`, or `BlobCapabilities`, all of which
+keep their existing `deny_unknown_fields` wire shape. Buffered and streamed
+source replies carry bytes and their stored absolute `expires_at_ms` from the
+same backend read; a missing deadline means known permanence. The write
+selectors store the supplied absolute deadline rather than restarting a
+relative TTL. Deadlines at or before the backend clock are invisible on
+arrival.
+
+The client transport and native blob port default to `Unsupported` for these
+new methods. A client receiving that refusal from an old server or driver
+returns an error; it must not retry through legacy `Get`, `Put`, or a relative
+TTL. No absolute-expiry field is added to the existing capability reply. Each
+selector is scoped to the same captured blob-key prefixes as its legacy
+operation.
+
 ## Real TinyBus transport
 
 `tinystoragedrivers-busproxy` is the `TinyBus` half that `-client` leaves out:
@@ -296,9 +320,10 @@ or `{"kind":"dead_letter","reason":"..."}`. `Features` replies
 - **Module side.** `connect_storage(connection)` returns the module's
   `BusStorage` over a `BusTransport`: ordinary calls are proxy calls to
   `/ai/tinyhumans/tinystorage/<Object>` (`Secrets` on the confidential route),
-  `PutStream` opens a bus stream on the host and writes the body in
-  `BLOB_STREAM_CHUNK_BYTES` chunks while the call is outstanding, `GetStream`
-  accepts the stream the host opens on the caller, and watch invalidations
+  `PutStream` and `PutStreamUntil` open a bus stream on the host and write the
+  body in `BLOB_STREAM_CHUNK_BYTES` chunks while the call is outstanding;
+  `GetStream` and `GetStreamWithExpiry` accept the stream the host opens on the
+  caller, and watch invalidations
   arrive as `WatchChanged` signals.
 - **Host side.** `serve(connection, endpoint)` registers the five objects,
   claims `ai.tinyhumans.tinystorage.Storage` and hands every call, with the

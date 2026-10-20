@@ -7,8 +7,9 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use serde_json::Value;
 use tinystoragedrivers_bus::{
-    BLOB_STREAM_CHUNK_BYTES, BlobKeyRequest, BlobStreamHead, MAX_FRAME_BYTES, PutBlobStreamRequest,
-    WatchChanged,
+    BLOB_STREAM_CHUNK_BYTES, BlobKeyRequest, BlobStreamHead, BlobStreamHeadWithExpiry,
+    BlobWithExpiry, MAX_FRAME_BYTES, PutBlobStreamRequest, PutBlobStreamUntilRequest,
+    PutBlobUntilRequest, WatchChanged,
 };
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::broadcast;
@@ -56,13 +57,12 @@ impl Loopback {
 
     /// Serialize as a frame, enforce the cap and parse it back.
     fn frame(&self, value: &Value) -> Result<Value, WireError> {
-        let text = serde_json::to_string(value)
-            .map_err(|_| WireError::Transport("frame encode failed".into()))?;
+        let text = serde_json::to_string(value).map_err(frame_encode_failure)?;
         self.largest_frame.fetch_max(text.len(), Ordering::Relaxed);
         if text.len() > MAX_FRAME_BYTES {
             return Err(WireError::Transport("frame exceeds the 16 MiB cap".into()));
         }
-        serde_json::from_str(&text).map_err(|_| WireError::Transport("frame decode failed".into()))
+        serde_json::from_str(&text).map_err(frame_decode_failure)
     }
 
     fn chunked(&self, body: BlobBody) -> BlobBody {
@@ -104,6 +104,14 @@ fn wire_failure(failure: tinystoragedrivers_bus::StorageFailure) -> WireError {
     WireError::Storage(failure)
 }
 
+fn frame_encode_failure(_error: serde_json::Error) -> WireError {
+    WireError::Transport("frame encode failed".into())
+}
+
+fn frame_decode_failure(_error: serde_json::Error) -> WireError {
+    WireError::Transport("frame decode failed".into())
+}
+
 #[async_trait]
 impl StorageTransport for Loopback {
     async fn call(
@@ -126,17 +134,14 @@ impl StorageTransport for Loopback {
         head: PutBlobStreamRequest,
         body: BlobBody,
     ) -> Result<Value, WireError> {
-        let head = serde_json::to_value(&head)
-            .map_err(|_| WireError::Transport("frame encode failed".into()))?;
-        let head = serde_json::from_value(self.frame(&head)?)
-            .map_err(|_| WireError::Transport("frame decode failed".into()))?;
+        let head = serde_json::to_value(&head).map_err(frame_encode_failure)?;
+        let head = serde_json::from_value(self.frame(&head)?).map_err(frame_decode_failure)?;
         let info = self
             .server
             .put_blob_stream(head, self.chunked(body))
             .await
             .map_err(wire_failure)?;
-        let info = serde_json::to_value(&info)
-            .map_err(|_| WireError::Transport("frame encode failed".into()))?;
+        let info = serde_json::to_value(&info).map_err(frame_encode_failure)?;
         self.frame(&info)
     }
 
@@ -147,6 +152,67 @@ impl StorageTransport for Loopback {
         let found = self
             .server
             .get_blob_stream(request)
+            .await
+            .map_err(wire_failure)?;
+        Ok(found.map(|(head, body)| (head, self.chunked(body))))
+    }
+
+    async fn put_blob_until(&self, request: PutBlobUntilRequest) -> Result<Value, WireError> {
+        let request = self.frame(&serde_json::to_value(request).map_err(frame_encode_failure)?)?;
+        let reply = self
+            .server
+            .handle(
+                Admission::Private,
+                Object::Blobs.as_str(),
+                "PutUntil",
+                request,
+            )
+            .await
+            .map_err(wire_failure)?;
+        self.frame(&reply)
+    }
+
+    async fn put_blob_stream_until(
+        &self,
+        head: PutBlobStreamUntilRequest,
+        body: BlobBody,
+    ) -> Result<Value, WireError> {
+        let head = serde_json::to_value(&head).map_err(frame_encode_failure)?;
+        let head = serde_json::from_value(self.frame(&head)?).map_err(frame_decode_failure)?;
+        let info = self
+            .server
+            .put_blob_stream_until(head, self.chunked(body))
+            .await
+            .map_err(wire_failure)?;
+        let info = serde_json::to_value(&info).map_err(frame_encode_failure)?;
+        self.frame(&info)
+    }
+
+    async fn get_blob_with_expiry(
+        &self,
+        request: BlobKeyRequest,
+    ) -> Result<Option<BlobWithExpiry>, WireError> {
+        let request = self.frame(&serde_json::to_value(request).map_err(frame_encode_failure)?)?;
+        let reply = self
+            .server
+            .handle(
+                Admission::Private,
+                Object::Blobs.as_str(),
+                "GetWithExpiry",
+                request,
+            )
+            .await
+            .map_err(wire_failure)?;
+        serde_json::from_value(self.frame(&reply)?).map_err(frame_decode_failure)
+    }
+
+    async fn get_blob_stream_with_expiry(
+        &self,
+        request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHeadWithExpiry, BlobBody)>, WireError> {
+        let found = self
+            .server
+            .get_blob_stream_with_expiry(request)
             .await
             .map_err(wire_failure)?;
         Ok(found.map(|(head, body)| (head, self.chunked(body))))

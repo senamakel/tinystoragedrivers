@@ -65,6 +65,28 @@ async fn backend_blobs_reuses_predeclared_mapping_schema() {
 
     generation.put("object", vec![4], None).await.unwrap();
     assert_eq!(generation.get("object").await.unwrap().unwrap().bytes, [4]);
+    generation
+        .put_until("absolute", vec![5], None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        generation
+            .get_with_expiry("absolute")
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at_ms,
+        None
+    );
+    assert_eq!(
+        generation
+            .get_stream_with_expiry("absolute")
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at_ms,
+        None
+    );
     backend
         .purge_scope_generation(&scope, ScopeGeneration(1))
         .await

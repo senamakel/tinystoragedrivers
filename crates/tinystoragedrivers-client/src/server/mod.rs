@@ -21,8 +21,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tinystoragedrivers_bus::{
-    BlobInfo, BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind,
-    WatchChanged,
+    BlobInfo, BlobKeyRequest, BlobStreamHead, BlobStreamHeadWithExpiry, PutBlobStreamRequest,
+    PutBlobStreamUntilRequest, StorageFailure, StorageKind, WatchChanged,
 };
 use tinystoragedrivers_core::queue::QueueManifest;
 use tinystoragedrivers_core::{ScopedStorage, StorageError};
@@ -194,6 +194,30 @@ impl StorageServer {
         request: BlobKeyRequest,
     ) -> Result<Option<(BlobStreamHead, BlobBody)>, StorageFailure> {
         self.get_stream(request).await
+    }
+
+    /// `Blobs.PutStreamUntil`: store a streamed body with its absolute expiry.
+    ///
+    /// # Errors
+    /// A sanitized storage failure category.
+    pub async fn put_blob_stream_until(
+        &self,
+        head: PutBlobStreamUntilRequest,
+        body: BlobBody,
+    ) -> Result<BlobInfo, StorageFailure> {
+        self.put_stream_until(head, body).await
+    }
+
+    /// `Blobs.GetStreamWithExpiry`: atomically return expiry metadata and the
+    /// source body, or `None` when the blob is absent or expired.
+    ///
+    /// # Errors
+    /// A sanitized storage failure category.
+    pub async fn get_blob_stream_with_expiry(
+        &self,
+        request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHeadWithExpiry, BlobBody)>, StorageFailure> {
+        self.get_stream_with_expiry(request).await
     }
 }
 

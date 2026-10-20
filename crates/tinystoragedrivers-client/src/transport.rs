@@ -4,7 +4,8 @@ use std::fmt;
 use async_trait::async_trait;
 use serde_json::Value;
 use tinystoragedrivers_bus::{
-    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, WatchChanged,
+    BlobKeyRequest, BlobStreamHead, BlobStreamHeadWithExpiry, BlobWithExpiry, PutBlobStreamRequest,
+    PutBlobStreamUntilRequest, PutBlobUntilRequest, StorageFailure, StorageKind, WatchChanged,
 };
 use tinystoragedrivers_core::BlobReader;
 use tokio::sync::broadcast;
@@ -122,6 +123,56 @@ pub trait StorageTransport: Send + Sync + fmt::Debug {
         &self,
         request: BlobKeyRequest,
     ) -> Result<Option<(BlobStreamHead, BlobBody)>, WireError>;
+
+    /// `Blobs.PutUntil`: store bytes with the exact absolute expiry, or no
+    /// expiry when the field is `None`.
+    ///
+    /// The default keeps existing transports source-compatible and refuses
+    /// this new selector without falling back to relative TTL or plain Put.
+    async fn put_blob_until(&self, request: PutBlobUntilRequest) -> Result<Value, WireError> {
+        let _ = request;
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Unsupported,
+        }))
+    }
+
+    /// `Blobs.PutStreamUntil`: store a stream with the exact absolute expiry.
+    ///
+    /// The default refuses without consuming or forwarding the body.
+    async fn put_blob_stream_until(
+        &self,
+        head: PutBlobStreamUntilRequest,
+        body: BlobBody,
+    ) -> Result<Value, WireError> {
+        let _ = (head, body);
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Unsupported,
+        }))
+    }
+
+    /// `Blobs.GetWithExpiry`: atomically return a small blob and its exact
+    /// absolute expiry.
+    async fn get_blob_with_expiry(
+        &self,
+        request: BlobKeyRequest,
+    ) -> Result<Option<BlobWithExpiry>, WireError> {
+        let _ = request;
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Unsupported,
+        }))
+    }
+
+    /// `Blobs.GetStreamWithExpiry`: atomically return blob metadata, exact
+    /// absolute expiry, and the body stream.
+    async fn get_blob_stream_with_expiry(
+        &self,
+        request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHeadWithExpiry, BlobBody)>, WireError> {
+        let _ = request;
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Unsupported,
+        }))
+    }
 
     /// A receiver of `WatchChanged` signals for this caller binding. Subscribe
     /// before opening a watch so no signal is missed.

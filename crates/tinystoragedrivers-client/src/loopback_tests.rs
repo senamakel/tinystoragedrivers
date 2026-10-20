@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tinystoragedrivers_bus::{MAX_FRAME_BYTES, MAX_INLINE_BLOB_BYTES};
+use tinystoragedrivers_bus::{BlobKeyRequest, MAX_FRAME_BYTES, MAX_INLINE_BLOB_BYTES};
 use tinystoragedrivers_core::{
     Capability, CollectionSpec, ErrorKind, Filter, MemoryStorage, Precondition, Scope,
     ScopedStorage, StorageBackend, WatchNotice, WatchOptions, WriteOptions, conformance,
@@ -82,6 +82,93 @@ async fn a_blob_over_the_frame_cap_moves_over_a_stream() {
         bytes[usize::try_from(start).unwrap()..usize::try_from(end).unwrap()]
     );
     assert!(rig.loopback.largest_frame() <= MAX_FRAME_BYTES);
+}
+
+#[tokio::test]
+async fn absolute_expiry_reads_preserve_absence_across_inline_and_stream_paths() {
+    let rig = rig(Admission::Private).await;
+    let request = BlobKeyRequest {
+        key: "missing".into(),
+    };
+
+    assert!(
+        rig.loopback
+            .get_blob_with_expiry(request.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        rig.loopback
+            .get_blob_stream_with_expiry(request)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(rig.loopback.largest_frame() <= MAX_FRAME_BYTES);
+}
+
+struct PendingThenBytes {
+    pending: bool,
+    sent_bytes: bool,
+}
+
+impl AsyncRead for PendingThenBytes {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if !self.pending {
+            self.pending = true;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        if !self.sent_bytes {
+            self.sent_bytes = true;
+            buf.put_slice(b"chunk");
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct FailedRead;
+
+impl AsyncRead for FailedRead {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::other("source read failed")))
+    }
+}
+
+#[tokio::test]
+async fn chunked_reader_preserves_pending_and_error_results_without_corrupting_bytes_or_counts() {
+    let moved = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut reader = Box::pin(Chunked {
+        inner: Box::pin(PendingThenBytes {
+            pending: false,
+            sent_bytes: false,
+        }),
+        moved: Arc::clone(&moved),
+    });
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await.unwrap();
+    assert_eq!(bytes, b"chunk");
+    assert_eq!(moved.load(std::sync::atomic::Ordering::Relaxed), 5);
+
+    let moved = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut reader = Box::pin(Chunked {
+        inner: Box::pin(FailedRead),
+        moved: Arc::clone(&moved),
+    });
+    let mut bytes = Vec::new();
+    let error = reader.read_to_end(&mut bytes).await.unwrap_err();
+    assert_eq!(error.to_string(), "source read failed");
+    assert_eq!(bytes, [] as [u8; 0]);
+    assert_eq!(moved.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

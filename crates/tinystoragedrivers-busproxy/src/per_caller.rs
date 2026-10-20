@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tinybus::BusName;
 use tinystoragedrivers_bus::{
-    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, WatchChanged,
+    BlobKeyRequest, BlobStreamHead, BlobStreamHeadWithExpiry, PutBlobStreamRequest,
+    PutBlobStreamUntilRequest, StorageFailure, WatchChanged,
 };
 use tinystoragedrivers_client::StorageServer;
 use tinystoragedrivers_core::BlobReader;
@@ -295,6 +296,42 @@ impl<F: Send + Sync + 'static> StorageEndpoint for PerCallerEndpoint<F> {
     ) -> Result<Option<(BlobStreamHead, BlobReader)>, HostFailure> {
         let (server, _) = self.bound(sender).await?;
         let Some((head, reader)) = server.get_blob_stream(request).await.map_err(refused)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            head,
+            Box::pin(BoundBlobReader {
+                reader,
+                _server: server,
+            }),
+        )))
+    }
+
+    async fn put_blob_stream_until(
+        &self,
+        sender: Option<&BusName>,
+        head: PutBlobStreamUntilRequest,
+        body: BlobReader,
+    ) -> Result<Value, HostFailure> {
+        let (server, _) = self.bound(sender).await?;
+        let info = server
+            .put_blob_stream_until(head, body)
+            .await
+            .map_err(refused)?;
+        serde_json::to_value(info).map_err(|_| HostFailure::Denied("encode-failed"))
+    }
+
+    async fn get_blob_stream_with_expiry(
+        &self,
+        sender: Option<&BusName>,
+        request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHeadWithExpiry, BlobReader)>, HostFailure> {
+        let (server, _) = self.bound(sender).await?;
+        let Some((head, reader)) = server
+            .get_blob_stream_with_expiry(request)
+            .await
+            .map_err(refused)?
+        else {
             return Ok(None);
         };
         Ok(Some((

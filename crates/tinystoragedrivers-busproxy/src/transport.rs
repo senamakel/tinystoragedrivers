@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tinybus::{BusName, Connection, MatchRule, Message, StreamDescriptor, StreamRef};
 use tinystoragedrivers_bus::{
-    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind, WatchChanged,
+    BlobKeyRequest, BlobStreamHead, BlobStreamHeadWithExpiry, BlobWithExpiry, PutBlobStreamRequest,
+    PutBlobStreamUntilRequest, PutBlobUntilRequest, StorageFailure, StorageKind, WatchChanged,
 };
 use tinystoragedrivers_client::{Object, StorageTransport, WireError};
 use tinystoragedrivers_core::{BlobReader, Scope};
@@ -292,6 +293,29 @@ fn decode_stream_reply(reply: Value) -> Result<Option<(BlobStreamHead, StreamRef
     )))
 }
 
+fn decode_expiry_stream_reply(
+    reply: Value,
+) -> Result<Option<(BlobStreamHeadWithExpiry, StreamRef)>, WireError> {
+    if reply.is_null() {
+        return Ok(None);
+    }
+    let Value::Array(mut items) = reply else {
+        return Err(WireError::Transport(
+            "malformed GetStreamWithExpiry reply".into(),
+        ));
+    };
+    let (Some(stream), Some(head), None) = (items.pop(), items.pop(), items.pop()) else {
+        return Err(WireError::Transport(
+            "malformed GetStreamWithExpiry reply".into(),
+        ));
+    };
+    let malformed = |_| WireError::Transport("malformed GetStreamWithExpiry reply".into());
+    Ok(Some((
+        serde_json::from_value(head).map_err(malformed)?,
+        serde_json::from_value(stream).map_err(malformed)?,
+    )))
+}
+
 #[async_trait]
 impl StorageTransport for BusTransport {
     async fn call(
@@ -362,6 +386,89 @@ impl StorageTransport for BusTransport {
             .await
             .map_err(wire_error)?;
         let Some((head, stream)) = decode_stream_reply(reply)? else {
+            return Ok(None);
+        };
+        let reader = self
+            .connection
+            .accept_stream_from(&stream, &self.owner)
+            .map_err(|error| transport_error(&error))?;
+        Ok(Some((head, blob_reader(reader))))
+    }
+
+    async fn put_blob_until(&self, request: PutBlobUntilRequest) -> Result<Value, WireError> {
+        <Self as StorageTransport>::call(self, Object::Blobs, "PutUntil", wire_value(&request))
+            .await
+    }
+
+    async fn put_blob_stream_until(
+        &self,
+        head: PutBlobStreamUntilRequest,
+        mut body: BlobReader,
+    ) -> Result<Value, WireError> {
+        let len = head.len;
+        let mut descriptor = StreamDescriptor::with_len(len);
+        if let Some(content_type) = &head.content_type {
+            descriptor = descriptor.content_type(content_type.clone());
+        }
+        let writer = self
+            .connection
+            .open_stream_with_timeout(&self.host, descriptor, self.timeout)
+            .await
+            .map_err(|error| transport_error(&error))?;
+        let message = self.streamed_call(
+            "PutStreamUntil",
+            json!([wire_value(&head), wire_value(&writer.stream_ref())]),
+        )?;
+        let sending = async {
+            pump(writer, &mut body, len)
+                .await
+                .map_err(|error| match error {
+                    PumpError::Short => WireError::Storage(StorageFailure {
+                        kind: StorageKind::InvalidInput,
+                    }),
+                    PumpError::Source => WireError::Transport("blob source failed".into()),
+                    PumpError::Bus(error) => transport_error(&error),
+                })
+        };
+        let calling = async {
+            self.connection
+                .call_raw(message, self.timeout)
+                .await
+                .map_err(wire_error)
+        };
+        let (reply, ()) = tokio::try_join!(calling, sending)?;
+        Ok(reply)
+    }
+
+    async fn get_blob_with_expiry(
+        &self,
+        request: BlobKeyRequest,
+    ) -> Result<Option<BlobWithExpiry>, WireError> {
+        let reply = <Self as StorageTransport>::call(
+            self,
+            Object::Blobs,
+            "GetWithExpiry",
+            wire_value(&request),
+        )
+        .await?;
+        if reply.is_null() {
+            return Ok(None);
+        }
+        serde_json::from_value(reply)
+            .map(Some)
+            .map_err(|_| WireError::Transport("malformed GetWithExpiry reply".into()))
+    }
+
+    async fn get_blob_stream_with_expiry(
+        &self,
+        request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHeadWithExpiry, BlobReader)>, WireError> {
+        let reply = self
+            .proxy(Object::Blobs)?
+            .call::<Value>("GetStreamWithExpiry", (wire_value(&request),))
+            .await
+            .map_err(wire_error)?;
+        let Some((head, stream)) = decode_expiry_stream_reply(reply)? else {
             return Ok(None);
         };
         let reader = self

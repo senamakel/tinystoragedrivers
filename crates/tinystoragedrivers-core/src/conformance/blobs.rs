@@ -307,14 +307,101 @@ async fn expiry(storage: &ScopedStorage) {
             ErrorKind::Unsupported(Capability::BlobTtl),
             "put_stream_expiring without the capability",
         );
+        fails(
+            blobs.get_with_expiry(&key).await,
+            ErrorKind::Unsupported(Capability::BlobTtl),
+            "get_with_expiry without support",
+        );
+        fails(
+            blobs.put_until(&key, vec![1], None, None).await,
+            ErrorKind::Unsupported(Capability::BlobTtl),
+            "put_until without support",
+        );
+        fails(
+            blobs
+                .put_stream_until(&key, reader(&[1]), 1, None, None)
+                .await,
+            ErrorKind::Unsupported(Capability::BlobTtl),
+            "put_stream_until without support",
+        );
         assert_absent(storage, &key, "refused write stored nothing").await;
         return;
     }
 
+    expiry_absolute(storage).await;
+    expiry_relative(storage, &key, day).await;
+}
+
+async fn expiry_absolute(storage: &ScopedStorage) {
+    let blobs = storage.blobs();
+    let deadline = crate::memory::system_clock().saturating_add(86_400_000);
+    let absolute = format!("{}/absolute.bin", unique("ttl"));
+    ok(
+        blobs
+            .put_until(&absolute, b"absolute".to_vec(), Some("x/y"), Some(deadline))
+            .await,
+        "put_until",
+    );
+    let source = ok(blobs.get_with_expiry(&absolute).await, "get_with_expiry")
+        .expect("absolute source is live");
+    assert_eq!(source.blob.bytes, b"absolute");
+    assert_eq!(source.expires_at_ms, Some(deadline));
+    let mut streamed_source = ok(
+        blobs.get_stream_with_expiry(&absolute).await,
+        "get_stream_with_expiry",
+    )
+    .expect("absolute stream source is live");
+    assert_eq!(streamed_source.expires_at_ms, Some(deadline));
+    let mut streamed_bytes = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut streamed_source.reader, &mut streamed_bytes)
+        .await
+        .expect("absolute stream reads");
+    assert_eq!(streamed_bytes, b"absolute");
+
+    let absolute_stream = format!("{}/absolute-stream.bin", unique("ttl"));
+    ok(
+        blobs
+            .put_stream_until(
+                &absolute_stream,
+                reader(b"streamed"),
+                8,
+                Some("x/y"),
+                Some(deadline),
+            )
+            .await,
+        "put_stream_until",
+    );
+    assert_eq!(
+        ok(
+            blobs.get_with_expiry(&absolute_stream).await,
+            "get stream target expiry"
+        )
+        .expect("stream target exists")
+        .expires_at_ms,
+        Some(deadline)
+    );
+
+    let permanent = format!("{}/permanent.bin", unique("ttl"));
+    ok(
+        blobs
+            .put_until(&permanent, b"forever".to_vec(), None, None)
+            .await,
+        "put_until permanent",
+    );
+    let source = ok(
+        blobs.get_with_expiry(&permanent).await,
+        "get permanent source with expiry",
+    )
+    .expect("permanent source is live");
+    assert_eq!(source.expires_at_ms, None);
+}
+
+async fn expiry_relative(storage: &ScopedStorage, key: &str, day: Duration) {
+    let blobs = storage.blobs();
     // A lifetime far away leaves the blob readable everywhere.
     let meta = ok(
         blobs
-            .put_expiring(&key, b"hello world".to_vec(), Some("text/plain"), day)
+            .put_expiring(key, b"hello world".to_vec(), Some("text/plain"), day)
             .await,
         "put_expiring",
     );
@@ -322,59 +409,52 @@ async fn expiry(storage: &ScopedStorage) {
         (meta.len, meta.content_type.as_deref()),
         (11, Some("text/plain"))
     );
-    assert_eq!(ok(blobs.head(&key).await, "head live"), Some(meta.clone()));
+    assert_eq!(ok(blobs.head(key).await, "head live"), Some(meta.clone()));
     assert_eq!(
-        ok(blobs.get(&key).await, "get live").expect("live").bytes,
+        ok(blobs.get(key).await, "get live").expect("live").bytes,
         b"hello world"
     );
     assert_eq!(
-        ok(blobs.get_range(&key, 6..11).await, "range live").as_deref(),
+        ok(blobs.get_range(key, 6..11).await, "range live").as_deref(),
         Some(&b"world"[..])
     );
-    assert!(ok(blobs.get_stream(&key).await, "stream live").is_some());
-    assert_eq!(ok(blobs.list(&key).await, "list live"), [meta]);
+    assert!(ok(blobs.get_stream(key).await, "stream live").is_some());
+    assert_eq!(ok(blobs.list(key).await, "list live"), [meta]);
 
     // A zero lifetime is expired on arrival, and replaces what was there.
     let meta = ok(
-        blobs
-            .put_expiring(&key, vec![9], None, Duration::ZERO)
-            .await,
+        blobs.put_expiring(key, vec![9], None, Duration::ZERO).await,
         "zero lifetime",
     );
     assert_eq!(meta.len, 1, "the write still reports what it stored");
-    assert_absent(storage, &key, "zero lifetime").await;
+    assert_absent(storage, key, "zero lifetime").await;
     assert!(
-        !ok(blobs.delete(&key).await, "delete expired"),
+        !ok(blobs.delete(key).await, "delete expired"),
         "an expired blob does not exist"
     );
 
     // A plain write after an expiring one is permanent.
     ok(
-        blobs.put_expiring(&key, vec![1], None, day).await,
+        blobs.put_expiring(key, vec![1], None, day).await,
         "expiring again",
     );
-    ok(blobs.put(&key, vec![2, 2], None).await, "plain overwrite");
+    ok(blobs.put(key, vec![2, 2], None).await, "plain overwrite");
     assert_eq!(
-        ok(blobs.get(&key).await, "plain after expiring")
+        ok(blobs.get(key).await, "plain after expiring")
             .expect("permanent")
             .bytes,
         [2, 2]
     );
     // And an expired key can be written again.
     ok(
-        blobs
-            .put_expiring(&key, vec![3], None, Duration::ZERO)
-            .await,
+        blobs.put_expiring(key, vec![3], None, Duration::ZERO).await,
         "expire the permanent blob",
     );
-    assert_absent(storage, &key, "replaced by an expired write").await;
-    ok(blobs.put(&key, vec![4], None).await, "reuse expired key");
-    assert_eq!(
-        ok(blobs.get(&key).await, "reused").expect("live").bytes,
-        [4]
-    );
+    assert_absent(storage, key, "replaced by an expired write").await;
+    ok(blobs.put(key, vec![4], None).await, "reuse expired key");
+    assert_eq!(ok(blobs.get(key).await, "reused").expect("live").bytes, [4]);
 
-    expiry_streamed(storage, &key).await;
+    expiry_streamed(storage, key).await;
 }
 
 /// The streamed form and a lapsing lifetime; removes `key` when done.

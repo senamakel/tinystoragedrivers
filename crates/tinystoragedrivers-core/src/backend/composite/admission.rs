@@ -64,6 +64,16 @@ impl BlobStore for GenerationBlobs {
         self.admit().await?;
         self.inner.put_expiring(key, bytes, ct, ttl).await
     }
+    async fn put_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        ct: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.admit().await?;
+        self.inner.put_until(key, bytes, ct, expires_at_ms).await
+    }
     async fn put_stream_expiring(
         &self,
         key: &str,
@@ -77,13 +87,34 @@ impl BlobStore for GenerationBlobs {
             .put_stream_expiring(key, reader, len, ct, ttl)
             .await
     }
+    async fn put_stream_until(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        ct: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.admit().await?;
+        self.inner
+            .put_stream_until(key, reader, len, ct, expires_at_ms)
+            .await
+    }
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         self.admit().await?;
         self.inner.get(key).await
     }
+    async fn get_with_expiry(&self, key: &str) -> Result<Option<crate::BlobSource>> {
+        self.admit().await?;
+        self.inner.get_with_expiry(key).await
+    }
     async fn get_stream(&self, key: &str) -> Result<Option<BlobStream>> {
         self.admit().await?;
         self.inner.get_stream(key).await
+    }
+    async fn get_stream_with_expiry(&self, key: &str) -> Result<Option<crate::BlobSourceStream>> {
+        self.admit().await?;
+        self.inner.get_stream_with_expiry(key).await
     }
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         self.admit().await?;
@@ -163,6 +194,15 @@ impl BlobStore for FencedBlobs {
     ) -> Result<BlobMeta> {
         Err(unfenceable())
     }
+    async fn put_until(
+        &self,
+        _: &str,
+        _: Vec<u8>,
+        _: Option<&str>,
+        _: Option<u64>,
+    ) -> Result<BlobMeta> {
+        Err(unfenceable())
+    }
     async fn put_stream_expiring(
         &self,
         _: &str,
@@ -170,6 +210,16 @@ impl BlobStore for FencedBlobs {
         _: u64,
         _: Option<&str>,
         _: Duration,
+    ) -> Result<BlobMeta> {
+        Err(unfenceable())
+    }
+    async fn put_stream_until(
+        &self,
+        _: &str,
+        _: BlobReader,
+        _: u64,
+        _: Option<&str>,
+        _: Option<u64>,
     ) -> Result<BlobMeta> {
         Err(unfenceable())
     }
@@ -194,8 +244,14 @@ impl BlobStore for FencedBlobs {
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         self.0.get(key).await
     }
+    async fn get_with_expiry(&self, key: &str) -> Result<Option<crate::BlobSource>> {
+        self.0.get_with_expiry(key).await
+    }
     async fn get_stream(&self, key: &str) -> Result<Option<BlobStream>> {
         self.0.get_stream(key).await
+    }
+    async fn get_stream_with_expiry(&self, key: &str) -> Result<Option<crate::BlobSourceStream>> {
+        self.0.get_stream_with_expiry(key).await
     }
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         self.0.get_range(key, range).await

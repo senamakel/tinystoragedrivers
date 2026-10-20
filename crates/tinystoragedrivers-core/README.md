@@ -14,6 +14,11 @@ Pure schema declarations and transform wire contracts live in
 here as `declarations`. The existing closure-backed `Schema`, `Step`, registry,
 keys and storage ports remain in core.
 
+Blob schema steps preserve the source's known absolute expiry: `get_with_expiry`
+reads bytes and deadline together, and `put_until` writes that same deadline.
+Drivers that cannot inspect or preserve it fail closed rather than treating an
+unknown lifetime as permanent.
+
 See [`../../docs/specs/storage-ports.md`](../../docs/specs/storage-ports.md).
 
 Native document invalidation is optional through `DocumentStore::watch` and

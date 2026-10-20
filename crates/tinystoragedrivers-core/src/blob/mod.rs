@@ -47,6 +47,19 @@ pub struct Blob {
     pub bytes: Vec<u8>,
 }
 
+/// A blob and the exact deadline stored with it.
+///
+/// `expires_at_ms` is an absolute Unix epoch millisecond deadline. `None`
+/// means the store knows the blob is permanent; stores that cannot determine
+/// the deadline must return `Unsupported` instead of using `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobSource {
+    /// Metadata and bytes read together with the deadline.
+    pub blob: Blob,
+    /// The stored absolute deadline, or `None` for a known permanent blob.
+    pub expires_at_ms: Option<u64>,
+}
+
 /// An owned asynchronous blob reader. Drivers may deliver bytes incrementally.
 pub type BlobReader = Pin<Box<dyn AsyncRead + Send + Unpin>>;
 
@@ -56,6 +69,25 @@ pub struct BlobStream {
     pub meta: BlobMeta,
     /// Contents; a read failure is reported as an I/O error.
     pub reader: BlobReader,
+}
+
+/// A streaming blob reader and the exact deadline stored with it.
+pub struct BlobSourceStream {
+    /// Metadata obtained with the deadline before the body is consumed.
+    pub meta: BlobMeta,
+    /// The stored absolute deadline, or `None` for a known permanent blob.
+    pub expires_at_ms: Option<u64>,
+    /// Contents; a read failure is reported as an I/O error.
+    pub reader: BlobReader,
+}
+
+impl std::fmt::Debug for BlobSourceStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlobSourceStream")
+            .field("meta", &self.meta)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for BlobStream {
@@ -142,6 +174,65 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
             Capability::BlobTtl,
             "this blob driver cannot expire blobs",
         ))
+    }
+
+    /// Store bytes with an absolute Unix epoch millisecond deadline.
+    ///
+    /// A deadline at or before the backend's current clock is expired on
+    /// arrival and is not visible to reads. This differs from
+    /// [`put_expiring`](Self::put_expiring), which starts a relative lifetime
+    /// at write time.
+    ///
+    /// # Errors
+    ///
+    /// Unsupported when the driver cannot preserve an absolute deadline, an
+    /// invalid key, or a backend error.
+    async fn put_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        let _ = (key, bytes, content_type, expires_at_ms);
+        Err(StorageError::unsupported(
+            Capability::BlobTtl,
+            "this blob store cannot preserve an absolute expiry",
+        ))
+    }
+
+    /// Store a stream with an absolute Unix epoch millisecond deadline.
+    ///
+    /// The default buffers exactly `len` bytes and delegates to
+    /// [`put_until`](Self::put_until). Streaming drivers may override it to
+    /// keep memory use bounded.
+    ///
+    /// # Errors
+    ///
+    /// Unsupported when absolute deadlines are unavailable, an invalid key or
+    /// length, a reader failure, or a backend error.
+    async fn put_stream_until(
+        &self,
+        key: &str,
+        mut reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        validate_user_blob_key(key)?;
+        let mut bytes = Vec::new();
+        (&mut reader)
+            .take(len.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|error| StorageError::backend("blob reader failed").with_source(error))?;
+        if bytes.len() as u64 != len {
+            return Err(StorageError::invalid_input(
+                "blob reader length differs from declared length",
+            ));
+        }
+        self.put_until(key, bytes, content_type, expires_at_ms)
+            .await
     }
 
     /// [`put_stream`](Self::put_stream) with a lifetime; see
@@ -236,6 +327,44 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     ///
     /// An invalid key, or a backend error.
     async fn get(&self, key: &str) -> Result<Option<Blob>>;
+
+    /// Read bytes and their stored absolute expiry from one backend snapshot.
+    ///
+    /// `expires_at_ms: None` means the store knows the blob is permanent. An
+    /// implementation that cannot inspect expiry must return `Unsupported`;
+    /// it must not infer permanence from the existing `get` API.
+    ///
+    /// # Errors
+    ///
+    /// Unsupported when the driver cannot report a stored deadline, an
+    /// invalid key, or a backend error.
+    async fn get_with_expiry(&self, key: &str) -> Result<Option<BlobSource>> {
+        let _ = key;
+        Err(StorageError::unsupported(
+            Capability::BlobTtl,
+            "this blob store cannot report an absolute expiry",
+        ))
+    }
+
+    /// Read a blob incrementally together with its stored absolute expiry.
+    ///
+    /// The default adapts [`get_with_expiry`](Self::get_with_expiry); stores
+    /// that need bounded reads may override it with a native streaming path.
+    ///
+    /// # Errors
+    ///
+    /// As [`get_with_expiry`](Self::get_with_expiry), or a later reader I/O
+    /// error.
+    async fn get_stream_with_expiry(&self, key: &str) -> Result<Option<BlobSourceStream>> {
+        Ok(self
+            .get_with_expiry(key)
+            .await?
+            .map(|source| BlobSourceStream {
+                meta: source.blob.meta,
+                expires_at_ms: source.expires_at_ms,
+                reader: Box::pin(std::io::Cursor::new(source.blob.bytes)),
+            }))
+    }
 
     /// Read the bytes in `range`, clamped to the blob's length.
     ///

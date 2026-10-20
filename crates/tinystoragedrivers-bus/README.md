@@ -21,6 +21,10 @@ The crate also pins the Streams, Blobs, Secrets and Queues wire shapes, finite
 selector sets, size limits and `CONTRACT_VERSION`; see
 [the storage bus spec](../../docs/specs/storage-bus.md).
 
+Contract version 6 adds expiry-aware blob read and absolute-deadline write
+selectors. It leaves the established `BlobInfo`, body, stream-head, and
+capabilities payload shapes unchanged.
+
 ## Dependency profiles
 
 The default `client` feature preserves the legacy `DocumentClient` API and

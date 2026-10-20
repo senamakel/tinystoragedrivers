@@ -1,10 +1,45 @@
 use super::*;
 use crate::PerCallerEndpoint;
+use async_trait::async_trait;
 use std::time::Duration;
 use tinybus::{broker::Broker, transport::memory::MemoryBus};
-use tinystoragedrivers_bus::STORAGE_INTERFACE;
+use tinystoragedrivers_bus::{
+    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, PutBlobStreamUntilRequest,
+    STORAGE_INTERFACE, StorageFailure, StorageKind, WatchChanged,
+};
 use tinystoragedrivers_client::StorageServer;
-use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
+use tinystoragedrivers_core::{BlobReader, MemoryStorage, Scope, StorageBackend};
+use tokio::sync::broadcast;
+
+struct LegacyEndpoint;
+
+#[async_trait]
+impl StorageEndpoint for LegacyEndpoint {
+    async fn call(&self, _call: StorageCall<'_>) -> Result<Value, HostFailure> {
+        Ok(Value::Null)
+    }
+
+    async fn put_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _head: PutBlobStreamRequest,
+        _body: BlobReader,
+    ) -> Result<Value, HostFailure> {
+        Ok(Value::Null)
+    }
+
+    async fn get_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHead, BlobReader)>, HostFailure> {
+        Ok(None)
+    }
+
+    fn watch_signals(&self, _sender: &BusName) -> Option<broadcast::Receiver<WatchChanged>> {
+        None
+    }
+}
 
 async fn service(object: Object) -> (ObjectService, Connection) {
     let bus = MemoryBus::new();
@@ -73,6 +108,42 @@ async fn each_object_advertises_its_selectors_and_only_secrets_are_confidential(
             object == Object::Secrets
         );
     }
+}
+
+#[tokio::test]
+async fn legacy_endpoints_fail_closed_for_new_expiry_stream_operations() {
+    let endpoint = LegacyEndpoint;
+    let caller = BusName::new(":1.7").unwrap();
+    let put = endpoint
+        .put_blob_stream_until(
+            Some(&caller),
+            PutBlobStreamUntilRequest {
+                key: "k".into(),
+                len: 1,
+                content_type: None,
+                expires_at_ms: Some(6_000),
+            },
+            Box::pin(std::io::Cursor::new(vec![1])),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        put,
+        HostFailure::Storage(StorageFailure {
+            kind: StorageKind::Unsupported
+        })
+    );
+    let get = endpoint
+        .get_blob_stream_with_expiry(Some(&caller), BlobKeyRequest { key: "k".into() })
+        .await
+        .err()
+        .expect("legacy endpoints must reject expiry stream reads");
+    assert_eq!(
+        get,
+        HostFailure::Storage(StorageFailure {
+            kind: StorageKind::Unsupported
+        })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

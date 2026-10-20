@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Capabilities, Capability, Clock, Result, Scope, async_trait,
-    clamp_range, is_reserved_blob_key, validate_user_blob_key, validate_user_blob_prefix,
+    Blob, BlobMeta, BlobSource, BlobStore, Capabilities, Capability, Clock, Result, Scope,
+    StorageError, async_trait, clamp_range, is_reserved_blob_key, validate_user_blob_key,
+    validate_user_blob_prefix,
 };
 
 use crate::connection::Db;
@@ -127,6 +128,42 @@ impl SqliteBlobs {
         ttl: Option<Duration>,
     ) -> Result<BlobMeta> {
         validate_user_blob_key(key)?;
+        let now = self.now_ms();
+        let expires_at =
+            ttl.map(|ttl| now.saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)));
+        self.store_at(key, bytes, content_type, expires_at, now)
+            .await
+    }
+
+    async fn store_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        validate_user_blob_key(key)?;
+        let now = self.now_ms();
+        let expires_at = expires_at_ms
+            .map(|at| {
+                i64::try_from(at).map_err(|_| {
+                    StorageError::invalid_input("blob expiry exceeds the sqlite timestamp range")
+                })
+            })
+            .transpose()?;
+        self.store_at(key, bytes, content_type, expires_at, now)
+            .await
+    }
+
+    async fn store_at(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at: Option<i64>,
+        now: i64,
+    ) -> Result<BlobMeta> {
+        validate_user_blob_key(key)?;
         let sql = format!(
             "INSERT INTO {} (scope, key, content_type, size, sha256, bytes, expires_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (scope, key) DO UPDATE SET content_type = excluded.content_type, size = excluded.size,
@@ -143,9 +180,6 @@ impl SqliteBlobs {
             content_type: content_type.map(str::to_owned),
         };
         // A plain write clears any lifetime the key had.
-        let now = self.now_ms();
-        let expires_at =
-            ttl.map(|ttl| now.saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)));
         let (scope, row) = (self.scope.clone(), described.clone());
         self.write(move |conn| {
             if expires_at.is_some() {
@@ -170,6 +204,47 @@ impl SqliteBlobs {
         })
         .await?;
         Ok(described)
+    }
+
+    async fn get_source(&self, key: &str) -> Result<Option<BlobSource>> {
+        validate_user_blob_key(key)?;
+        let sql = format!(
+            "SELECT content_type, bytes, expires_ms FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
+            self.table()
+        );
+        let (scope, key, now) = (self.scope.clone(), key.to_owned(), self.now_ms());
+        self.read(move |conn| {
+            let row: Option<(Option<String>, Vec<u8>, Option<i64>)> = conn
+                .query_row(&sql, params![scope.as_str(), key, now], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(during("get blob with expiry"))?;
+            row.map(|(content_type, bytes, expires_at)| {
+                let expires_at_ms = expires_at
+                    .map(|at| {
+                        u64::try_from(at).map_err(|_| {
+                            StorageError::serialization(
+                                "blob expiry is outside the supported range",
+                            )
+                        })
+                    })
+                    .transpose()?;
+                Ok(BlobSource {
+                    blob: Blob {
+                        meta: BlobMeta {
+                            key,
+                            len: bytes.len() as u64,
+                            content_type,
+                        },
+                        bytes,
+                    },
+                    expires_at_ms,
+                })
+            })
+            .transpose()
+        })
+        .await
     }
 }
 
@@ -226,6 +301,17 @@ impl BlobStore for SqliteBlobs {
         self.store(key, bytes, content_type, Some(ttl)).await
     }
 
+    async fn put_until(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.store_until(key, bytes, content_type, expires_at_ms)
+            .await
+    }
+
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         validate_user_blob_key(key)?;
         let sql = format!(
@@ -250,6 +336,10 @@ impl BlobStore for SqliteBlobs {
             }))
         })
         .await
+    }
+
+    async fn get_with_expiry(&self, key: &str) -> Result<Option<BlobSource>> {
+        self.get_source(key).await
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {

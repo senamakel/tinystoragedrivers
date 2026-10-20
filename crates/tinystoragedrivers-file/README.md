@@ -15,7 +15,7 @@ the data stays human-inspectable and easy to back up or diff. Selected with the
 │   ├── streams/<name>.jsonl                one {"offset", "value"} line per entry
 │   ├── streams/<name>.meta.json            {"name", "base"}
 │   ├── blobs/<key>                         the raw bytes
-│   └── blobs/<key>.meta.json               {"key", "content_type"}
+│   └── blobs/<key>.meta.json               {"key", "content_type", "expires_at_ms"?}
 ```
 
 Scopes sit under `scopes/`, so none can shadow `_meta`.
@@ -51,8 +51,10 @@ distinct on case-insensitive filesystems (macOS, Windows), never contains `.`
   prepared before the deletion fails. Tombstones are never pruned.
 - `ensure_collection` refuses (`AlreadyExists`, nothing written) a unique index
   that stored documents in any scope already violate.
-- A blob's sidecar decides existence: put writes the bytes then the sidecar,
-  delete removes the sidecar first.
+- A blob's sidecar decides existence. Puts stage the raw payload and sidecar,
+  durably journal the prior pair, then publish both atomically; reads recover an
+  interrupted replacement before observing either file. Delete removes the
+  sidecar first.
 
 ## Capabilities
 

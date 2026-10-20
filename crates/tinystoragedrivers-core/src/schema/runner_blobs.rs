@@ -36,9 +36,11 @@ pub(super) async fn run(
     });
     for listed in blobs.list(prefix).await? {
         // Listed a moment ago and gone now: another runner moved it.
-        let Some(blob) = blobs.get(&listed.key).await? else {
+        let Some(source) = blobs.get_with_expiry(&listed.key).await? else {
             continue;
         };
+        let expires_at_ms = source.expires_at_ms;
+        let blob = source.blob;
         let output = match run {
             Transform::Local(run) => run(listed.key.clone(), blob.meta.content_type, blob.bytes)?,
             Transform::External(descriptor) => super::executor::required(context.executor)?
@@ -57,7 +59,7 @@ pub(super) async fn run(
         };
         if let Some((target, content_type, bytes)) = output {
             check_target(context, &target)?;
-            write_target(context, &target, bytes, content_type).await?;
+            write_target(context, &target, bytes, content_type, expires_at_ms).await?;
             progress.written += 1;
         }
         blobs.delete(&listed.key).await?;
@@ -75,18 +77,25 @@ async fn write_target(
     target: &str,
     bytes: Vec<u8>,
     content_type: Option<String>,
+    expires_at_ms: Option<u64>,
 ) -> Result<()> {
     let blobs = context.storage.blobs();
-    match blobs.get(target).await? {
+    match blobs.get_with_expiry(target).await? {
         None => {
-            blobs.put(target, bytes, content_type.as_deref()).await?;
+            blobs
+                .put_until(target, bytes, content_type.as_deref(), expires_at_ms)
+                .await?;
             Ok(())
         }
-        Some(existing) if existing.bytes == bytes && existing.meta.content_type == content_type => {
+        Some(existing)
+            if existing.blob.bytes == bytes
+                && existing.blob.meta.content_type == content_type
+                && existing.expires_at_ms == expires_at_ms =>
+        {
             Ok(())
         }
         Some(_) => Err(StorageError::conflict(format!(
-            "step `{}` of `{}` maps a blob to `{target}`, which already holds different content; the source is kept",
+            "step `{}` of `{}` maps a blob to `{target}`, which already holds different content or expiry; the source is kept",
             context.step.id, context.step.item
         ))),
     }
