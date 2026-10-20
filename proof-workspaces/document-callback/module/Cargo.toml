@@ -14,4 +14,4 @@ serde_json.workspace = true
 tinystoragedrivers-bus = { path = "../../../crates/tinystoragedrivers-bus" }
 tinybus.workspace = true
 # Only the fixture SDK exports the native ABI; no native storage implementation.
-tinybus-module = { version = "0.3.7", git = "https://github.com/tinyhumansai/tinybus", rev = "2dc32b80efa58ed48bf2f40c721d1d018c8aeae1" }
+tinybus-module = { version = "0.3.8", git = "https://github.com/tinyhumansai/tinybus", rev = "5e3c882c46b84fe319b38332123dd8acc3cd826e" }

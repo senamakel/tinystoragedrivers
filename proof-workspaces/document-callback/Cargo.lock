@@ -958,8 +958,8 @@ dependencies = [
 
 [[package]]
 name = "tinybus"
-version = "0.3.7"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=2dc32b80efa58ed48bf2f40c721d1d018c8aeae1#2dc32b80efa58ed48bf2f40c721d1d018c8aeae1"
+version = "0.3.8"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=5e3c882c46b84fe319b38332123dd8acc3cd826e#5e3c882c46b84fe319b38332123dd8acc3cd826e"
 dependencies = [
  "async-trait",
  "flate2",
@@ -981,8 +981,8 @@ dependencies = [
 
 [[package]]
 name = "tinybus-module"
-version = "0.3.7"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=2dc32b80efa58ed48bf2f40c721d1d018c8aeae1#2dc32b80efa58ed48bf2f40c721d1d018c8aeae1"
+version = "0.3.8"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=5e3c882c46b84fe319b38332123dd8acc3cd826e#5e3c882c46b84fe319b38332123dd8acc3cd826e"
 dependencies = [
  "async-trait",
  "serde",

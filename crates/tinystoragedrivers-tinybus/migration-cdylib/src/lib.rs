@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use tinybus::{ObjectPath, Result};
+use tinybus::{ObjectPath, Result, WeakConnection};
 use tinybus_module::ModuleSetupContext;
 use tinystoragedrivers_tinybus::migration::{
     CollectionSpec, Expiry, Item, MigrationPayload, MigrationPayloadHandler, MigrationPayloadReply,
@@ -14,16 +14,28 @@ use tinystoragedrivers_tinybus::migration::{
     TransformError, TransformErrorKind, TransformKind, serve_module_migration,
 };
 
-struct Fixture;
+struct Fixture {
+    connection: WeakConnection,
+}
 
 #[tinybus::interface(name = "ai.tinyhumans.test.MigrationFixture")]
 impl Fixture {
-    #[allow(
-        clippy::unused_async,
-        reason = "TinyBus interface methods use async signatures by contract."
-    )]
     async fn ping(&self) -> Result<&'static str> {
-        Ok("fixture-alive")
+        let connection = self
+            .connection
+            .upgrade()
+            .ok_or_else(|| tinybus::Error::failed("fixture connection is not connected"))?;
+        let unique_name = connection
+            .unique_name()
+            .ok_or_else(|| tinybus::Error::failed("fixture connection is not connected"))?;
+        let owner = connection.name_owner(unique_name.as_str()).await?;
+        if owner.as_ref() == Some(&unique_name) {
+            Ok("fixture-alive")
+        } else {
+            Err(tinybus::Error::failed(
+                "fixture connection no longer owns its unique name",
+            ))
+        }
     }
 }
 
@@ -82,7 +94,9 @@ async fn setup(context: ModuleSetupContext) -> Result<()> {
         .connection()
         .serve_at(
             ObjectPath::new("/ai/tinyhumans/test/MigrationFixture")?,
-            Fixture,
+            Fixture {
+                connection: context.connection().downgrade(),
+            },
         )
         .await?;
     context

@@ -33,9 +33,9 @@ repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 # Pure declarations and transform wire contracts, shared without runtime dependencies.
 tinystoragedrivers-schema = { path = "crates/tinystoragedrivers-schema" }
 # Minimal document wire clients and confined host callbacks; never linked by core.
-tinybus = { version = "0.3.7", git = "https://github.com/tinyhumansai/tinybus", rev = "2dc32b80efa58ed48bf2f40c721d1d018c8aeae1", default-features = false }
+tinybus = { version = "0.3.8", git = "https://github.com/tinyhumansai/tinybus", rev = "5e3c882c46b84fe319b38332123dd8acc3cd826e", default-features = false }
 # Generate the trusted static linked export owned by the TinyBus storage adapter.
-tinybus-module = { version = "0.3.7", git = "https://github.com/tinyhumansai/tinybus", rev = "2dc32b80efa58ed48bf2f40c721d1d018c8aeae1", package = "tinybus-module", features = ["static-link"] }
+tinybus-module = { version = "0.3.8", git = "https://github.com/tinyhumansai/tinybus", rev = "5e3c882c46b84fe319b38332123dd8acc3cd826e", package = "tinybus-module", features = ["static-link"] }
 tinystoragedrivers-bus = { path = "crates/tinystoragedrivers-bus" }
 # Bus client implementing the storage ports, plus the reference server adapter.
 tinystoragedrivers-client = { path = "crates/tinystoragedrivers-client" }
