@@ -57,6 +57,7 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::ScopeEnumeration)
         .with(Capability::StreamSeal)
         .with(Capability::RecordMetadata)
+        .with(Capability::AtomicWriteOptions)
         .with(Capability::SharedAcrossProcesses)
         .with(Capability::CrossProcessCas)
 }
@@ -409,13 +410,32 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
-        self.atomic_batch_checked(Vec::new(), ops).await
+        self.atomic_batch_with(ops, WriteOptions::default()).await
+    }
+
+    async fn atomic_batch_with(
+        &self,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
+    ) -> Result<Vec<WriteResult>> {
+        self.atomic_batch_checked_with(Vec::new(), ops, options)
+            .await
     }
 
     async fn atomic_batch_checked(
         &self,
         checks: Vec<ReadCheck>,
         ops: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
+        self.atomic_batch_checked_with(checks, ops, WriteOptions::default())
+            .await
+    }
+
+    async fn atomic_batch_checked_with(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
     ) -> Result<Vec<WriteResult>> {
         for check in &checks {
             check.validate()?;
@@ -465,7 +485,11 @@ impl DocumentStore for SqliteDocuments {
                         doc,
                         precondition,
                     } => Ok(WriteResult::Put {
-                        version: ops::put(conn, ctx, &collection, &id, &doc, precondition)?,
+                        version: if options.is_default() {
+                            ops::put(conn, ctx, &collection, &id, &doc, precondition)?
+                        } else {
+                            ops::put_with(conn, ctx, &collection, &id, &doc, precondition, options)?
+                        },
                     }),
                     WriteOp::Delete {
                         collection,

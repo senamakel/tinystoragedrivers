@@ -1,7 +1,7 @@
 //! `DocumentStore` over the `Documents` object.
 use serde_json::Value;
 use tinystoragedrivers_bus as wire;
-use tinystoragedrivers_bus::MAX_BATCH_OPS;
+use tinystoragedrivers_bus::{MAX_BATCH_OPS, MAX_INLINE_BYTES};
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, DocumentWatch, Filter, Page,
     Precondition, Query, ReadCheck, Result, SearchHit, Sort, StorageError, Version, Versioned,
@@ -47,6 +47,65 @@ fn batch(checks: &[ReadCheck], ops: Vec<WriteOp>) -> Result<wire::BatchRequest> 
         checks: via(checks)?,
         ops: ops.into_iter().map(op_to_wire).collect::<Result<_>>()?,
     })
+}
+
+fn validate_module_options(options: WriteOptions) -> Result<()> {
+    if options.created_ms.is_some() {
+        return Err(StorageError::invalid_input(
+            "a module cannot set created_ms: it is a host-only migration option",
+        ));
+    }
+    Ok(())
+}
+
+fn batch_with(ops: Vec<WriteOp>, options: WriteOptions) -> Result<wire::BatchWriteRequest> {
+    if ops.len() > MAX_BATCH_OPS {
+        return Err(StorageError::invalid_input(
+            "an atomic batch is limited to 1000 operations",
+        ));
+    }
+    let request = wire::BatchWriteRequest {
+        ops: ops.into_iter().map(op_to_wire).collect::<Result<_>>()?,
+        options: wire::BatchWriteOptions {
+            schema: options.schema,
+            expires_ms: options.expires_ms,
+        },
+    };
+    ensure_batch_size(&request)?;
+    Ok(request)
+}
+
+fn batch_checked_with(
+    checks: &[ReadCheck],
+    ops: Vec<WriteOp>,
+    options: WriteOptions,
+) -> Result<wire::BatchCheckedWriteRequest> {
+    if ops.len() > MAX_BATCH_OPS || checks.len() > MAX_BATCH_OPS {
+        return Err(StorageError::invalid_input(
+            "an atomic batch is limited to 1000 operations",
+        ));
+    }
+    let request = wire::BatchCheckedWriteRequest {
+        checks: via(checks)?,
+        ops: ops.into_iter().map(op_to_wire).collect::<Result<_>>()?,
+        options: wire::BatchWriteOptions {
+            schema: options.schema,
+            expires_ms: options.expires_ms,
+        },
+    };
+    ensure_batch_size(&request)?;
+    Ok(request)
+}
+
+fn ensure_batch_size(request: &impl serde::Serialize) -> Result<()> {
+    let request_size = serde_json::to_vec(request)?.len();
+    if request_size > MAX_INLINE_BYTES {
+        Err(StorageError::invalid_input(
+            "an atomic batch exceeds the inline request limit",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -217,6 +276,24 @@ impl DocumentStore for BusDocuments {
         via(&results)
     }
 
+    async fn atomic_batch_with(
+        &self,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
+    ) -> Result<Vec<WriteResult>> {
+        validate_module_options(options)?;
+        self.capabilities.require(Capability::AtomicWriteOptions)?;
+        let request = batch_with(ops, options)?;
+        let results: wire::BatchResponse = self
+            .call(
+                "AtomicBatchWith",
+                &request,
+                Some(Capability::AtomicWriteOptions),
+            )
+            .await?;
+        via(&results)
+    }
+
     async fn atomic_batch_checked(
         &self,
         checks: Vec<ReadCheck>,
@@ -228,6 +305,25 @@ impl DocumentStore for BusDocuments {
                 "AtomicBatchChecked",
                 &request,
                 Some(Capability::ValidatedBatch),
+            )
+            .await?;
+        via(&results)
+    }
+
+    async fn atomic_batch_checked_with(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
+    ) -> Result<Vec<WriteResult>> {
+        validate_module_options(options)?;
+        self.capabilities.require(Capability::AtomicWriteOptions)?;
+        let request = batch_checked_with(&checks, ops, options)?;
+        let results: wire::BatchResponse = self
+            .call(
+                "AtomicBatchCheckedWith",
+                &request,
+                Some(Capability::AtomicWriteOptions),
             )
             .await?;
         via(&results)

@@ -28,6 +28,7 @@ fn all_holds_every_capability() {
             Capability::CollectionValidation,
             Capability::FullText,
             Capability::Transactions,
+            Capability::AtomicWriteOptions,
             Capability::Ttl,
             Capability::Fencing,
             Capability::PresignedUrls,

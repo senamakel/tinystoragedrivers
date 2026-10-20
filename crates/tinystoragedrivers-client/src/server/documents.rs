@@ -67,6 +67,8 @@ impl StorageServer {
                 let results = native(docs.atomic_batch_checked(checks, ops).await)?;
                 encode(&native(via::<_, wire::BatchResponse>(&results))?)
             }
+            "AtomicBatchWith" => self.atomic_batch_with(request).await,
+            "AtomicBatchCheckedWith" => self.atomic_batch_checked_with(request).await,
             "Search" => {
                 let r: wire::SearchRequest = decode(request)?;
                 let limit = r.limit.min(MAX_PAGE_ITEMS);
@@ -131,6 +133,42 @@ impl StorageServer {
         encode(&wire::Version(version.0))
     }
 
+    async fn atomic_batch_with(&self, request: Value) -> Reply {
+        if request.to_string().len() > MAX_INLINE_BYTES {
+            return Err(invalid());
+        }
+        let request: wire::BatchWriteRequest = decode(request)?;
+        let ops = batch_ops(request.ops)?;
+        let options = native_write_options(request.options);
+        let results = native(
+            self.storage
+                .documents()
+                .atomic_batch_with(ops, options)
+                .await,
+        )?;
+        encode(&native(via::<_, wire::BatchResponse>(&results))?)
+    }
+
+    async fn atomic_batch_checked_with(&self, request: Value) -> Reply {
+        if request.to_string().len() > MAX_INLINE_BYTES {
+            return Err(invalid());
+        }
+        let request: wire::BatchCheckedWriteRequest = decode(request)?;
+        if request.checks.len() > MAX_BATCH_OPS {
+            return Err(invalid());
+        }
+        let checks: Vec<ReadCheck> = into_native(&request.checks)?;
+        let ops = batch_ops(request.ops)?;
+        let options = native_write_options(request.options);
+        let results = native(
+            self.storage
+                .documents()
+                .atomic_batch_checked_with(checks, ops, options)
+                .await,
+        )?;
+        encode(&native(via::<_, wire::BatchResponse>(&results))?)
+    }
+
     /// A page that exceeds the item or byte cap is re-read with a smaller
     /// limit, so the returned cursor always continues exactly after the page.
     async fn query(&self, request: wire::QueryRequest) -> Reply {
@@ -160,6 +198,14 @@ impl StorageServer {
             }
             query.limit = Some((count.min(MAX_PAGE_ITEMS) / 2).max(1));
         }
+    }
+}
+
+fn native_write_options(options: wire::BatchWriteOptions) -> tinystoragedrivers_core::WriteOptions {
+    tinystoragedrivers_core::WriteOptions {
+        schema: options.schema,
+        expires_ms: options.expires_ms,
+        created_ms: None,
     }
 }
 

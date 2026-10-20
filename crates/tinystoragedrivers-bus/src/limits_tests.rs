@@ -11,7 +11,7 @@ const _: () = {
 
 #[test]
 fn limits_are_pinned() {
-    assert_eq!(CONTRACT_VERSION, 6);
+    assert_eq!(CONTRACT_VERSION, 7);
     assert_eq!(MAX_QUEUE_MESSAGE_BYTES, 256 * 1024);
     assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
     assert_eq!(MAX_INLINE_BYTES, 8 * 1024 * 1024);

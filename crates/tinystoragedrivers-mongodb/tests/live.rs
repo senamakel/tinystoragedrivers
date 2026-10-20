@@ -7,7 +7,10 @@
 mod support;
 
 use support::{connect, skip};
-use tinystoragedrivers_core::conformance;
+use tinystoragedrivers_core::{
+    Capability, CollectionSpec, ErrorKind, ExpectedDocument, Precondition, ReadCheck, Scope,
+    StorageBackend, Version, WriteOp, WriteOptions, conformance,
+};
 
 #[tokio::test]
 async fn live_conformance_on_a_replica_set() {
@@ -40,6 +43,94 @@ async fn live_conformance_without_transactions() {
         return skip("live_conformance_without_transactions");
     };
     conformance::run(&backend.without_transactions(), false).await;
+}
+
+#[tokio::test]
+async fn live_atomic_write_options_preserve_metadata_and_rollback() {
+    let Some(_) = support::url() else {
+        return support::skip("live_atomic_write_options_preserve_metadata_and_rollback");
+    };
+    let backend = support::connect_isolated("atomic_write_options").await;
+    let docs = backend
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    docs.ensure_collection(&CollectionSpec::new("records"))
+        .await
+        .unwrap();
+    docs.atomic_batch_with(
+        vec![WriteOp::Put {
+            collection: "records".into(),
+            id: "a".into(),
+            doc: serde_json::json!({"value":1}),
+            precondition: Precondition::Absent,
+        }],
+        WriteOptions::new().schema(2).expires_ms(9_000_000_000_000),
+    )
+    .await
+    .unwrap();
+    let before = docs.get("records", "a").await.unwrap().unwrap();
+    assert_eq!(before.meta.schema, 2);
+    assert_eq!(before.meta.expires_ms, Some(9_000_000_000_000));
+
+    let error = docs
+        .atomic_batch_checked_with(
+            vec![ReadCheck {
+                collection: "records".into(),
+                id: "a".into(),
+                expected: ExpectedDocument::Version(before.version),
+            }],
+            vec![
+                WriteOp::Put {
+                    collection: "records".into(),
+                    id: "a".into(),
+                    doc: serde_json::json!({"value":2}),
+                    precondition: Precondition::Version(before.version),
+                },
+                WriteOp::Put {
+                    collection: "records".into(),
+                    id: "b".into(),
+                    doc: serde_json::json!({"value":3}),
+                    precondition: Precondition::Version(Version(99)),
+                },
+            ],
+            WriteOptions::new().schema(7).expires_ms(9_000_000_000_001),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(docs.get("records", "a").await.unwrap().unwrap(), before);
+    assert!(docs.get("records", "b").await.unwrap().is_none());
+
+    let without_transactions = backend.without_transactions();
+    let no_tx_docs = without_transactions
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    assert!(
+        !no_tx_docs
+            .capabilities()
+            .contains(Capability::AtomicWriteOptions)
+    );
+    assert_eq!(
+        no_tx_docs
+            .atomic_batch_with(
+                vec![WriteOp::Put {
+                    collection: "records".into(),
+                    id: "no-tx".into(),
+                    doc: serde_json::json!({}),
+                    precondition: Precondition::Absent,
+                }],
+                WriteOptions::new().schema(1),
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::AtomicWriteOptions)
+    );
+    assert!(docs.get("records", "no-tx").await.unwrap().is_none());
 }
 
 #[tokio::test]

@@ -114,9 +114,16 @@ Versioned JSON **objects** in named collections.
     `_created_ms`, `_updated_ms` and `_expires_ms`, next to `_id`; a reserved
     path never reads the body. A driver without the capability returns
     `Meta::unknown()` (all zero, no expiry) and refuses a `put_with` that
-    declares a schema or expiry with `Unsupported(RecordMetadata)`. Batched
-    puts (`WriteOp::Put`) declare no options yet.
+    declares a schema or expiry with `Unsupported(RecordMetadata)`. The legacy
+    batch methods keep their default-options behavior. `AtomicWriteOptions`
+    separately marks drivers that preserve one `WriteOptions` value on every
+    put in the new atomic methods; non-default options also require
+    `RecordMetadata`.
   - `Transactions`: `atomic_batch`, all or nothing.
+  - `AtomicWriteOptions`: `atomic_batch_with` and
+    `atomic_batch_checked_with` preserve metadata for every put inside the
+    same transaction. Deletes are unchanged. Drivers without this capability
+    refuse the new calls without a nonatomic fallback or post-commit update.
   - `CollectionEnumeration`: `collections(prefix)` lists collection names with
     stored records in this handle's scope. It filters by a literal string prefix
     and sorts names lexicographically. Tombstones count as stored records so
@@ -283,6 +290,14 @@ Memory and SQLite support this operation. File storage refuses it until its
 multi-document persistence has a crash-atomic commit contract. Mongo supports
 it on transaction-capable deployments when public transactions are enabled;
 standalone servers do not advertise it.
+
+`atomic_batch_checked_with(read_checks, write_ops, options)` keeps the same
+pre-write check and rollback guarantees while applying one shared
+`WriteOptions` value to every put. `atomic_batch_with(write_ops, options)` is
+the unchecked counterpart. The existing `WriteOp` shape and old batch methods
+remain unchanged; the latter continue to declare default options. Both new
+methods default to `Unsupported(AtomicWriteOptions)`. Drivers advertise that
+capability only when both preserve options atomically.
 
 Mongo uses reserved metadata counters per storage scope.
 Every document mutation, including claims, deletion, expiry sweeping and writes

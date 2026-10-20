@@ -108,12 +108,12 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 6` (crate `tinystoragedrivers-bus`).
+Contract version: `CONTRACT_VERSION = 7` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
 | --- | --- | --- |
-| `Documents` | 17, see `DOCUMENTS_SELECTORS` | private |
+| `Documents` | 19, see `DOCUMENTS_SELECTORS` | private |
 | `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams`, `Seal`, `Info` | private |
 | `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities`, `GetWithExpiry`, `GetStreamWithExpiry`, `PutUntil`, `PutStreamUntil` | private |
 | `Secrets` | `Get`, `Set`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
@@ -312,6 +312,24 @@ returns an error; it must not retry through legacy `Get`, `Put`, or a relative
 TTL. No absolute-expiry field is added to the existing capability reply. Each
 selector is scoped to the same captured blob-key prefixes as its legacy
 operation.
+
+### Atomic batch metadata (version 7)
+
+`Documents.AtomicBatchWith` and `Documents.AtomicBatchCheckedWith` use new
+strict request types with one shared `BatchWriteOptions { schema, expires_ms }`
+value. The host applies it to every put inside the native atomic operation;
+deletes are unchanged. The checked form authorizes every dependency and write
+collection before forwarding and still checks dependencies against pre-write
+state. Both requests are bounded by `MAX_BATCH_OPS` and `MAX_INLINE_BYTES`.
+
+The DTO deliberately has no `created_ms`: that remains a trusted host-side
+migration option. Unknown fields, including `created_ms` or a forged scope,
+fail decoding before native I/O. `atomic_write_options` appears in the
+capability reply only when the backend implements the new atomic methods.
+Existing `AtomicBatch` and `AtomicBatchChecked` payloads and default-options
+semantics remain byte-for-byte unchanged. A client calling either new selector
+against an older server or an unsupported driver gets a refusal; it never
+falls back to ordinary puts or patches metadata after commit.
 
 ## Real TinyBus transport
 

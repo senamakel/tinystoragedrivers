@@ -35,14 +35,14 @@ pub use blobs::{
 #[cfg(feature = "client")]
 pub use client::DocumentClient;
 pub use documents::{
-    BatchRequest, BatchResponse, CapabilitiesReply, ClaimRequest, CollectionRequest,
-    CollectionSpec, CollectionsRequest, CountRequest, DOCUMENTS_OBJECT, DOCUMENTS_SELECTORS,
-    DeleteDocumentRequest, DeleteWhereRequest, Direction, EnsureCollectionRequest,
-    ExpectedDocument, Filter, GetDocumentRequest, IndexSpec, PutDocumentRequest, Query,
-    QueryRequest, QueryResponse, ReadCheck, STORAGE_INTERFACE, SearchHit, SearchRequest,
-    SearchSpec, Sort, StorageNeeds, StorageNeedsWithExactSecrets, ValidateCollectionSpecRequest,
-    WatchChanged, WatchCloseRequest, WatchNotice, WatchOpenRequest, WatchOpenResponse, WatchReset,
-    WriteOp, WriteResult, is_documents_selector,
+    BatchCheckedWriteRequest, BatchRequest, BatchResponse, BatchWriteOptions, BatchWriteRequest,
+    CapabilitiesReply, ClaimRequest, CollectionRequest, CollectionSpec, CollectionsRequest,
+    CountRequest, DOCUMENTS_OBJECT, DOCUMENTS_SELECTORS, DeleteDocumentRequest, DeleteWhereRequest,
+    Direction, EnsureCollectionRequest, ExpectedDocument, Filter, GetDocumentRequest, IndexSpec,
+    PutDocumentRequest, Query, QueryRequest, QueryResponse, ReadCheck, STORAGE_INTERFACE,
+    SearchHit, SearchRequest, SearchSpec, Sort, StorageNeeds, StorageNeedsWithExactSecrets,
+    ValidateCollectionSpecRequest, WatchChanged, WatchCloseRequest, WatchNotice, WatchOpenRequest,
+    WatchOpenResponse, WatchReset, WriteOp, WriteResult, is_documents_selector,
 };
 pub use limits::{
     BLOB_STREAM_CHUNK_BYTES, CONTRACT_VERSION, MAX_BATCH_OPS, MAX_FRAME_BYTES,

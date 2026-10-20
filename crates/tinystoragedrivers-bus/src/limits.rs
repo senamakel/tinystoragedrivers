@@ -12,8 +12,9 @@
 /// selector. Both are additive; see `docs/specs/storage-bus.md`.
 ///
 /// Version 5 adds the `Queues` object (`QUEUES_SELECTORS`) and
-/// [`MAX_QUEUE_MESSAGE_BYTES`].
-pub const CONTRACT_VERSION: u32 = 6;
+/// [`MAX_QUEUE_MESSAGE_BYTES`]. Version 7 adds explicit atomic batch selectors
+/// that carry uniform record metadata without changing the old batch shape.
+pub const CONTRACT_VERSION: u32 = 7;
 /// `TinyBus` frame cap. No request or reply may exceed it.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Encoded-size cap for one inline page, batch or record set (half the frame,
