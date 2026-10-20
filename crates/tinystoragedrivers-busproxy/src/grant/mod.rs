@@ -133,7 +133,18 @@ impl StorageGrant {
             return Err(Denied::Malformed);
         }
         if object == Object::Queues {
-            // StorageNeeds has no queue declaration, so queue access stays denied.
+            // Capability discovery must be possible for a client to bootstrap
+            // against a grant that intentionally has no queue authority. This
+            // does not grant queue access: every queue operation remains denied.
+            if selector == "Features" {
+                validate_request(object, selector, request)?;
+                return Ok(Plan::Answer(serde_json::json!({
+                    "dedupe": false,
+                    "groups": false,
+                    "priorities": false,
+                    "delay": false
+                })));
+            }
             return Err(Denied::Object);
         }
         validate_request(object, selector, request)?;
@@ -515,7 +526,11 @@ fn validate_request(object: Object, selector: &str, request: &Value) -> Result<(
         (Object::Documents, "Collections") => check!(wire::CollectionsRequest),
         (Object::Documents, "WatchOpen") => check!(wire::WatchOpenRequest),
         (Object::Documents, "WatchClose") => check!(wire::WatchCloseRequest),
-        (Object::Documents | Object::Blobs, "Capabilities") if request.is_null() => Ok(()),
+        (Object::Documents | Object::Blobs, "Capabilities") | (Object::Queues, "Features")
+            if request.is_null() =>
+        {
+            Ok(())
+        }
         (Object::Streams, "Append") => check!(wire::AppendRequest),
         (Object::Streams, "AppendBatch") => check!(wire::AppendBatchRequest),
         (Object::Streams, "AppendBatchIfOffset") => check!(wire::AppendBatchIfOffsetRequest),

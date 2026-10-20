@@ -483,6 +483,7 @@ pub struct ServedStorage {
     shared: Arc<Shared>,
     runtime: Handle,
     armed: bool,
+    release_name_on_drop: bool,
 }
 
 /// Four storage objects served below one lease-specific root.
@@ -557,6 +558,20 @@ impl ServedStorage {
         result
     }
 
+    /// Withdraw local objects while `TinyBus` is already tearing down their
+    /// owning module connection after setup cancellation.
+    pub(crate) async fn withdraw_before_connection_close(mut self) {
+        // Stop relays before the first await. TinyBus owns the name after
+        // detaching this peer, so a canceled withdrawal retries local object
+        // removal but never queues ReleaseName.
+        self.abort_forwarders();
+        self.release_name_on_drop = false;
+        for object in ALL {
+            self.connection.unserve(&object_path(object)).await;
+        }
+        self.armed = false;
+    }
+
     fn abort_forwarders(&self) {
         if let Ok(mut forwarders) = self.shared.forwarders.lock() {
             for (_, (_, task)) in forwarders.drain() {
@@ -573,11 +588,14 @@ impl Drop for ServedStorage {
         }
         self.abort_forwarders();
         let connection = self.connection.clone();
+        let release_name = self.release_name_on_drop;
         self.runtime.spawn(async move {
             for object in ALL {
                 connection.unserve(&object_path(object)).await;
             }
-            let _ = connection.release_name(HOST_NAME).await;
+            if release_name {
+                let _ = connection.release_name(HOST_NAME).await;
+            }
         });
     }
 }
@@ -641,6 +659,7 @@ pub(crate) async fn serve_on(
         shared,
         runtime,
         armed: true,
+        release_name_on_drop: true,
     })
 }
 

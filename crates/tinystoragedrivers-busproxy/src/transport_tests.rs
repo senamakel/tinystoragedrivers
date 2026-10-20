@@ -4,6 +4,7 @@ use crate::{HostFailure, StorageCall, StorageEndpoint, serve};
 use async_trait::async_trait;
 use tinybus::{broker::Broker, transport::memory::MemoryBus};
 use tinystoragedrivers_bus::{BlobInfo, BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest};
+use tinystoragedrivers_bus::{StorageFailure, StorageKind};
 use tinystoragedrivers_core::BlobReader;
 use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
@@ -555,4 +556,109 @@ async fn a_zero_length_stream_closed_before_accept_is_clean_eof() {
         .accept_stream_from(&reference, &sender_peer)
         .unwrap();
     assert_eq!(reader.next_chunk().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn local_short_body_wins_over_host_reply_during_sender_abort() {
+    let failure_state = PumpFailureState::default();
+    let send_failure_state = failure_state.clone();
+    let (short_body_tx, short_body_rx) = tokio::sync::oneshot::channel();
+    let (host_reply_tx, host_reply_rx) = tokio::sync::oneshot::channel();
+    let sending = async move {
+        send_failure_state.record(PumpSourceFailure::Short);
+        short_body_tx
+            .send(())
+            .map_err(|()| WireError::Transport("test short-body barrier closed".into()))?;
+        host_reply_rx
+            .await
+            .map_err(|_| WireError::Transport("test host-reply barrier closed".into()))?;
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::InvalidInput,
+        }))
+    };
+    let calling = async move {
+        short_body_rx
+            .await
+            .map_err(|_| WireError::Transport("test short-body barrier closed".into()))?;
+        host_reply_tx
+            .send(())
+            .map_err(|()| WireError::Transport("test host-reply barrier closed".into()))?;
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Backend,
+        }))
+    };
+
+    let result = join_streamed_put(calling, sending, failure_state).await;
+    assert!(matches!(
+        result,
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::InvalidInput
+        }))
+    ));
+}
+
+#[tokio::test]
+async fn local_source_error_wins_over_host_reply_during_sender_abort() {
+    let failure_state = PumpFailureState::default();
+    let send_failure_state = failure_state.clone();
+    let (source_error_tx, source_error_rx) = tokio::sync::oneshot::channel();
+    let (host_reply_tx, host_reply_rx) = tokio::sync::oneshot::channel();
+    let sending = async move {
+        send_failure_state.record(PumpSourceFailure::Source);
+        source_error_tx
+            .send(())
+            .map_err(|()| WireError::Transport("test source-error barrier closed".into()))?;
+        host_reply_rx
+            .await
+            .map_err(|_| WireError::Transport("test host-reply barrier closed".into()))?;
+        Err(WireError::Transport("blob source failed".into()))
+    };
+    let calling = async move {
+        source_error_rx
+            .await
+            .map_err(|_| WireError::Transport("test source-error barrier closed".into()))?;
+        host_reply_tx
+            .send(())
+            .map_err(|()| WireError::Transport("test host-reply barrier closed".into()))?;
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Backend,
+        }))
+    };
+
+    let result = join_streamed_put(calling, sending, failure_state).await;
+    assert!(matches!(
+        result,
+        Err(WireError::Transport(message)) if message == "blob source failed"
+    ));
+}
+
+#[tokio::test]
+async fn host_failure_before_a_local_source_error_does_not_wait_for_the_reader() {
+    let calling = async {
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Backend,
+        }))
+    };
+    let (drop_notice, mut drop_observed) = tokio::sync::oneshot::channel::<()>();
+    let sending = async move {
+        let _drop_notice = drop_notice;
+        std::future::pending::<Result<(), WireError>>().await
+    };
+    let result = tokio::select! {
+        biased;
+        result = join_streamed_put(calling, sending, PumpFailureState::default()) => result,
+        () = tokio::task::yield_now() => Err(WireError::Transport(
+            "host refusal waited for an unfinished source".into(),
+        )),
+    };
+    assert!(matches!(
+        result,
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Backend
+        }))
+    ));
+    assert!(matches!(
+        drop_observed.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
 }

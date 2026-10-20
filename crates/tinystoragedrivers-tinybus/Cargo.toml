@@ -18,6 +18,12 @@ tinystoragedrivers-busproxy.workspace = true
 tinybus = { workspace = true, features = ["modules"] }
 tinybus-module.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
+ulid = { workspace = true, optional = true }
+
+[features]
+default = []
+# TinyBus module schema discovery and confidential migration exchange adapter.
+migration-delivery = ["dep:ulid", "tinystoragedrivers-core/migration-delivery"]
 
 [dev-dependencies]
 tinybus = { workspace = true, features = ["modules", "macros"] }

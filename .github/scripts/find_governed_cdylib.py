@@ -13,7 +13,11 @@ TARGET_NAME = "tinystoragedrivers_governed_consumer_fixture"
 
 
 def artifact_paths(
-    build_output: str, target_directory: Path, suffix: str
+    build_output: str,
+    target_directory: Path,
+    suffix: str,
+    expected_package_name: str = PACKAGE_NAME,
+    target_name: str = TARGET_NAME,
 ) -> list[Path]:
     """Return existing cdylib files from the exact fixture package record."""
     selected: list[Path] = []
@@ -27,10 +31,10 @@ def artifact_paths(
         if message.get("reason") != "compiler-artifact":
             continue
         package_name = str(message.get("package_id", "")).rsplit("#", 1)[-1].split("@", 1)[0]
-        if package_name != PACKAGE_NAME:
+        if package_name != expected_package_name:
             continue
         target = message.get("target", {})
-        if target.get("name") != TARGET_NAME or "cdylib" not in target.get("kind", []):
+        if target.get("name") != target_name or "cdylib" not in target.get("kind", []):
             continue
         for filename in message.get("filenames", []):
             path = Path(filename)
@@ -48,13 +52,24 @@ def artifact_paths(
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 4:
-        print("usage: find_governed_cdylib.py BUILD_LOG TARGET_DIRECTORY SUFFIX", file=sys.stderr)
+    if len(argv) not in (4, 6):
+        print(
+            "usage: find_governed_cdylib.py BUILD_LOG TARGET_DIRECTORY SUFFIX [PACKAGE TARGET]",
+            file=sys.stderr,
+        )
         return 2
+    package_name_expected = argv[4] if len(argv) == 6 else PACKAGE_NAME
+    target_name = argv[5] if len(argv) == 6 else TARGET_NAME
     build_log = Path(argv[1])
     target_directory = Path(argv[2])
     try:
-        paths = artifact_paths(build_log.read_text(), target_directory, argv[3])
+        paths = artifact_paths(
+            build_log.read_text(),
+            target_directory,
+            argv[3],
+            package_name_expected,
+            target_name,
+        )
     except OSError as error:
         print(f"could not read governed cdylib compiler artifacts: {error}", file=sys.stderr)
         return 1

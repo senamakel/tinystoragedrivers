@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.dependencies]
 # Same canonical public callback contract as the owning production adapter.
-tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "207a9a7df15e44fdba00a807d0f7eaf21904ba0e", default-features = false }
+tinybus = { version = "0.3.10", git = "https://github.com/tinyhumansai/tinybus", rev = "6b3c5b0cc14b1d07b68055b17a937b11de613efd", default-features = false }
 serde_json = "1"
 
 [profile.dev]

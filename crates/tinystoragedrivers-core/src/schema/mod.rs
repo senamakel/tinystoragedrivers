@@ -62,6 +62,7 @@
 pub mod delivery;
 
 mod compose;
+mod declaration_export;
 mod executor;
 mod metadata;
 mod migrations;
@@ -73,6 +74,7 @@ mod runner_streams;
 mod types;
 
 pub use compose::{ComposedRegistry, Registry};
+pub use declaration_export::declaration_from_schema;
 pub use executor::{BoxFuture, TransformExecutor};
 pub use metadata::{SchemaMetadata, StepExecution, StepMetadata};
 pub use migrations::{MIGRATIONS_COLLECTION, Migrations, Progress};
@@ -95,3 +97,7 @@ pub use tinystoragedrivers_schema::{
 #[cfg(test)]
 #[path = "executor_tests.rs"]
 mod executor_tests;
+
+#[cfg(test)]
+#[path = "declaration_export_tests.rs"]
+mod declaration_export_tests;

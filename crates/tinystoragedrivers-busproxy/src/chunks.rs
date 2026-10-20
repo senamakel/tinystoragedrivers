@@ -1,6 +1,8 @@
 //! Moving blob bytes between a `BlobReader` and a `TinyBus` stream.
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll};
 
 use tinybus::{MAX_CHUNK_LEN, StreamReader, StreamWriter};
@@ -100,6 +102,37 @@ pub(crate) enum PumpError {
     Bus(tinybus::Error),
 }
 
+/// A local reader failure classified before the sender aborts its stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PumpSourceFailure {
+    Short,
+    Source,
+}
+
+/// Per-upload source failure state shared with the concurrent method call.
+#[derive(Clone, Default)]
+pub(crate) struct PumpFailureState(Arc<AtomicU8>);
+
+impl PumpFailureState {
+    pub(crate) fn record(&self, failure: PumpSourceFailure) {
+        let value = match failure {
+            PumpSourceFailure::Short => 1,
+            PumpSourceFailure::Source => 2,
+        };
+        let _ = self
+            .0
+            .compare_exchange(0, value, Ordering::Release, Ordering::Relaxed);
+    }
+
+    pub(crate) fn known(&self) -> Option<PumpSourceFailure> {
+        match self.0.load(Ordering::Acquire) {
+            1 => Some(PumpSourceFailure::Short),
+            2 => Some(PumpSourceFailure::Source),
+            _ => None,
+        }
+    }
+}
+
 /// Write exactly `len` bytes from `reader` into `writer` in stream-sized chunks
 /// and close it. On failure the stream is aborted so the receiver stops
 /// waiting.
@@ -107,9 +140,19 @@ pub(crate) enum PumpError {
 /// # Errors
 /// [`PumpError`] naming which side failed.
 pub(crate) async fn pump(
+    writer: StreamWriter,
+    reader: &mut BlobReader,
+    len: u64,
+) -> Result<(), PumpError> {
+    pump_with_failure_state(writer, reader, len, &PumpFailureState::default()).await
+}
+
+/// [`pump`] with local source failures made visible before aborting the stream.
+pub(crate) async fn pump_with_failure_state(
     mut writer: StreamWriter,
     reader: &mut BlobReader,
     len: u64,
+    failure_state: &PumpFailureState,
 ) -> Result<(), PumpError> {
     let mut remaining = len;
     let mut buf = vec![0_u8; MAX_CHUNK_LEN.min(usize::try_from(len).unwrap_or(MAX_CHUNK_LEN))];
@@ -136,6 +179,11 @@ pub(crate) async fn pump(
     match result {
         Ok(()) => writer.finish().await.map(|_| ()).map_err(PumpError::Bus),
         Err(error) => {
+            match error {
+                PumpError::Short => failure_state.record(PumpSourceFailure::Short),
+                PumpError::Source => failure_state.record(PumpSourceFailure::Source),
+                PumpError::Bus(_) => {}
+            }
             let _ = writer.abort().await;
             Err(error)
         }

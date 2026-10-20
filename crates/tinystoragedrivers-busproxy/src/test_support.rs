@@ -1,4 +1,24 @@
-//! Opt-in helpers for observing sanitized stream failures in integration tests.
+//! Opt-in helpers for observing content-free transport and shutdown stages.
+
+/// Content-free stage in a governed registration's asynchronous shutdown.
+#[cfg(feature = "test-stream-diagnostics")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegistrationShutdownStage {
+    /// The optional legacy endpoint shutdown future was entered.
+    LegacyShutdownStarted,
+    /// The optional legacy endpoint shutdown future returned.
+    LegacyShutdownReturned,
+    /// The linked service connection close future was entered.
+    ConnectionCloseStarted,
+    /// The linked service connection close future returned.
+    ConnectionCloseReturned,
+}
+
+/// Sender used to observe one registration's finite shutdown stages.
+#[cfg(feature = "test-stream-diagnostics")]
+#[doc(hidden)]
+pub type RegistrationShutdownProbe = tokio::sync::mpsc::UnboundedSender<RegistrationShutdownStage>;
 
 #[cfg(feature = "test-stream-diagnostics")]
 use std::fmt;
