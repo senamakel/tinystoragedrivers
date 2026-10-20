@@ -2522,10 +2522,14 @@ async fn assert_canceled_owner_transfer_cleanup(
     observer: &Connection,
     endpoint_drops: &AtomicUsize,
     drop_stages: &mut mpsc::UnboundedReceiver<crate::storage_host::StorageDropStage>,
+    shutdown_stages: &mut mpsc::UnboundedReceiver<
+        tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage,
+    >,
 ) {
     let mut last_name_state = "not observed";
     let mut last_endpoint_drops = 0;
     let mut observed_drop_stages = Vec::new();
+    let mut observed_shutdown_stages = Vec::new();
     let cleanup = async {
         loop {
             let name_released = match observer
@@ -2549,7 +2553,18 @@ async fn assert_canceled_owner_transfer_cleanup(
             while let Ok(stage) = drop_stages.try_recv() {
                 observed_drop_stages.push(stage);
             }
-            if name_released && last_endpoint_drops == 1 {
+            while let Ok(stage) = shutdown_stages.try_recv() {
+                observed_shutdown_stages.push(stage);
+            }
+            let close_returned = observed_shutdown_stages.last()
+                == Some(
+                    &tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::ConnectionCloseReturned,
+                );
+            let shutdown_finished = observed_drop_stages.last()
+                == Some(&crate::storage_host::StorageDropStage::ShutdownFinished(
+                    crate::storage_host::ShutdownStatus::Failure,
+                ));
+            if name_released && last_endpoint_drops == 1 && close_returned && shutdown_finished {
                 break;
             }
             tokio::task::yield_now().await;
@@ -2559,13 +2574,42 @@ async fn assert_canceled_owner_transfer_cleanup(
     while let Ok(stage) = drop_stages.try_recv() {
         observed_drop_stages.push(stage);
     }
+    while let Ok(stage) = shutdown_stages.try_recv() {
+        observed_shutdown_stages.push(stage);
+    }
     let current_endpoint_drops = endpoint_drops.load(Ordering::Acquire);
     assert!(
         cleanup_result.is_ok(),
         "canceled owner-transfer cleanup timed out: name_owner_state={last_name_state}, \
          last_observed_endpoint_drops={last_endpoint_drops}, \
          current_endpoint_drops={current_endpoint_drops}, \
-         cleanup_stages={observed_drop_stages:?}"
+         cleanup_stages={observed_drop_stages:?}, \
+         shutdown_stages={observed_shutdown_stages:?}"
+    );
+    assert_eq!(
+        observed_drop_stages,
+        [
+            crate::storage_host::StorageDropStage::OwnerDropEntered,
+            crate::storage_host::StorageDropStage::CleanupTaskStarted,
+            crate::storage_host::StorageDropStage::ShutdownFinished(
+                crate::storage_host::ShutdownStatus::Failure,
+            ),
+        ],
+        "legacy shutdown failure must still complete connection cleanup"
+    );
+    eprintln!(
+        "owner-transfer cleanup diagnostic stages: owner={observed_drop_stages:?}, \
+         registration={observed_shutdown_stages:?}"
+    );
+    assert_eq!(
+        observed_shutdown_stages,
+        [
+            tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::LegacyShutdownStarted,
+            tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::LegacyShutdownReturned,
+            tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::ConnectionCloseStarted,
+            tinystoragedrivers_busproxy::test_support::RegistrationShutdownStage::ConnectionCloseReturned,
+        ],
+        "owner-transfer cleanup should finish each observed shutdown boundary"
     );
 }
 
@@ -2588,6 +2632,7 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
         .unwrap();
     let observer_peer = observer.unique_name().unwrap();
     let endpoint_drops = Arc::new(AtomicUsize::new(0));
+    let (shutdown_probe, mut shutdown_stages) = mpsc::unbounded_channel();
     let endpoint = GovernedStorage::new(
         test_environment(CollectionSpec {
             name: "shared.records".to_owned(),
@@ -2601,7 +2646,8 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
     .with_legacy_endpoint(Arc::new(AliasMarkerEndpoint {
         hits: Arc::new(Mutex::new(Vec::new())),
         drop_counter: Some(Arc::clone(&endpoint_drops)),
-    }));
+    }))
+    .with_shutdown_probe(shutdown_probe);
     let (setup_ready, setup_wait) = tokio::sync::oneshot::channel();
     let (continue_setup, continue_wait) = tokio::sync::oneshot::channel();
     let (cleanup_probe, mut drop_stages) = mpsc::unbounded_channel();
@@ -2637,7 +2683,13 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
     attaching.abort();
     assert!(attaching.await.unwrap_err().is_cancelled());
     let _ = continue_setup.send(());
-    assert_canceled_owner_transfer_cleanup(&observer, &endpoint_drops, &mut drop_stages).await;
+    assert_canceled_owner_transfer_cleanup(
+        &observer,
+        &endpoint_drops,
+        &mut drop_stages,
+        &mut shutdown_stages,
+    )
+    .await;
     assert_eq!(observer.unique_name().unwrap(), observer_peer);
     assert!(observer.name_owner(tinybus::BUS_NAME).await.is_ok());
     assert!(
