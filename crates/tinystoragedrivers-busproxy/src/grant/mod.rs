@@ -237,6 +237,8 @@ impl StorageGrant {
                 Ok(forward(collection))
             }
             "AtomicBatch" | "AtomicBatchChecked" => self.batch(request, selector == "AtomicBatch"),
+            "AtomicBatchWith" => self.batch_with(request, false),
+            "AtomicBatchCheckedWith" => self.batch_with(request, true),
             "EnsureCollection" | "ValidateCollectionSpec" => {
                 let spec: CollectionSpec = request
                     .get("spec")
@@ -264,12 +266,31 @@ impl StorageGrant {
 
     fn batch(&self, request: &Value, reject_checks: bool) -> Result<Plan, Denied> {
         let batch: tinystoragedrivers_bus::BatchRequest = decode(request)?;
+        self.authorize_batch(&batch.checks, &batch.ops, reject_checks)
+    }
+
+    fn batch_with(&self, request: &Value, checked: bool) -> Result<Plan, Denied> {
+        if checked {
+            let batch: tinystoragedrivers_bus::BatchCheckedWriteRequest = decode(request)?;
+            self.authorize_batch(&batch.checks, &batch.ops, false)
+        } else {
+            let batch: tinystoragedrivers_bus::BatchWriteRequest = decode(request)?;
+            self.authorize_batch(&[], &batch.ops, false)
+        }
+    }
+
+    fn authorize_batch(
+        &self,
+        checks: &[tinystoragedrivers_bus::ReadCheck],
+        ops: &[tinystoragedrivers_bus::WriteOp],
+        reject_checks: bool,
+    ) -> Result<Plan, Denied> {
         let mut first = None;
-        for check in &batch.checks {
+        for check in checks {
             self.collection(&check.collection)?;
             first.get_or_insert(check.collection.as_str());
         }
-        for operation in &batch.ops {
+        for operation in ops {
             let collection = match operation {
                 tinystoragedrivers_bus::WriteOp::Put { collection, .. }
                 | tinystoragedrivers_bus::WriteOp::Delete { collection, .. } => collection,
@@ -277,7 +298,7 @@ impl StorageGrant {
             self.collection(collection)?;
             first.get_or_insert(collection.as_str());
         }
-        if reject_checks && !batch.checks.is_empty() {
+        if reject_checks && !checks.is_empty() {
             return Err(Denied::Malformed);
         }
         Ok(forward(first.unwrap_or_default()))
@@ -483,6 +504,8 @@ fn validate_request(object: Object, selector: &str, request: &Value) -> Result<(
         (Object::Documents, "DeleteWhere") => check!(wire::DeleteWhereRequest),
         (Object::Documents, "Claim") => check!(wire::ClaimRequest),
         (Object::Documents, "AtomicBatch" | "AtomicBatchChecked") => check!(wire::BatchRequest),
+        (Object::Documents, "AtomicBatchWith") => check!(wire::BatchWriteRequest),
+        (Object::Documents, "AtomicBatchCheckedWith") => check!(wire::BatchCheckedWriteRequest),
         (Object::Documents, "Search") => check!(wire::SearchRequest),
         (Object::Documents, "EnsureCollection") => check!(wire::EnsureCollectionRequest),
         (Object::Documents, "ValidateCollectionSpec") => {
@@ -522,7 +545,14 @@ fn is_write(object: Object, selector: &str) -> Result<bool, Denied> {
     Ok(match (object, selector) {
         (
             Object::Documents,
-            "Put" | "Delete" | "DeleteWhere" | "Claim" | "AtomicBatch" | "AtomicBatchChecked"
+            "Put"
+            | "Delete"
+            | "DeleteWhere"
+            | "Claim"
+            | "AtomicBatch"
+            | "AtomicBatchChecked"
+            | "AtomicBatchWith"
+            | "AtomicBatchCheckedWith"
             | "DropCollection",
         )
         | (

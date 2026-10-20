@@ -2,7 +2,10 @@
 
 use super::*;
 use serde_json::json;
-use tinystoragedrivers_core::{CollectionSpec, ErrorKind, Precondition};
+use tinystoragedrivers_core::{
+    CollectionSpec, ErrorKind, ExpectedDocument, Precondition, ReadCheck, Version, WriteOp,
+    WriteOptions,
+};
 
 #[tokio::test]
 async fn existing_schema_keeps_declarations_and_scoped_deletion() {
@@ -100,6 +103,75 @@ async fn existing_schema_requires_persisted_specs_and_refuses_bootstrap() {
             .kind(),
         ErrorKind::InvalidInput
     );
+}
+
+#[tokio::test]
+async fn atomic_batch_with_persists_options_and_rolls_them_back_with_the_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let docs = storage
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    docs.ensure_collection(&CollectionSpec::new("records"))
+        .await
+        .unwrap();
+    docs.atomic_batch_with(
+        vec![WriteOp::Put {
+            collection: "records".into(),
+            id: "a".into(),
+            doc: json!({"value":1}),
+            precondition: Precondition::Absent,
+        }],
+        WriteOptions::new().schema(2).expires_ms(9_000_000_000_000),
+    )
+    .await
+    .unwrap();
+    let before = docs.get("records", "a").await.unwrap().unwrap();
+    assert_eq!(before.meta.schema, 2);
+    assert_eq!(before.meta.expires_ms, Some(9_000_000_000_000));
+
+    let error = docs
+        .atomic_batch_checked_with(
+            vec![ReadCheck {
+                collection: "records".into(),
+                id: "a".into(),
+                expected: ExpectedDocument::Version(before.version),
+            }],
+            vec![
+                WriteOp::Put {
+                    collection: "records".into(),
+                    id: "a".into(),
+                    doc: json!({"value":2}),
+                    precondition: Precondition::Version(before.version),
+                },
+                WriteOp::Put {
+                    collection: "records".into(),
+                    id: "b".into(),
+                    doc: json!({"value":3}),
+                    precondition: Precondition::Version(Version(99)),
+                },
+            ],
+            WriteOptions::new().schema(7).expires_ms(9_000_000_000_001),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(docs.get("records", "a").await.unwrap().unwrap(), before);
+    assert!(docs.get("records", "b").await.unwrap().is_none());
+    drop(docs);
+    drop(storage);
+    let reopened = SqliteStorage::open(dir.path()).unwrap();
+    let persisted = reopened
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .get("records", "a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted, before);
 }
 
 #[tokio::test]

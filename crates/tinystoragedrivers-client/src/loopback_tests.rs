@@ -6,8 +6,9 @@ use std::time::Duration;
 use serde_json::json;
 use tinystoragedrivers_bus::{BlobKeyRequest, MAX_FRAME_BYTES, MAX_INLINE_BLOB_BYTES};
 use tinystoragedrivers_core::{
-    Capability, CollectionSpec, ErrorKind, Filter, MemoryStorage, Precondition, Scope,
-    ScopedStorage, StorageBackend, WatchNotice, WatchOptions, WriteOptions, conformance,
+    Capability, CollectionSpec, ErrorKind, ExpectedDocument, Filter, MemoryStorage, Precondition,
+    ReadCheck, Scope, ScopedStorage, StorageBackend, WatchNotice, WatchOptions, WriteOp,
+    WriteOptions, WriteResult, conformance,
 };
 use tinystoragedrivers_secrets::{MemorySecrets, SecretStore};
 use tokio::io::AsyncReadExt;
@@ -690,9 +691,97 @@ async fn a_module_writes_options_reads_metadata_and_cannot_set_created_ms() {
     // Host-only capabilities stay hidden from the module.
     let caps = rig.storage.documents().capabilities();
     assert!(caps.contains(Capability::RecordMetadata));
+    assert!(caps.contains(Capability::AtomicWriteOptions));
     assert!(caps.contains(Capability::StreamSeal));
     assert!(!caps.contains(Capability::Maintenance));
     assert!(!caps.contains(Capability::ScopeEnumeration));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn atomic_write_options_roundtrip_and_failed_chunk_rolls_back() {
+    let rig = rig(Admission::Private).await;
+    let docs = rig.storage.documents();
+    let results = docs
+        .atomic_batch_with(
+            vec![
+                WriteOp::Put {
+                    collection: "meta".into(),
+                    id: "a".into(),
+                    doc: json!({"value":1}),
+                    precondition: Precondition::Absent,
+                },
+                WriteOp::Put {
+                    collection: "meta".into(),
+                    id: "b".into(),
+                    doc: json!({"value":2}),
+                    precondition: Precondition::Absent,
+                },
+            ],
+            WriteOptions::new().schema(2).expires_ms(9_000_000_000_000),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        results,
+        [
+            WriteResult::Put {
+                version: tinystoragedrivers_core::Version::FIRST,
+            },
+            WriteResult::Put {
+                version: tinystoragedrivers_core::Version::FIRST,
+            },
+        ]
+    );
+    for id in ["a", "b"] {
+        assert_eq!(docs.get("meta", id).await.unwrap().unwrap().meta.schema, 2);
+        assert_eq!(
+            docs.get("meta", id).await.unwrap().unwrap().meta.expires_ms,
+            Some(9_000_000_000_000)
+        );
+    }
+    let refused = docs
+        .atomic_batch_with(
+            vec![WriteOp::Put {
+                collection: "meta".into(),
+                id: "host-time".into(),
+                doc: json!({}),
+                precondition: Precondition::Absent,
+            }],
+            WriteOptions::new().created_ms(5),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.kind(), ErrorKind::InvalidInput);
+    assert!(docs.get("meta", "host-time").await.unwrap().is_none());
+    let before = docs.get("meta", "a").await.unwrap().unwrap();
+    let error = docs
+        .atomic_batch_checked_with(
+            vec![ReadCheck {
+                collection: "meta".into(),
+                id: "a".into(),
+                expected: ExpectedDocument::Version(before.version),
+            }],
+            vec![
+                WriteOp::Put {
+                    collection: "meta".into(),
+                    id: "a".into(),
+                    doc: json!({"value":3}),
+                    precondition: Precondition::Version(before.version),
+                },
+                WriteOp::Put {
+                    collection: "meta".into(),
+                    id: "c".into(),
+                    doc: json!({"value":4}),
+                    precondition: Precondition::Version(tinystoragedrivers_core::Version(99)),
+                },
+            ],
+            WriteOptions::new().schema(7).expires_ms(20_000),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(docs.get("meta", "a").await.unwrap().unwrap(), before);
+    assert!(docs.get("meta", "c").await.unwrap().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

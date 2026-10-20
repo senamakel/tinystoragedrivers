@@ -102,6 +102,14 @@ impl DocumentStore for PendingDocuments {
         self.admit().await?;
         self.inner.atomic_batch(ops).await
     }
+    async fn atomic_batch_with(
+        &self,
+        ops: Vec<crate::WriteOp>,
+        options: crate::WriteOptions,
+    ) -> Result<Vec<crate::WriteResult>> {
+        self.admit().await?;
+        self.inner.atomic_batch_with(ops, options).await
+    }
     async fn atomic_batch_checked(
         &self,
         checks: Vec<crate::ReadCheck>,
@@ -109,6 +117,17 @@ impl DocumentStore for PendingDocuments {
     ) -> Result<Vec<crate::WriteResult>> {
         self.admit().await?;
         self.inner.atomic_batch_checked(checks, ops).await
+    }
+    async fn atomic_batch_checked_with(
+        &self,
+        checks: Vec<crate::ReadCheck>,
+        ops: Vec<crate::WriteOp>,
+        options: crate::WriteOptions,
+    ) -> Result<Vec<crate::WriteResult>> {
+        self.admit().await?;
+        self.inner
+            .atomic_batch_checked_with(checks, ops, options)
+            .await
     }
     async fn search(&self, c: &str, t: &str, l: usize) -> Result<Vec<crate::SearchHit>> {
         self.admit().await?;

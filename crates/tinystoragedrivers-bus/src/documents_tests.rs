@@ -24,7 +24,7 @@ fn query_roundtrips_and_rejects_authority_selectors() {
     let mut forged = encoded;
     forged["scope"] = json!("bob");
     assert!(serde_json::from_value::<Query>(forged).is_err());
-    assert_eq!(DOCUMENTS_SELECTORS.len(), 17);
+    assert_eq!(DOCUMENTS_SELECTORS.len(), 19);
     assert!(!DOCUMENTS_SELECTORS.contains(&"Arbitrary"));
     assert!(is_documents_selector("Query"));
     assert!(!is_documents_selector("Arbitrary"));
@@ -277,6 +277,41 @@ fn checked_batch_roundtrips_and_rejects_authority_selectors() {
     let mut forged = encoded;
     forged["scope"] = json!("bob");
     assert!(serde_json::from_value::<BatchRequest>(forged).is_err());
+}
+
+#[test]
+fn metadata_batch_requests_roundtrip_without_host_only_options() {
+    let ops = vec![WriteOp::Put {
+        collection: "items".into(),
+        id: "item-1".into(),
+        doc: json!({"state":"ready"}),
+        precondition: Precondition::Absent,
+    }];
+    let options = BatchWriteOptions {
+        schema: 2,
+        expires_ms: Some(500),
+    };
+    roundtrip(BatchWriteRequest {
+        ops: ops.clone(),
+        options,
+    });
+    roundtrip(BatchCheckedWriteRequest {
+        checks: vec![ReadCheck {
+            collection: "items".into(),
+            id: "dependency".into(),
+            expected: ExpectedDocument::Absent,
+        }],
+        ops,
+        options,
+    });
+    let encoded = serde_json::to_value(options).unwrap();
+    assert_eq!(encoded, json!({"schema":2,"expires_ms":500}));
+    assert!(
+        serde_json::from_value::<BatchWriteOptions>(json!({"schema":2,"created_ms":10})).is_err()
+    );
+    assert!(
+        serde_json::from_value::<BatchWriteOptions>(json!({"schema":2,"scope":"forged"})).is_err()
+    );
 }
 
 #[test]

@@ -179,6 +179,7 @@ impl MongoDocuments {
     async fn run_batch(
         &self,
         ops: &[WriteOp],
+        options: WriteOptions,
         session: &mut ClientSession,
     ) -> Result<Vec<WriteResult>> {
         let mut results = Vec::with_capacity(ops.len());
@@ -200,7 +201,7 @@ impl MongoDocuments {
                             id,
                             doc,
                             *precondition,
-                            WriteOptions::default(),
+                            options,
                             Some(&mut *session),
                         )
                         .await?
@@ -218,6 +219,36 @@ impl MongoDocuments {
             });
         }
         Ok(results)
+    }
+
+    /// Run an atomic batch after the public method has admitted the scope and
+    /// checked its transaction capability.
+    async fn atomic_batch_inner(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
+    ) -> Result<Vec<WriteResult>> {
+        self.shared.prepare_validation(Some(&self.scope)).await?;
+        for check in &checks {
+            check.validate()?;
+            self.ready(&check.collection).await?;
+        }
+        for op in &ops {
+            let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
+            self.ready(collection).await?;
+        }
+        in_write!(&self.shared, self.fence.as_deref(), session => {
+            self.hold_validation(session).await?;
+            let now = self.shared.now();
+            for check in &checks {
+                let spec = self.shared.spec_in_session(&check.collection, &mut *session).await?;
+                let current = self.read_raw(&self.collection(&check.collection), &check.id, Some(&mut *session)).await?
+                    .filter(|found| stored::is_live(&spec, found, now)).map(|found| found.version);
+                check.verify(current)?;
+            }
+            self.run_batch(&ops, options, session).await
+        })
     }
 
     /// Commit, retrying a commit whose outcome the server could not report.
@@ -258,6 +289,7 @@ impl DocumentStore for MongoDocuments {
         };
         if self.shared.transactions {
             base.with(Capability::Transactions)
+                .with(Capability::AtomicWriteOptions)
                 .with(Capability::ValidatedBatch)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
@@ -483,7 +515,24 @@ impl DocumentStore for MongoDocuments {
                     "this MongoDB handle disables public transactions",
                 ));
             }
-            self.atomic_batch_checked(Vec::new(), ops).await
+            self.atomic_batch_inner(Vec::new(), ops, WriteOptions::default())
+                .await
+        })
+    }
+
+    async fn atomic_batch_with(
+        &self,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
+    ) -> Result<Vec<WriteResult>> {
+        crate::purge::admitted!(self, {
+            if !self.shared.transactions {
+                return Err(StorageError::unsupported(
+                    Capability::AtomicWriteOptions,
+                    "this MongoDB handle cannot apply document write options in a transaction",
+                ));
+            }
+            self.atomic_batch_inner(Vec::new(), ops, options).await
         })
     }
 
@@ -499,26 +548,25 @@ impl DocumentStore for MongoDocuments {
                     "this MongoDB handle disables validated batches",
                 ));
             }
-            self.shared.prepare_validation(Some(&self.scope)).await?;
-            for check in &checks {
-                check.validate()?;
-                self.ready(&check.collection).await?;
+            self.atomic_batch_inner(checks, ops, WriteOptions::default())
+                .await
+        })
+    }
+
+    async fn atomic_batch_checked_with(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
+    ) -> Result<Vec<WriteResult>> {
+        crate::purge::admitted!(self, {
+            if !self.shared.transactions {
+                return Err(StorageError::unsupported(
+                    Capability::AtomicWriteOptions,
+                    "this MongoDB handle cannot validate and apply document write options in a transaction",
+                ));
             }
-            for op in &ops {
-                let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
-                self.ready(collection).await?;
-            }
-            in_write!(&self.shared, self.fence.as_deref(), session => {
-                self.hold_validation(session).await?;
-                let now = self.shared.now();
-                for check in &checks {
-                    let spec = self.shared.spec_in_session(&check.collection, &mut *session).await?;
-                    let current = self.read_raw(&self.collection(&check.collection), &check.id, Some(&mut *session)).await?
-                        .filter(|found| stored::is_live(&spec, found, now)).map(|found| found.version);
-                    check.verify(current)?;
-                }
-                self.run_batch(&ops, session).await
-            })
+            self.atomic_batch_inner(checks, ops, options).await
         })
     }
 

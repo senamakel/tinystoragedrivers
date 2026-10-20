@@ -164,7 +164,8 @@ impl DocumentStore for MemoryDocuments {
             .with(Capability::CollectionEnumeration)
             .with(Capability::ExistingSchema)
             .with(Capability::CollectionValidation)
-            .with(Capability::RecordMetadata);
+            .with(Capability::RecordMetadata)
+            .with(Capability::AtomicWriteOptions);
         #[cfg(feature = "test-util")]
         let capabilities = if self.native_watch {
             capabilities.with(Capability::Watch)
@@ -422,13 +423,32 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
-        self.atomic_batch_checked(Vec::new(), ops).await
+        self.atomic_batch_with(ops, WriteOptions::default()).await
+    }
+
+    async fn atomic_batch_with(
+        &self,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
+    ) -> Result<Vec<WriteResult>> {
+        self.atomic_batch_checked_with(Vec::new(), ops, options)
+            .await
     }
 
     async fn atomic_batch_checked(
         &self,
         checks: Vec<ReadCheck>,
         ops: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
+        self.atomic_batch_checked_with(checks, ops, WriteOptions::default())
+            .await
+    }
+
+    async fn atomic_batch_checked_with(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
     ) -> Result<Vec<WriteResult>> {
         for check in &checks {
             check.validate()?;
@@ -500,7 +520,7 @@ impl DocumentStore for MemoryDocuments {
                     let write = Write {
                         doc,
                         precondition,
-                        options: WriteOptions::default(),
+                        options,
                     };
                     WriteResult::Put {
                         version: draft.put(scope, &collection, &id, write, now)?,

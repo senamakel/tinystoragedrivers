@@ -2521,9 +2521,11 @@ async fn another_peer_cannot_accept_a_governed_download_stream() {
 async fn assert_canceled_owner_transfer_cleanup(
     observer: &Connection,
     endpoint_drops: &AtomicUsize,
+    drop_stages: &mut mpsc::UnboundedReceiver<crate::storage_host::StorageDropStage>,
 ) {
     let mut last_name_state = "not observed";
     let mut last_endpoint_drops = 0;
+    let mut observed_drop_stages = Vec::new();
     let cleanup = async {
         loop {
             let name_released = match observer
@@ -2544,6 +2546,9 @@ async fn assert_canceled_owner_transfer_cleanup(
                 }
             };
             last_endpoint_drops = endpoint_drops.load(Ordering::Acquire);
+            while let Ok(stage) = drop_stages.try_recv() {
+                observed_drop_stages.push(stage);
+            }
             if name_released && last_endpoint_drops == 1 {
                 break;
             }
@@ -2551,12 +2556,16 @@ async fn assert_canceled_owner_transfer_cleanup(
         }
     };
     let cleanup_result = tokio::time::timeout(Duration::from_secs(2), cleanup).await;
+    while let Ok(stage) = drop_stages.try_recv() {
+        observed_drop_stages.push(stage);
+    }
     let current_endpoint_drops = endpoint_drops.load(Ordering::Acquire);
     assert!(
         cleanup_result.is_ok(),
         "canceled owner-transfer cleanup timed out: name_owner_state={last_name_state}, \
          last_observed_endpoint_drops={last_endpoint_drops}, \
-         current_endpoint_drops={current_endpoint_drops}"
+         current_endpoint_drops={current_endpoint_drops}, \
+         cleanup_stages={observed_drop_stages:?}"
     );
 }
 
@@ -2595,6 +2604,7 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
     }));
     let (setup_ready, setup_wait) = tokio::sync::oneshot::channel();
     let (continue_setup, continue_wait) = tokio::sync::oneshot::channel();
+    let (cleanup_probe, mut drop_stages) = mpsc::unbounded_channel();
     let observer_for_attach = observer.clone();
     let host_for_attach = Arc::clone(&host);
     let attaching = tokio::spawn(async move {
@@ -2607,6 +2617,7 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
                 let _ = setup_ready.send(());
                 let _ = continue_wait.await;
             },
+            cleanup_probe,
         )
         .await
     });
@@ -2626,7 +2637,7 @@ async fn cancelling_attach_before_owner_transfer_cleans_registration_and_keeps_h
     attaching.abort();
     assert!(attaching.await.unwrap_err().is_cancelled());
     let _ = continue_setup.send(());
-    assert_canceled_owner_transfer_cleanup(&observer, &endpoint_drops).await;
+    assert_canceled_owner_transfer_cleanup(&observer, &endpoint_drops, &mut drop_stages).await;
     assert_eq!(observer.unique_name().unwrap(), observer_peer);
     assert!(observer.name_owner(tinybus::BUS_NAME).await.is_ok());
     assert!(

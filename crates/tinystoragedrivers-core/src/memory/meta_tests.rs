@@ -1,14 +1,16 @@
 //! Record metadata in the memory driver, driven by an injected clock so every
 //! timestamp is exact.
 
+use super::*;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
 
-use super::*;
 use crate::{
-    CollectionSpec, DocumentStore, Filter, Meta, Precondition, Query, Sort, WriteOp, WriteOptions,
+    CollectionSpec, DocumentStore, Filter, Meta, Precondition, Query, ReadCheck, Sort, Version,
+    WriteOp, WriteOptions,
 };
 
 struct Rig {
@@ -294,6 +296,136 @@ async fn batched_puts_stamp_times_and_declare_no_options() {
     );
     assert_eq!(rig.meta("a").await.schema, 0);
     assert_eq!(rig.meta("b").await.created_ms, 1_200);
+}
+
+#[tokio::test]
+async fn atomic_batch_with_applies_one_options_value_to_every_put() {
+    let rig = Rig::at(1_000);
+    let results = rig
+        .docs
+        .atomic_batch_with(
+            vec![
+                WriteOp::Put {
+                    collection: "c".into(),
+                    id: "a".into(),
+                    doc: json!({"n": 1}),
+                    precondition: Precondition::Absent,
+                },
+                WriteOp::Put {
+                    collection: "c".into(),
+                    id: "b".into(),
+                    doc: json!({"n": 2}),
+                    precondition: Precondition::Absent,
+                },
+            ],
+            WriteOptions::new()
+                .schema(4)
+                .expires_ms(5_000)
+                .created_ms(40),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results,
+        [
+            crate::WriteResult::Put {
+                version: Version::FIRST
+            },
+            crate::WriteResult::Put {
+                version: Version::FIRST,
+            },
+        ]
+    );
+    for id in ["a", "b"] {
+        assert_eq!(
+            rig.meta(id).await,
+            Meta {
+                schema: 4,
+                created_ms: 40,
+                updated_ms: 1_000,
+                expires_ms: Some(5_000),
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejected_read_check_leaves_every_batch_write_unapplied() {
+    let rig = Rig::at(1_000);
+    rig.put("a").await;
+    let before = rig.docs.get("c", "a").await.unwrap().unwrap();
+    let error = rig
+        .docs
+        .atomic_batch_checked_with(
+            vec![ReadCheck {
+                collection: "c".into(),
+                id: "a".into(),
+                expected: crate::ExpectedDocument::Version(Version(99)),
+            }],
+            vec![WriteOp::Put {
+                collection: "c".into(),
+                id: "a".into(),
+                doc: json!({"n": 2}),
+                precondition: Precondition::Version(before.version),
+            }],
+            WriteOptions::new().schema(7).expires_ms(2_000),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind(), crate::ErrorKind::Conflict);
+    assert_eq!(rig.docs.get("c", "a").await.unwrap().unwrap(), before);
+}
+
+#[tokio::test]
+async fn rejected_checked_batch_rolls_back_bodies_versions_and_options() {
+    let rig = Rig::at(1_000);
+    rig.docs
+        .put_with(
+            "c",
+            "a",
+            json!({"n": 1}),
+            Precondition::Absent,
+            WriteOptions::new().schema(1).created_ms(10),
+        )
+        .await
+        .unwrap();
+    let before = rig.docs.get("c", "a").await.unwrap().unwrap();
+    let error = rig
+        .docs
+        .atomic_batch_checked_with(
+            vec![ReadCheck {
+                collection: "c".into(),
+                id: "a".into(),
+                expected: crate::ExpectedDocument::Version(before.version),
+            }],
+            vec![
+                WriteOp::Put {
+                    collection: "c".into(),
+                    id: "a".into(),
+                    doc: json!({"n": 2}),
+                    precondition: Precondition::Version(before.version),
+                },
+                WriteOp::Put {
+                    collection: "c".into(),
+                    id: "b".into(),
+                    doc: json!({"n": 3}),
+                    precondition: Precondition::Version(Version(99)),
+                },
+            ],
+            WriteOptions::new()
+                .schema(7)
+                .expires_ms(2_000)
+                .created_ms(20),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind(), crate::ErrorKind::Conflict);
+    assert_eq!(rig.docs.get("c", "a").await.unwrap().unwrap(), before);
+    assert!(rig.docs.get("c", "b").await.unwrap().is_none());
 }
 
 #[tokio::test]

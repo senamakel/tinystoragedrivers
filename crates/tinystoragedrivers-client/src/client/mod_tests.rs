@@ -1,10 +1,76 @@
 //! Client behavior that conformance does not pin: binding and error mapping.
-use std::sync::Arc;
-
-use tinystoragedrivers_core::{Capability, ErrorKind, MemoryStorage, Scope, StorageBackend};
 
 use super::*;
+
+use std::sync::{Arc, Mutex};
+
+use serde_json::json;
+use tinystoragedrivers_bus::{BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageKind};
+use tinystoragedrivers_core::{
+    Capability, ErrorKind, MemoryStorage, Precondition, Scope, StorageBackend, WriteOp,
+    WriteOptions,
+};
+
 use crate::{Admission, Loopback, StorageServer};
+
+#[derive(Debug)]
+struct OlderHost {
+    calls: Mutex<Vec<String>>,
+    signals: tokio::sync::broadcast::Sender<tinystoragedrivers_bus::WatchChanged>,
+}
+
+#[async_trait::async_trait]
+impl StorageTransport for OlderHost {
+    async fn call(
+        &self,
+        object: Object,
+        selector: &str,
+        _request: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, WireError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("{}.{selector}", object.as_str()));
+        match (object, selector) {
+            (Object::Documents, "Capabilities") => Ok(json!({"capabilities":[
+                "transactions", "validated_batch", "record_metadata"
+            ]})),
+            (Object::Blobs, "Capabilities") => Ok(json!({
+                "presigned_urls": false,
+                "ttl": false,
+                "max_key_len": 0
+            })),
+            (Object::Queues, "Features") => Ok(json!({
+                "dedupe": false,
+                "groups": false,
+                "priorities": false,
+                "delay": false
+            })),
+            _ => Err(WireError::Storage(tinystoragedrivers_bus::StorageFailure {
+                kind: StorageKind::InvalidInput,
+            })),
+        }
+    }
+
+    async fn put_blob_stream(
+        &self,
+        _head: PutBlobStreamRequest,
+        _body: crate::BlobBody,
+    ) -> std::result::Result<serde_json::Value, WireError> {
+        unreachable!("this test transport never transfers blobs")
+    }
+
+    async fn get_blob_stream(
+        &self,
+        _request: BlobKeyRequest,
+    ) -> std::result::Result<Option<(BlobStreamHead, crate::BlobBody)>, WireError> {
+        unreachable!("this test transport never transfers blobs")
+    }
+
+    fn signals(&self) -> tokio::sync::broadcast::Receiver<tinystoragedrivers_bus::WatchChanged> {
+        self.signals.subscribe()
+    }
+}
 
 async fn bus() -> BusStorage {
     let backend = MemoryStorage::new();
@@ -49,6 +115,47 @@ async fn unsupported_refusals_name_the_capability_the_call_needs() {
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unsupported(expected));
+}
+
+#[tokio::test]
+async fn an_old_host_without_atomic_write_options_refuses_before_any_new_selector() {
+    let (signals, _) = tokio::sync::broadcast::channel(8);
+    let old_host = Arc::new(OlderHost {
+        calls: Mutex::new(Vec::new()),
+        signals,
+    });
+    let bus = BusStorage::connect(old_host.clone(), Scope::local())
+        .await
+        .unwrap();
+    let docs = bus.for_scope(&Scope::local()).unwrap().documents().clone();
+    assert!(!docs.capabilities().contains(Capability::AtomicWriteOptions));
+
+    let put = WriteOp::Put {
+        collection: "records".into(),
+        id: "a".into(),
+        doc: json!({"value":1}),
+        precondition: Precondition::Absent,
+    };
+    for error in [
+        docs.atomic_batch_with(vec![put.clone()], WriteOptions::new().schema(2))
+            .await
+            .unwrap_err(),
+        docs.atomic_batch_checked_with(Vec::new(), vec![put], WriteOptions::default())
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(
+            error.kind(),
+            ErrorKind::Unsupported(Capability::AtomicWriteOptions)
+        );
+    }
+    let calls = old_host.calls.lock().unwrap();
+    assert!(!calls.iter().any(|call| {
+        matches!(
+            call.as_str(),
+            "Documents.AtomicBatchWith" | "Documents.AtomicBatchCheckedWith" | "Documents.Put"
+        )
+    }));
 }
 
 /// Blobs that forward everything but cannot expire, like the `MongoDB` driver.

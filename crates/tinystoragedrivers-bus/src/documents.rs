@@ -12,7 +12,7 @@ pub const STORAGE_INTERFACE: &str = "ai.tinyhumans.tinystorage.Storage";
 /// Documents object name under [`STORAGE_INTERFACE`].
 pub const DOCUMENTS_OBJECT: &str = "Documents";
 /// Finite selector set; servers must reject every other selector.
-pub const DOCUMENTS_SELECTORS: [&str; 17] = [
+pub const DOCUMENTS_SELECTORS: [&str; 19] = [
     "Get",
     "Put",
     "Delete",
@@ -22,6 +22,8 @@ pub const DOCUMENTS_SELECTORS: [&str; 17] = [
     "Claim",
     "AtomicBatch",
     "AtomicBatchChecked",
+    "AtomicBatchWith",
+    "AtomicBatchCheckedWith",
     "Search",
     "EnsureCollection",
     "ValidateCollectionSpec",
@@ -418,6 +420,39 @@ pub struct BatchRequest {
     pub checks: Vec<ReadCheck>,
     /// Ordered writes.
     pub ops: Vec<WriteOp>,
+}
+/// Metadata shared by every `Put` in an atomic write-options batch.
+///
+/// `created_ms` is intentionally absent: it is a host-only migration option.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchWriteOptions {
+    /// Declared schema version for every put.
+    #[serde(default)]
+    pub schema: u32,
+    /// Expiry instant for every put, in Unix epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<i64>,
+}
+/// Atomic batch with one shared metadata declaration for every put.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchWriteRequest {
+    /// Ordered writes.
+    pub ops: Vec<WriteOp>,
+    /// Metadata applied to every put in the batch.
+    pub options: BatchWriteOptions,
+}
+/// Checked atomic batch with one shared metadata declaration for every put.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchCheckedWriteRequest {
+    /// Read dependencies checked against pre-write state.
+    pub checks: Vec<ReadCheck>,
+    /// Ordered writes.
+    pub ops: Vec<WriteOp>,
+    /// Metadata applied to every put in the batch.
+    pub options: BatchWriteOptions,
 }
 /// Result of one write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

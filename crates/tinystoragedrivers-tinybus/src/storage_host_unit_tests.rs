@@ -53,6 +53,7 @@ where
         inner: None,
         monitor: None,
         runtime,
+        cleanup_probe: None,
     }
 }
 
@@ -86,6 +87,7 @@ async fn registration_debug_and_shutdown_cover_the_missing_monitor_path() {
         inner: Some(Arc::new(inner)),
         monitor: None,
         runtime: Handle::current(),
+        cleanup_probe: None,
     };
     let rendered = format!("{registration:?}");
     assert!(rendered.contains("StorageRegistration"));
@@ -98,6 +100,7 @@ async fn registration_debug_and_shutdown_cover_the_missing_monitor_path() {
             inner: None,
             monitor: None,
             runtime: Handle::current(),
+            cleanup_probe: None,
         };
     empty_registration.shutdown().await.unwrap();
     assert_eq!(resolve_calls.load(Ordering::Acquire), 0);

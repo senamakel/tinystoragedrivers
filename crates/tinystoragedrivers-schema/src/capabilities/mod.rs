@@ -25,6 +25,10 @@ pub enum Capability {
     /// several writes across documents and collections that land together or
     /// not at all.
     Transactions,
+    /// `DocumentStore::atomic_batch_with` and
+    /// `DocumentStore::atomic_batch_checked_with` preserve write options for
+    /// every `Put` in the same atomic operation.
+    AtomicWriteOptions,
     /// Documents expire on their collection's
     /// `ttl_field`.
     Ttl,
@@ -85,11 +89,12 @@ pub enum Capability {
 }
 
 impl Capability {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 22] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
         Self::Transactions,
+        Self::AtomicWriteOptions,
         Self::Ttl,
         Self::Fencing,
         Self::PresignedUrls,
@@ -115,6 +120,7 @@ impl Capability {
             Self::CollectionValidation => 1 << 14,
             Self::FullText => 1,
             Self::Transactions => 1 << 1,
+            Self::AtomicWriteOptions => 1 << 22,
             Self::Ttl => 1 << 2,
             Self::Fencing => 1 << 3,
             Self::PresignedUrls => 1 << 4,
@@ -143,6 +149,7 @@ impl fmt::Display for Capability {
             Self::CollectionValidation => "collection_validation",
             Self::FullText => "full_text",
             Self::Transactions => "transactions",
+            Self::AtomicWriteOptions => "atomic_write_options",
             Self::Ttl => "ttl",
             Self::Fencing => "fencing",
             Self::PresignedUrls => "presigned_urls",
@@ -198,6 +205,7 @@ impl Capabilities {
                 | Capability::CollectionValidation.bit()
                 | Capability::FullText.bit()
                 | Capability::Transactions.bit()
+                | Capability::AtomicWriteOptions.bit()
                 | Capability::Ttl.bit()
                 | Capability::Fencing.bit()
                 | Capability::PresignedUrls.bit()

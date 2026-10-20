@@ -201,6 +201,28 @@ pub trait DocumentStore: Send + Sync + std::fmt::Debug {
         ))
     }
 
+    /// Apply several writes atomically with the same record metadata options
+    /// on every `Put`. `Delete` operations are unaffected. This operation is
+    /// separately opt-in so a driver cannot silently discard metadata while
+    /// claiming ordinary transaction support.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::AtomicWriteOptions`]; otherwise the first failing write's
+    /// error, with bodies and metadata unchanged.
+    async fn atomic_batch_with(
+        &self,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
+    ) -> Result<Vec<WriteResult>> {
+        let _ = (ops, options);
+        Err(StorageError::unsupported(
+            Capability::AtomicWriteOptions,
+            "this driver cannot atomically apply document write options",
+        ))
+    }
+
     /// Validate every read-only dependency and apply writes in one native
     /// transaction or lock. Dependencies are never rewritten. Native fencing
     /// is checked inside that same atomic operation, including empty batches.
@@ -221,6 +243,29 @@ pub trait DocumentStore: Send + Sync + std::fmt::Debug {
         Err(StorageError::unsupported(
             Capability::ValidatedBatch,
             "this driver cannot atomically validate read dependencies",
+        ))
+    }
+
+    /// Validate read dependencies and atomically apply writes with the same
+    /// record metadata options on every `Put`. Checks observe the pre-write
+    /// state, and `Delete` operations are unaffected.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::AtomicWriteOptions`]; [`ErrorKind::Conflict`](crate::ErrorKind::Conflict)
+    /// when a dependency differs; invalid inputs and failed writes change
+    /// nothing.
+    async fn atomic_batch_checked_with(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+        options: WriteOptions,
+    ) -> Result<Vec<WriteResult>> {
+        let _ = (checks, ops, options);
+        Err(StorageError::unsupported(
+            Capability::AtomicWriteOptions,
+            "this driver cannot atomically validate dependencies and apply document write options",
         ))
     }
 

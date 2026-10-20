@@ -436,6 +436,8 @@ fn selector_write_classification_is_complete_and_seal_is_a_write() {
         (Object::Documents, "Claim"),
         (Object::Documents, "AtomicBatch"),
         (Object::Documents, "AtomicBatchChecked"),
+        (Object::Documents, "AtomicBatchWith"),
+        (Object::Documents, "AtomicBatchCheckedWith"),
         (Object::Documents, "DropCollection"),
         (Object::Streams, "Append"),
         (Object::Streams, "AppendBatch"),
@@ -573,6 +575,38 @@ fn authorization_checks_schema_readonly_writes_batches_and_prefix_boundaries() {
                 "ops":[{"op":"put","collection":"other","document_id":"x","document_json":"{}","precondition":{"kind":"none"}}]
             })
         ),
+        Err(Denied::Target)
+    );
+}
+
+#[test]
+fn metadata_batches_authorize_every_dependency_and_write_before_forwarding() {
+    let request = json!({
+        "ops":[
+            {"op":"put","collection":"module.records","document_id":"a","document_json":"{}","precondition":{"kind":"absent"}},
+            {"op":"put","collection":"other","document_id":"b","document_json":"{}","precondition":{"kind":"absent"}}
+        ],
+        "options":{"schema":2,"expires_ms":500}
+    });
+    assert_eq!(
+        grant(true).authorize(Object::Documents, "AtomicBatchWith", &request),
+        Err(Denied::Target)
+    );
+    assert_eq!(
+        grant(false).authorize(Object::Documents, "AtomicBatchWith", &request),
+        Err(Denied::ReadOnly)
+    );
+    let mut forged = json!({"ops":[],"options":{"schema":2,"created_ms":10}});
+    assert_eq!(
+        grant(true).authorize(Object::Documents, "AtomicBatchWith", &forged),
+        Err(Denied::Malformed)
+    );
+    forged = json!({
+        "checks":[{"collection":"other","id":"x","expected":{"kind":"absent"}}],
+        "ops":[],"options":{"schema":2}
+    });
+    assert_eq!(
+        grant(true).authorize(Object::Documents, "AtomicBatchCheckedWith", &forged),
         Err(Denied::Target)
     );
 }

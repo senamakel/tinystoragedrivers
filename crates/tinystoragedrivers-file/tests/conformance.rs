@@ -256,6 +256,23 @@ async fn reports_its_driver_and_capabilities() {
         error.kind(),
         ErrorKind::Unsupported(Capability::Transactions)
     );
+    let error = docs
+        .atomic_batch_with(
+            vec![WriteOp::Put {
+                collection: "c".into(),
+                id: "a".into(),
+                doc: json!({"value":1}),
+                precondition: Precondition::None,
+            }],
+            tinystoragedrivers_core::WriteOptions::new().schema(2),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(Capability::AtomicWriteOptions)
+    );
+    assert!(docs.get("c", "a").await.unwrap().is_none());
     assert_eq!(storage.dir(), dir.path().canonicalize().unwrap());
     assert!(format!("{storage:?}").starts_with("FileStorage"));
 }

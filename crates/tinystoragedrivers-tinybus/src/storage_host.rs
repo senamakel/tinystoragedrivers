@@ -10,7 +10,24 @@ use tinystoragedrivers_busproxy::{
     StorageDescriptor, StorageLease, TinyBusCallerDirectory,
 };
 use tokio::runtime::Handle;
+#[cfg(test)]
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, oneshot};
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StorageDropStage {
+    OwnerDropEntered,
+    CleanupTaskStarted,
+    ShutdownFinished(ShutdownStatus),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShutdownStatus {
+    Success,
+    Failure,
+}
 
 /// TSD-owned storage registration returned after the linked module is ready.
 pub struct StorageRegistration<E, A, C>
@@ -22,6 +39,8 @@ where
     inner: Option<Arc<tinystoragedrivers_busproxy::governed::StorageRegistration<E, A, C>>>,
     monitor: Option<tokio::task::JoinHandle<()>>,
     runtime: Handle,
+    #[cfg(test)]
+    cleanup_probe: Option<UnboundedSender<StorageDropStage>>,
 }
 
 impl<E, A, C> std::fmt::Debug for StorageRegistration<E, A, C>
@@ -91,12 +110,34 @@ where
 {
     fn drop(&mut self) {
         let inner = self.inner.take();
+        #[cfg(test)]
+        if let Some(probe) = &self.cleanup_probe {
+            let _ = probe.send(StorageDropStage::OwnerDropEntered);
+        }
         if let Some(monitor) = self.monitor.take() {
             monitor.abort();
         }
+        #[cfg(test)]
+        let cleanup_probe = self.cleanup_probe.clone();
         self.runtime.spawn(async move {
+            #[cfg(test)]
+            if let Some(probe) = &cleanup_probe {
+                let _ = probe.send(StorageDropStage::CleanupTaskStarted);
+            }
             if let Some(inner) = inner {
+                #[cfg(test)]
+                let shutdown_succeeded = matches!(inner.shutdown().await, Ok(()));
+                #[cfg(not(test))]
                 let _ = inner.shutdown().await;
+                #[cfg(test)]
+                if let Some(probe) = cleanup_probe {
+                    let status = if shutdown_succeeded {
+                        ShutdownStatus::Success
+                    } else {
+                        ShutdownStatus::Failure
+                    };
+                    let _ = probe.send(StorageDropStage::ShutdownFinished(status));
+                }
             }
         });
     }
@@ -124,7 +165,16 @@ where
     E: Environment<C>,
     A: AuditSink,
 {
-    attach_storage_inner(host, observer_connection, endpoint, runtime, || async {}).await
+    attach_storage_inner(
+        host,
+        observer_connection,
+        endpoint,
+        runtime,
+        || async {},
+        #[cfg(test)]
+        None,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -134,6 +184,7 @@ pub(crate) async fn attach_storage_before_result_transfer<E, A, C, H, Fut>(
     endpoint: GovernedStorage<E, A, C>,
     runtime: Handle,
     before_transfer: H,
+    cleanup_probe: UnboundedSender<StorageDropStage>,
 ) -> Result<StorageRegistration<E, A, C>, HostFailure>
 where
     C: HostContext,
@@ -148,6 +199,7 @@ where
         endpoint,
         runtime,
         before_transfer,
+        Some(cleanup_probe),
     )
     .await
 }
@@ -158,6 +210,7 @@ async fn attach_storage_inner<E, A, C, H, Fut>(
     endpoint: GovernedStorage<E, A, C>,
     runtime: Handle,
     before_transfer: H,
+    #[cfg(test)] cleanup_probe: Option<UnboundedSender<StorageDropStage>>,
 ) -> Result<StorageRegistration<E, A, C>, HostFailure>
 where
     C: HostContext,
@@ -212,6 +265,8 @@ where
                         inner: Some(inner),
                         monitor: Some(monitor),
                         runtime,
+                        #[cfg(test)]
+                        cleanup_probe,
                     };
                     before_transfer().await;
                     owner_tx

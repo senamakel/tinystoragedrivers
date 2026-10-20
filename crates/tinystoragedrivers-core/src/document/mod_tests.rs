@@ -342,6 +342,22 @@ async fn optional_operations_default_to_unsupported() {
         error.kind(),
         ErrorKind::Unsupported(Capability::Transactions)
     );
+    let error = baseline
+        .atomic_batch_with(Vec::new(), WriteOptions::new().schema(1))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(Capability::AtomicWriteOptions)
+    );
+    let error = baseline
+        .atomic_batch_checked_with(Vec::new(), Vec::new(), WriteOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(Capability::AtomicWriteOptions)
+    );
     let error = baseline.search("c", "x", 1).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unsupported(Capability::FullText));
     let error = baseline.collections("").await.unwrap_err();

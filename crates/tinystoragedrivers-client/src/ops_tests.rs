@@ -453,6 +453,7 @@ fn capability_names_round_trip_without_host_only_entries() {
     assert!(!names.contains(&"shared_across_processes".to_owned()));
     assert!(!names.contains(&"cross_process_cas".to_owned()));
     assert!(names.contains(&"record_metadata".to_owned()));
+    assert!(names.contains(&"atomic_write_options".to_owned()));
     assert!(names.contains(&"stream_seal".to_owned()));
     let parsed = capabilities_of(&names);
     assert!(parsed.contains(Capability::FullText));
