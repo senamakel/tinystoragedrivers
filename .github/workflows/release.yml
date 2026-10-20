@@ -14,7 +14,8 @@ on:
           - current
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  # The temporary epic release and main release share one immutable tag space.
+  group: release-main
   cancel-in-progress: false
 
 permissions:
