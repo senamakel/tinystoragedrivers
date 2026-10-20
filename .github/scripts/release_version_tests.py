@@ -1,6 +1,7 @@
 """Exercise release lockfiles with real offline Cargo resolution and Git staging."""
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -153,6 +154,54 @@ class ReleaseLocks(unittest.TestCase):
         self.assertFalse((self.root / new_lock).exists())
         self.assertEqual((self.root / "unrelated.txt").read_bytes(), unrelated)
         self.assertEqual(self.run_command("git", "diff", "--cached", "--name-only").stdout, "")
+
+
+class ReleaseWorkflowAdmission(unittest.TestCase):
+    workflow = ROOT / ".github/workflows/release.yml"
+
+    def test_release_prepare_admits_only_main_and_the_exact_epic_branch(self):
+        text = self.workflow.read_text()
+        prepare = re.search(r"(?ms)^  prepare:\n(.*?)(?=^  github-release:\n)", text)
+        self.assertIsNotNone(prepare, "release prepare job must exist")
+        condition = re.search(r"(?m)^    if: \$\{\{ (.+) \}\}$", prepare.group(1))
+        self.assertIsNotNone(condition, "release prepare job must have a ref guard")
+        expression = condition.group(1)
+        expected = (
+            "github.ref == 'refs/heads/main' || "
+            "github.ref == 'refs/heads/epic/8056-modules-wiring'"
+        )
+        self.assertEqual(expression, expected)
+
+        admitted_refs = set(re.findall(r"github\.ref == '([^']+)'", expression))
+        self.assertEqual(
+            admitted_refs,
+            {"refs/heads/main", "refs/heads/epic/8056-modules-wiring"},
+        )
+        self.assertTrue(all(ref in admitted_refs for ref in [
+            "refs/heads/main",
+            "refs/heads/epic/8056-modules-wiring",
+        ]))
+        self.assertFalse(any(ref in admitted_refs for ref in [
+            "refs/heads/epic-8056-tsd-release18",
+            "refs/heads/epic/8056-other",
+            "refs/tags/v1.8.0",
+        ]))
+
+    def test_release_coverage_starts_rabbitmq_before_running_the_full_profile(self):
+        text = self.workflow.read_text()
+        rabbit_url = "TSD_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/%2f"
+        rabbit_start = "run: .github/scripts/start-rabbitmq.sh 5672"
+        coverage = "run: .github/scripts/check-file-coverage.sh 90 target/coverage.json"
+        self.assertTrue(rabbit_url in text, "release coverage requires the RabbitMQ URL")
+        self.assertTrue(rabbit_start in text, "release coverage must start RabbitMQ")
+        self.assertLess(text.index(rabbit_start), text.index(coverage))
+
+    def test_release_installs_strace_before_native_coverage_proofs(self):
+        text = self.workflow.read_text()
+        strace_install = "run: sudo apt-get install --yes strace"
+        coverage = "run: .github/scripts/check-file-coverage.sh 90 target/coverage.json"
+        self.assertTrue(strace_install in text, "native coverage requires strace")
+        self.assertLess(text.index(strace_install), text.index(coverage))
 
 
 if __name__ == "__main__":
