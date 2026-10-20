@@ -150,7 +150,7 @@ tests, and the appropriate `proof-workspaces/` consumer fixture.
 
 Files: `crates/tinystoragedrivers-busproxy/src/per_caller.rs`, new focused
 `per_caller_async.rs` / `per_caller_async_tests.rs` if needed,
-`host.rs`, public exports in `lib.rs`, plus module README/spec updates.
+`host/mod.rs`, public exports in `lib.rs`, plus module README/spec updates.
 
 - First add a deterministic test that blocks module A's binder and proves
   module B's first request completes; assert no endpoint map lock is held

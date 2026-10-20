@@ -1,3 +1,5 @@
+//! Tests for bus-proxy host registration and dispatch.
+
 use super::*;
 use crate::PerCallerEndpoint;
 use async_trait::async_trait;
