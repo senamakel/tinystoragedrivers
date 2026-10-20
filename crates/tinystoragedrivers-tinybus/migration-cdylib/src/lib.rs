@@ -1,9 +1,4 @@
 //! Compiled owner fixture for the TSD migration `TinyBus` adapter.
-#![allow(
-    missing_docs,
-    reason = "The cdylib exports are a private integration fixture."
-)]
-
 use std::sync::Arc;
 
 use tinybus::{ObjectPath, Result, WeakConnection};
@@ -104,7 +99,7 @@ tinybus_module::module_export! {
         "ai.tinyhumans.test.MigrationFixture",
         "org.tinystoragedrivers.Migration",
     ],
-    methods = ["Ping", "GetSchema", "Exchange"],
+    methods = ["Ping"],
     signals = [],
     requires = [],
     optional = [],
