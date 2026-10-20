@@ -75,6 +75,32 @@ fn stream_replies_are_decoded_strictly() {
 }
 
 #[test]
+fn expiry_stream_replies_are_decoded_strictly() {
+    assert!(decode_expiry_stream_reply(Value::Null).unwrap().is_none());
+    let head = json!({"meta": {"key": "k", "len": 3}, "expires_at_ms": 6000});
+    let stream = json!({"id": "s1", "len": 3});
+    let (decoded, reference) = decode_expiry_stream_reply(json!([head, stream]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(decoded.meta.len, 3);
+    assert_eq!(decoded.expires_at_ms, Some(6000));
+    assert_eq!(reference.id, "s1");
+    for malformed in [
+        json!("nope"),
+        json!([]),
+        json!([head]),
+        json!([head, stream, 1]),
+        json!([{"meta": {"key": "k", "len": "bad"}}, stream]),
+        json!([head, {"id": "s1", "len": "bad"}]),
+    ] {
+        assert_eq!(
+            decode_expiry_stream_reply(malformed).unwrap_err(),
+            WireError::Transport("malformed GetStreamWithExpiry reply".into())
+        );
+    }
+}
+
+#[test]
 fn remote_failures_keep_their_category_and_other_errors_become_transport() {
     let storage = tinybus::Error::MethodFailed {
         name: ERROR_STORAGE.into(),

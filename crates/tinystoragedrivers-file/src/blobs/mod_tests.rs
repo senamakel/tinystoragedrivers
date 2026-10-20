@@ -561,6 +561,36 @@ async fn scope_recovery_removes_only_orphaned_blob_transaction_artifacts() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn scope_recovery_refuses_symlinked_transaction_artifacts_and_ignores_invalid_names() {
+    let (_dir, storage, blobs, _now) = open_driven();
+    blobs.put("ordinary", b"keep".to_vec(), None).await.unwrap();
+    let (data, _) = files(&storage, "transaction-owner");
+    let dir = data.parent().unwrap();
+    let stem = file_stem("transaction-owner");
+    let invalid = dir.join(format!("{stem}.txn-not-a-token.stage-data"));
+    std::fs::write(&invalid, b"unrecognized artifact").unwrap();
+    assert_eq!(
+        blobs.list("").await.unwrap()[0].key,
+        "ordinary",
+        "an invalid artifact name does not disrupt listing"
+    );
+    assert_eq!(std::fs::read(&invalid).unwrap(), b"unrecognized artifact");
+    let victim = dir.join("victim");
+    std::fs::write(&victim, b"outside transaction namespace").unwrap();
+    let symlink = dir.join(format!("{stem}.txn-999-91.stage-data"));
+    std::os::unix::fs::symlink(&victim, &symlink).unwrap();
+
+    assert_eq!(blobs.list("").await.unwrap_err().kind(), ErrorKind::Backend);
+    assert!(symlink.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(
+        std::fs::read(victim).unwrap(),
+        b"outside transaction namespace"
+    );
+    assert_eq!(std::fs::read(invalid).unwrap(), b"unrecognized artifact");
+}
+
 #[tokio::test]
 async fn failed_scope_recovery_keeps_artifacts_referenced_by_its_journal() {
     let (_dir, storage, blobs, _now) = open_driven();

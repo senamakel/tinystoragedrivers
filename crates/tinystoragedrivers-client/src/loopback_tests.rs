@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tinystoragedrivers_bus::{MAX_FRAME_BYTES, MAX_INLINE_BLOB_BYTES};
+use tinystoragedrivers_bus::{BlobKeyRequest, MAX_FRAME_BYTES, MAX_INLINE_BLOB_BYTES};
 use tinystoragedrivers_core::{
     Capability, CollectionSpec, ErrorKind, Filter, MemoryStorage, Precondition, Scope,
     ScopedStorage, StorageBackend, WatchNotice, WatchOptions, WriteOptions, conformance,
@@ -80,6 +80,30 @@ async fn a_blob_over_the_frame_cap_moves_over_a_stream() {
     assert_eq!(
         range,
         bytes[usize::try_from(start).unwrap()..usize::try_from(end).unwrap()]
+    );
+    assert!(rig.loopback.largest_frame() <= MAX_FRAME_BYTES);
+}
+
+#[tokio::test]
+async fn absolute_expiry_reads_preserve_absence_across_inline_and_stream_paths() {
+    let rig = rig(Admission::Private).await;
+    let request = BlobKeyRequest {
+        key: "missing".into(),
+    };
+
+    assert!(
+        rig.loopback
+            .get_blob_with_expiry(request.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        rig.loopback
+            .get_blob_stream_with_expiry(request)
+            .await
+            .unwrap()
+            .is_none()
     );
     assert!(rig.loopback.largest_frame() <= MAX_FRAME_BYTES);
 }
