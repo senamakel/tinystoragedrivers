@@ -22,6 +22,108 @@ use tinystoragedrivers_secrets::{DerivedKeys, DocumentSecrets};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tokio::sync::mpsc;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bound_storage_client_connects_without_queue_needs_and_keeps_queues_denied() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = attach_named_test_module(
+        &host,
+        "bound-storage-no-queues-caller",
+        "ai.tinyhumans.test.boundstoragenoqueues",
+        "/ai/tinyhumans/test/bound_storage_no_queues",
+    )
+    .await;
+    let environment = test_environment(CollectionSpec {
+        name: "shared.records".to_owned(),
+        indexes: vec![],
+        ttl_field: None,
+        search: None,
+    });
+    let registration = attach_storage(
+        &host,
+        &observer,
+        GovernedStorage::new(
+            Arc::clone(&environment),
+            Arc::new(TestAudit::default()),
+            GovernedEndpointLimits::default(),
+        ),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    let (lease, descriptor) = registration
+        .register_lease(
+            tinystoragedrivers_busproxy::HostStorageContext::new(Profile("no-queues")),
+            caller.unique_name().unwrap(),
+        )
+        .await
+        .unwrap();
+    let transport = Arc::new(
+        tinystoragedrivers_busproxy::BusTransport::connect_bound(caller, descriptor)
+            .await
+            .unwrap(),
+    );
+
+    let bus_storage = tinystoragedrivers_client::BusStorage::connect(
+        transport.clone(),
+        Scope::new("no-queues").unwrap(),
+    )
+    .await
+    .expect("a lease without queue needs still supports client capability discovery");
+    let scoped = bus_storage
+        .for_scope(&Scope::new("no-queues").unwrap())
+        .unwrap();
+    assert_eq!(
+        tinystoragedrivers_core::QueueStore::features(scoped.queues().as_ref()),
+        tinystoragedrivers_core::queue::QueueFeatures::default(),
+        "undeclared queue capabilities must remain absent after connection",
+    );
+
+    assert!(
+        transport
+            .call(
+                tinystoragedrivers_client::Object::Documents,
+                "Get",
+                json!({"collection":"shared.records","document_id":"missing"}),
+            )
+            .await
+            .is_ok()
+    );
+    assert!(
+        transport
+            .call(
+                tinystoragedrivers_client::Object::Blobs,
+                "Get",
+                json!({"key":"canary/missing"}),
+            )
+            .await
+            .is_ok()
+    );
+    assert!(
+        matches!(
+            transport
+                .call(
+                    tinystoragedrivers_client::Object::Queues,
+                    "Enqueue",
+                    json!({"queue":"not-granted","messages":[{"payload_json":"{}"}]}),
+                )
+                .await,
+            Err(tinystoragedrivers_client::WireError::Transport(reason))
+                if reason.contains("denied the call: object-not-granted")
+        ),
+        "queue operations must remain denied when no queue needs were granted"
+    );
+
+    registration.shutdown().await.unwrap();
+    drop(lease);
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
 #[test]
 fn stream_error_test_diagnostic_is_content_free_across_crate_boundary() {
     let sdk_error = tinybus::Error::StreamAborted {

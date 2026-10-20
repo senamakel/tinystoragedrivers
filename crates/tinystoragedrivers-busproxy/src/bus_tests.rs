@@ -156,6 +156,20 @@ async fn an_empty_blob_and_a_short_body_over_a_stream() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert!(blobs.head("short").await.unwrap().is_none());
+
+    // The absolute-expiry stream path shares the same sender/receiver race.
+    let error = blobs
+        .put_stream_until(
+            "short-until",
+            Box::pin(std::io::Cursor::new(vec![1; 10])),
+            4096,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(blobs.head("short-until").await.unwrap().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

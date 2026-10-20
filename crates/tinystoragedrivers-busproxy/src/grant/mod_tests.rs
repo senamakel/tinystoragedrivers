@@ -48,11 +48,25 @@ fn empty_grant() -> StorageGrant {
 fn queues_are_denied_without_declared_queue_needs() {
     for grant in [grant(true), empty_grant()] {
         for selector in tinystoragedrivers_bus::QUEUES_SELECTORS {
-            assert_eq!(
-                grant.authorize(Object::Queues, selector, &serde_json::Value::Null),
-                Err(Denied::Object),
-                "Queues.{selector} must not forward without a queue grant",
-            );
+            let decision = grant.authorize(Object::Queues, selector, &serde_json::Value::Null);
+            if selector == "Features" {
+                assert_eq!(
+                    decision,
+                    Ok(Plan::Answer(serde_json::json!({
+                        "dedupe": false,
+                        "groups": false,
+                        "priorities": false,
+                        "delay": false
+                    }))),
+                    "Queues.Features must report no optional authority",
+                );
+            } else {
+                assert_eq!(
+                    decision,
+                    Err(Denied::Object),
+                    "Queues.{selector} must not forward without a queue grant",
+                );
+            }
         }
     }
 }
@@ -67,6 +81,15 @@ fn unsupported_queue_selectors_remain_malformed() {
             "unknown Queues.{selector} must not be treated as an ungranted selector",
         );
     }
+    assert_eq!(
+        grant.authorize(
+            Object::Queues,
+            "Features",
+            &serde_json::json!({"unexpected":true}),
+        ),
+        Err(Denied::Malformed),
+        "queue feature discovery must reject malformed payloads",
+    );
 }
 
 #[test]

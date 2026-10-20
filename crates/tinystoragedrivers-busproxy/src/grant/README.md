@@ -13,7 +13,9 @@ selection, backend choice, or fence management.
   wrapper while preserving the legacy `StorageNeeds` prefix behavior.
 - `StorageGrant::authorize` checks the object, current selector, typed request,
   schema operation, target, and write permission. It returns a `Plan` to
-  forward the call or answer a host-only operation locally.
+  forward the call or answer a host-only operation locally. An ungranted
+  `Queues.Features` request is answered locally with every optional feature
+  disabled so clients can initialize; queue operations remain denied.
 - `StorageGrant::filter_reply` filters collection enumeration replies.
 - `GrantError` and `Denied` expose content-free error labels.
 
