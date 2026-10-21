@@ -45,7 +45,7 @@ fn empty_grant() -> StorageGrant {
 }
 
 #[test]
-fn queues_are_denied_without_declared_queue_needs() {
+fn queues_are_denied_without_host_manifest_opt_in() {
     for grant in [grant(true), empty_grant()] {
         for selector in tinystoragedrivers_bus::QUEUES_SELECTORS {
             let decision = grant.authorize(Object::Queues, selector, &serde_json::Value::Null);
@@ -90,6 +90,195 @@ fn unsupported_queue_selectors_remain_malformed() {
         Err(Denied::Malformed),
         "queue feature discovery must reject malformed payloads",
     );
+}
+
+fn queue_manifest(names: &[&str]) -> std::sync::Arc<tinystoragedrivers_core::queue::QueueManifest> {
+    let queues = names
+        .iter()
+        .map(|name| serde_json::json!({"name": name}))
+        .collect::<Vec<_>>();
+    let json = serde_json::json!({"version": 1, "queues": queues}).to_string();
+    std::sync::Arc::new(
+        tinystoragedrivers_core::queue::QueueManifest::from_json(&json)
+            .expect("queue manifest is valid"),
+    )
+}
+
+fn queue_manifest_with_max_attempts(
+    max_attempts: u32,
+) -> std::sync::Arc<tinystoragedrivers_core::queue::QueueManifest> {
+    let json = serde_json::json!({
+        "version": 1,
+        "queues": [{"name": "inbound", "max_attempts": max_attempts}]
+    })
+    .to_string();
+    std::sync::Arc::new(
+        tinystoragedrivers_core::queue::QueueManifest::from_json(&json)
+            .expect("queue manifest is valid"),
+    )
+}
+
+fn queue_request(selector: &str, queue: &str) -> serde_json::Value {
+    match selector {
+        "Features" => serde_json::Value::Null,
+        "EnsureQueue" => serde_json::json!({
+            "queue": queue,
+            "spec": {"max_attempts": 3, "dedupe_window_ms": 0}
+        }),
+        "Enqueue" => serde_json::json!({
+            "queue": queue,
+            "messages": [{"payload_json": "{\"task\":\"work\"}"}]
+        }),
+        "Receive" => serde_json::json!({
+            "queue": queue,
+            "max": 1,
+            "visibility_ms": 1000,
+            "consumer": "worker"
+        }),
+        "Ack" => serde_json::json!({
+            "queue": queue,
+            "receipt": {"id": "message", "token": "lease"}
+        }),
+        "Nack" => serde_json::json!({
+            "queue": queue,
+            "receipt": {"id": "message", "token": "lease"},
+            "retry": {"kind": "dead_letter", "reason": "done"}
+        }),
+        "Extend" => serde_json::json!({
+            "queue": queue,
+            "receipt": {"id": "message", "token": "lease"},
+            "visibility_ms": 2000
+        }),
+        "Stats" | "Purge" => serde_json::json!({"queue": queue}),
+        "DeadLetters" => serde_json::json!({"queue": queue, "limit": 5}),
+        "Redrive" => serde_json::json!({"queue": queue, "id": "message"}),
+        _ => unreachable!("the bus contract defines every queue selector"),
+    }
+}
+
+fn is_queue_write(selector: &str) -> bool {
+    matches!(
+        selector,
+        "EnsureQueue" | "Enqueue" | "Receive" | "Ack" | "Nack" | "Extend" | "Redrive" | "Purge"
+    )
+}
+
+#[test]
+fn queue_manifest_opt_in_forwards_only_declared_queues_with_typed_plans() {
+    let grant = grant(true)
+        .with_queue_manifest(queue_manifest(&["inbound"]))
+        .expect("host-approved queue manifest is accepted");
+
+    assert_eq!(
+        grant.authorize(Object::Queues, "Features", &queue_request("Features", "")),
+        Ok(Plan::Forward {
+            target: String::new(),
+            filter: ReplyFilter::None,
+            write: false,
+        })
+    );
+
+    for selector in tinystoragedrivers_bus::QUEUES_SELECTORS {
+        if selector == "Features" {
+            continue;
+        }
+        assert_eq!(
+            grant.authorize(
+                Object::Queues,
+                selector,
+                &queue_request(selector, "inbound")
+            ),
+            Ok(Plan::Forward {
+                target: "inbound".to_string(),
+                filter: ReplyFilter::None,
+                write: is_queue_write(selector),
+            }),
+            "Queues.{selector} uses the manifested target and correct write policy",
+        );
+    }
+
+    assert_eq!(
+        grant.authorize(
+            Object::Queues,
+            "Stats",
+            &queue_request("Stats", "not-granted"),
+        ),
+        Err(Denied::Target),
+        "the manifest is the target allow-list before the server is reached",
+    );
+    assert_eq!(
+        grant.authorize(Object::Queues, "Stats", &serde_json::Value::Null),
+        Err(Denied::Malformed),
+        "an opted-in grant still validates request shapes",
+    );
+}
+
+#[test]
+fn queue_manifest_opt_in_is_immutable_and_part_of_grant_equality() {
+    let first = empty_grant()
+        .with_queue_manifest(queue_manifest_with_max_attempts(3))
+        .unwrap();
+    let same = empty_grant()
+        .with_queue_manifest(queue_manifest_with_max_attempts(3))
+        .unwrap();
+    let changed = empty_grant()
+        .with_queue_manifest(queue_manifest_with_max_attempts(5))
+        .unwrap();
+
+    assert_eq!(first, same);
+    assert_ne!(first, changed);
+    assert_eq!(empty_grant(), empty_grant(), "default remains queue-denied");
+}
+
+#[test]
+fn an_invalid_queue_manifest_cannot_become_grant_authority() {
+    let invalid = tinystoragedrivers_core::queue::QueueManifest {
+        schema: None,
+        version: 99,
+        queues: Vec::new(),
+    };
+    assert_eq!(
+        empty_grant().with_queue_manifest(std::sync::Arc::new(invalid)),
+        Err(QueueGrantError::InvalidManifest),
+    );
+}
+
+#[test]
+fn read_only_queue_authority_allows_reads_but_denies_every_mutator() {
+    let read_only = StorageGrant::from_needs(
+        StorageNeeds::default(),
+        &GrantPolicy {
+            writable: false,
+            ..GrantPolicy::default()
+        },
+    )
+    .unwrap()
+    .with_queue_manifest(queue_manifest(&["inbound"]))
+    .unwrap();
+
+    for selector in ["Stats", "DeadLetters"] {
+        assert!(matches!(
+            read_only.authorize(
+                Object::Queues,
+                selector,
+                &queue_request(selector, "inbound")
+            ),
+            Ok(Plan::Forward { write: false, .. })
+        ));
+    }
+    for selector in tinystoragedrivers_bus::QUEUES_SELECTORS {
+        if is_queue_write(selector) {
+            assert_eq!(
+                read_only.authorize(
+                    Object::Queues,
+                    selector,
+                    &queue_request(selector, "inbound"),
+                ),
+                Err(Denied::ReadOnly),
+                "Queues.{selector} is a mutation",
+            );
+        }
+    }
 }
 
 #[test]

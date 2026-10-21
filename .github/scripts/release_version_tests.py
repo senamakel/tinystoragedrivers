@@ -279,6 +279,25 @@ class ReleaseWorkflowAdmission(unittest.TestCase):
             "refs/tags/v1.8.0",
         ]))
 
+    def test_make_latest_defaults_to_existing_release_behavior(self):
+        text = self.workflow.read_text()
+        dispatch = re.search(r"(?ms)^  workflow_dispatch:\n(.*?)(?=^concurrency:)", text)
+        self.assertIsNotNone(dispatch, "release must use workflow_dispatch")
+        inputs = re.search(r"(?ms)^    inputs:\n(.*)$", dispatch.group(1))
+        self.assertIsNotNone(inputs, "release dispatch inputs must exist")
+        make_latest = re.search(r"(?ms)^      make_latest:\n(.*?)(?=^      [^ ]|\Z)", inputs.group(1))
+        self.assertIsNotNone(make_latest, "release must expose make_latest")
+        self.assertIn("type: boolean", make_latest.group(1))
+        self.assertIn("default: true", make_latest.group(1))
+
+    def test_make_latest_false_is_forwarded_to_github_release_cli(self):
+        text = self.workflow.read_text()
+        release_job = re.search(r"(?ms)^  github-release:\n(.*)$", text)
+        self.assertIsNotNone(release_job, "release publication job must exist")
+        body = release_job.group(1)
+        self.assertIn("MAKE_LATEST: ${{ inputs.make_latest }}", body)
+        self.assertIn('--latest="$MAKE_LATEST"', body)
+
     def test_release_coverage_starts_rabbitmq_before_running_the_full_profile(self):
         text = self.workflow.read_text()
         rabbit_url = "TSD_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/%2f"

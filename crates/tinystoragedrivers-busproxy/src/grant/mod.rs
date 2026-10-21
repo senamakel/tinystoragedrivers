@@ -2,7 +2,7 @@
 //!
 //! See this module's `README.md` for host admission and binding requirements.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use serde_json::Value;
 use tinystoragedrivers_bus::{
@@ -15,9 +15,22 @@ use tinystoragedrivers_core::{
     validate_user_blob_key,
 };
 
+pub use tinystoragedrivers_core::queue::QueueManifest;
+
 mod types;
 
-pub use types::{Denied, GrantError, GrantPolicy, Plan, ReplyFilter, StorageGrant};
+pub use types::{
+    Denied, GrantError, GrantPolicy, Plan, QueueGrantError, ReplyFilter, StorageGrant,
+};
+
+/// Return the recognized protocol selector, or a stable label for invalid input.
+pub(crate) fn audit_selector(object: Object, selector: &str) -> &str {
+    if is_selector(object, selector) {
+        selector
+    } else {
+        "unknown"
+    }
+}
 
 impl StorageGrant {
     /// Validate and own needs the host has approved for this caller.
@@ -53,6 +66,27 @@ impl StorageGrant {
         policy: &GrantPolicy<'_>,
     ) -> Result<Self, GrantError> {
         Self::from_declaration(needs.needs, needs.exact_secret_names, policy)
+    }
+
+    /// Opt this host-selected grant into the queues named by `manifest`.
+    ///
+    /// Queue authority is absent by default and is independent from module
+    /// `StorageNeeds`. The host supplies the same manifest to its
+    /// `StorageServer`, which enforces queue declarations while executing a
+    /// forwarded operation. The manifest is retained in the immutable grant,
+    /// so equality and governed binding checks detect any authority change.
+    ///
+    /// # Errors
+    /// Returns [`QueueGrantError::InvalidManifest`] for an invalid manifest.
+    pub fn with_queue_manifest(
+        mut self,
+        manifest: Arc<QueueManifest>,
+    ) -> Result<Self, QueueGrantError> {
+        manifest
+            .validate()
+            .map_err(|_| QueueGrantError::InvalidManifest)?;
+        self.queues = Some(manifest);
+        Ok(self)
     }
 
     fn from_declaration(
@@ -93,6 +127,7 @@ impl StorageGrant {
             secret_prefixes,
             exact_secret_names,
             writable: policy.writable,
+            queues: None,
         })
     }
 
@@ -138,14 +173,40 @@ impl StorageGrant {
             // does not grant queue access: every queue operation remains denied.
             if selector == "Features" {
                 validate_request(object, selector, request)?;
-                return Ok(Plan::Answer(serde_json::json!({
-                    "dedupe": false,
-                    "groups": false,
-                    "priorities": false,
-                    "delay": false
-                })));
+                return match &self.queues {
+                    Some(_) => Ok(Plan::Forward {
+                        target: String::new(),
+                        filter: ReplyFilter::None,
+                        write: false,
+                    }),
+                    None => Ok(Plan::Answer(serde_json::json!({
+                        "dedupe": false,
+                        "groups": false,
+                        "priorities": false,
+                        "delay": false
+                    }))),
+                };
             }
-            return Err(Denied::Object);
+            let Some(manifest) = &self.queues else {
+                return Err(Denied::Object);
+            };
+            validate_request(object, selector, request)?;
+            let queue = request
+                .get("queue")
+                .and_then(Value::as_str)
+                .ok_or(Denied::Malformed)?;
+            if manifest.get(queue).is_none() {
+                return Err(Denied::Target);
+            }
+            let write = is_write(object, selector)?;
+            if write && !self.writable {
+                return Err(Denied::ReadOnly);
+            }
+            return Ok(Plan::Forward {
+                target: queue.to_owned(),
+                filter: ReplyFilter::None,
+                write,
+            });
         }
         validate_request(object, selector, request)?;
         if selector == "Capabilities" && !self.has_object(object) {
@@ -220,7 +281,7 @@ impl StorageGrant {
             Object::Secrets => {
                 !self.secret_prefixes.is_empty() || !self.exact_secret_names.is_empty()
             }
-            Object::Queues => false,
+            Object::Queues => self.queues.is_some(),
         }
     }
 
@@ -531,6 +592,15 @@ fn validate_request(object: Object, selector: &str, request: &Value) -> Result<(
         {
             Ok(())
         }
+        (Object::Queues, "EnsureQueue") => check!(wire::EnsureQueueRequest),
+        (Object::Queues, "Enqueue") => check!(wire::EnqueueRequest),
+        (Object::Queues, "Receive") => check!(wire::ReceiveRequest),
+        (Object::Queues, "Ack") => check!(wire::ReceiptRequest),
+        (Object::Queues, "Nack") => check!(wire::NackRequest),
+        (Object::Queues, "Extend") => check!(wire::ExtendRequest),
+        (Object::Queues, "Stats" | "Purge") => check!(wire::QueueRequest),
+        (Object::Queues, "DeadLetters") => check!(wire::DeadLettersRequest),
+        (Object::Queues, "Redrive") => check!(wire::RedriveRequest),
         (Object::Streams, "Append") => check!(wire::AppendRequest),
         (Object::Streams, "AppendBatch") => check!(wire::AppendBatchRequest),
         (Object::Streams, "AppendBatchIfOffset") => check!(wire::AppendBatchIfOffsetRequest),
@@ -556,7 +626,7 @@ fn validate_request(object: Object, selector: &str, request: &Value) -> Result<(
     }
 }
 
-fn is_write(object: Object, selector: &str) -> Result<bool, Denied> {
+pub(crate) fn is_write(object: Object, selector: &str) -> Result<bool, Denied> {
     Ok(match (object, selector) {
         (
             Object::Documents,
@@ -583,7 +653,11 @@ fn is_write(object: Object, selector: &str) -> Result<bool, Denied> {
             Object::Blobs,
             "Put" | "PutStream" | "PutUntil" | "PutStreamUntil" | "Delete" | "PresignPut",
         )
-        | (Object::Secrets, "Set" | "Delete") => true,
+        | (Object::Secrets, "Set" | "Delete")
+        | (
+            Object::Queues,
+            "EnsureQueue" | "Enqueue" | "Receive" | "Ack" | "Nack" | "Extend" | "Redrive" | "Purge",
+        ) => true,
         (
             Object::Documents,
             "Get"
@@ -598,6 +672,7 @@ fn is_write(object: Object, selector: &str) -> Result<bool, Denied> {
             | "Capabilities",
         )
         | (Object::Streams, "ReadWindow" | "Len" | "Streams" | "Info")
+        | (Object::Queues, "Stats" | "DeadLetters")
         | (
             Object::Blobs,
             "Get"
