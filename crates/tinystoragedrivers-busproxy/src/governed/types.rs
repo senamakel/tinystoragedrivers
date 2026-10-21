@@ -1,11 +1,11 @@
 //! Opaque contexts and routing handles for governed storage leases.
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
-use tinybus::{BusName, module::ModuleId};
+use tinybus::BusName;
 
 /// A typed host-owned context that resolves a lease's canonical storage scope.
 ///
@@ -71,8 +71,12 @@ pub struct StorageLease {
     pub(crate) registration_id: u64,
     pub(crate) owner: Arc<()>,
     pub(crate) epoch: u64,
-    pub(crate) caller_peer: BusName,
-    pub(crate) module: ModuleId,
+    /// A peer fixed at registration for the original peer-bound API.
+    pub(crate) caller_peer: Option<BusName>,
+    /// The host-selected admitted module name.
+    pub(crate) module: String,
+    /// Empty for a pre-load lease until its first authenticated matching peer.
+    pub(crate) peer_pin: Arc<OnceLock<BusName>>,
     pub(crate) revoked: Arc<AtomicBool>,
     pub(crate) published: Arc<AtomicBool>,
     pub(crate) _drop_guard: Arc<LeaseDropGuard>,
@@ -109,8 +113,9 @@ impl Drop for LeaseDropGuard {
 pub(crate) struct LeaseClaims {
     pub(crate) registration_id: u64,
     pub(crate) epoch: u64,
-    pub(crate) caller_peer: BusName,
-    pub(crate) module: ModuleId,
+    pub(crate) caller_peer: Option<BusName>,
+    pub(crate) module: String,
+    pub(crate) peer_pin: Arc<OnceLock<BusName>>,
     pub(crate) revoked: Arc<AtomicBool>,
     pub(crate) published: Arc<AtomicBool>,
 }
@@ -122,6 +127,7 @@ impl From<&StorageLease> for LeaseClaims {
             epoch: lease.epoch,
             caller_peer: lease.caller_peer.clone(),
             module: lease.module.clone(),
+            peer_pin: Arc::clone(&lease.peer_pin),
             revoked: Arc::clone(&lease.revoked),
             published: Arc::clone(&lease.published),
         }

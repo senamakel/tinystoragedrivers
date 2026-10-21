@@ -124,6 +124,150 @@ async fn a_bound_storage_client_connects_without_queue_needs_and_keeps_queues_de
     host.shutdown(Duration::from_secs(1)).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn expected_module_descriptor_is_available_before_its_peer_starts() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let service_environment = test_environment(CollectionSpec {
+        name: "shared.records".to_owned(),
+        indexes: vec![],
+        ttl_field: None,
+        search: None,
+    });
+    let registration = attach_storage(
+        &host,
+        &observer,
+        GovernedStorage::new(
+            Arc::clone(&service_environment),
+            Arc::new(TestAudit::default()),
+            GovernedEndpointLimits::default(),
+        )
+        .with_max_leases(1),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+
+    let (lease, descriptor) = registration
+        .register_expected_module_lease(
+            tinystoragedrivers_busproxy::HostStorageContext::new(Profile("preload-module")),
+            "preload-storage-caller",
+        )
+        .await
+        .expect("the host can configure a descriptor before the module peer exists");
+    assert_eq!(
+        service_environment.resolve_calls.load(Ordering::Acquire),
+        0,
+        "publishing a pending descriptor does not resolve or expose storage"
+    );
+    assert_eq!(
+        registration
+            .register_expected_module_lease(
+                tinystoragedrivers_busproxy::HostStorageContext::new(Profile("overflow-module")),
+                "overflow-storage-caller",
+            )
+            .await
+            .err(),
+        Some(HostFailure::Denied("lease-capacity")),
+        "pending leases count toward the registration's active capacity"
+    );
+
+    let caller = attach_named_test_module(
+        &host,
+        "preload-storage-caller",
+        "ai.tinyhumans.test.preloadstoragecaller",
+        "/ai/tinyhumans/test/preload_storage_caller",
+    )
+    .await;
+    let transport =
+        tinystoragedrivers_busproxy::BusTransport::connect_bound(caller.clone(), descriptor)
+            .await
+            .unwrap();
+    transport
+        .call(
+            tinystoragedrivers_client::Object::Documents,
+            "Get",
+            json!({"collection":"shared.records","document_id":"missing"}),
+        )
+        .await
+        .expect("the exact admitted module can activate its configured route");
+    assert_eq!(
+        service_environment.resolve_calls.load(Ordering::Acquire),
+        2,
+        "first authenticated use resolves and revalidates the captured context"
+    );
+
+    registration.shutdown().await.unwrap();
+    drop(lease);
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_an_unused_expected_module_lease_withdraws_its_pending_route() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let service_environment = test_environment(CollectionSpec {
+        name: "shared.records".to_owned(),
+        indexes: vec![],
+        ttl_field: None,
+        search: None,
+    });
+    let registration = attach_storage(
+        &host,
+        &observer,
+        GovernedStorage::new(
+            Arc::clone(&service_environment),
+            Arc::new(TestAudit::default()),
+            GovernedEndpointLimits::default(),
+        ),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    let (lease, descriptor) = registration
+        .register_expected_module_lease(
+            tinystoragedrivers_busproxy::HostStorageContext::new(Profile("dropped-module")),
+            "dropped-storage-caller",
+        )
+        .await
+        .expect("the host can publish a pending route");
+    let caller = attach_named_test_module(
+        &host,
+        "dropped-storage-caller",
+        "ai.tinyhumans.test.droppedstoragecaller",
+        "/ai/tinyhumans/test/dropped_storage_caller",
+    )
+    .await;
+    let transport = tinystoragedrivers_busproxy::BusTransport::connect_bound(caller, descriptor)
+        .await
+        .unwrap();
+    drop(lease);
+    assert!(
+        transport
+            .call(
+                tinystoragedrivers_client::Object::Documents,
+                "Get",
+                json!({"collection":"shared.records","document_id":"missing"}),
+            )
+            .await
+            .is_err(),
+        "dropping the pending host handle closes its route before storage resolves"
+    );
+    assert_eq!(service_environment.resolve_calls.load(Ordering::Acquire), 0);
+    registration.shutdown().await.unwrap();
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
 #[test]
 fn stream_error_test_diagnostic_is_content_free_across_crate_boundary() {
     let sdk_error = tinybus::Error::StreamAborted {

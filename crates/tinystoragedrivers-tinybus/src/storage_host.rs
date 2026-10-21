@@ -78,6 +78,31 @@ where
             .await
     }
 
+    /// Prepare a lease for a host-selected module before it starts.
+    ///
+    /// The route will be pinned to the first authenticated peer admitted as
+    /// `expected_module`. Storage resolution is deferred until that peer's
+    /// first call so its setup can register the owner migration service.
+    /// The caller directory must resolve the identifier to one intended
+    /// module instance; use [`Self::register_lease`] when multiple instances
+    /// share an id.
+    ///
+    /// # Errors
+    /// Returns a content-free refusal when the module id is invalid, capacity
+    /// is exhausted, registration is shut down, or the route cannot be
+    /// published.
+    pub async fn register_expected_module_lease(
+        &self,
+        context: tinystoragedrivers_busproxy::HostStorageContext<C>,
+        expected_module: &str,
+    ) -> Result<(StorageLease, StorageDescriptor), HostFailure> {
+        self.inner
+            .as_ref()
+            .ok_or(HostFailure::Denied("registration-shutdown"))?
+            .register_expected_module_lease(context, expected_module)
+            .await
+    }
+
     /// Revoke and withdraw one lease.
     pub async fn revoke(&self, lease: &StorageLease) -> bool {
         match self.inner.as_ref() {
