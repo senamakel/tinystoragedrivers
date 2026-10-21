@@ -4,7 +4,8 @@ mod endpoint;
 mod types;
 
 pub use endpoint::{
-    AuditEvent, AuditSink, CallerDirectory, Environment, GovernedEndpoint, GovernedEndpointLimits,
-    GovernedStorage, ResolvedStorage, StorageRegistration, TinyBusCallerDirectory,
+    AuditEvent, AuditSink, CallAuditMetadata, CallerDirectory, Environment, GovernedEndpoint,
+    GovernedEndpointLimits, GovernedStorage, ResolvedStorage, StorageRegistration,
+    TinyBusCallerDirectory,
 };
 pub use types::{HostContext, HostStorageContext, StorageDescriptor, StorageLease};

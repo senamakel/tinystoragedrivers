@@ -97,6 +97,586 @@ impl AuditSink for RelayAudit {
     fn record(&self, _event: AuditEvent) {}
 }
 
+#[derive(Clone, Debug)]
+struct CapturedCallAudit {
+    event: AuditEvent,
+    has_module: bool,
+    canonical_scope: Option<String>,
+    selector: Option<String>,
+    target: Option<String>,
+}
+
+#[derive(Default)]
+struct RecordingCallAudit(std::sync::Mutex<Vec<CapturedCallAudit>>);
+
+impl RecordingCallAudit {
+    fn events(&self) -> Vec<CapturedCallAudit> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl AuditSink for RecordingCallAudit {
+    fn record(&self, event: AuditEvent) {
+        self.0.lock().unwrap().push(CapturedCallAudit {
+            event,
+            has_module: false,
+            canonical_scope: None,
+            selector: None,
+            target: None,
+        });
+    }
+
+    fn record_call(&self, event: AuditEvent, metadata: CallAuditMetadata<'_>) {
+        self.0.lock().unwrap().push(CapturedCallAudit {
+            event,
+            has_module: metadata.module.is_some(),
+            canonical_scope: metadata.canonical_scope.map(str::to_owned),
+            selector: Some(metadata.selector.to_owned()),
+            target: metadata.target.map(str::to_owned),
+        });
+    }
+}
+
+#[derive(Default)]
+struct RecordOnlyAudit(std::sync::Mutex<Vec<AuditEvent>>);
+
+impl RecordOnlyAudit {
+    fn events(&self) -> Vec<AuditEvent> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl AuditSink for RecordOnlyAudit {
+    fn record(&self, event: AuditEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+struct ResolvePause {
+    entered: tokio::sync::Notify,
+    release: Semaphore,
+}
+
+struct CallAuditEnvironment {
+    grant: crate::StorageGrant,
+    server: Arc<StorageServer>,
+    fail_resolve: std::sync::atomic::AtomicBool,
+    panic_resolve: std::sync::atomic::AtomicBool,
+    fail_write: std::sync::atomic::AtomicBool,
+    resolve_pause: std::sync::Mutex<Option<Arc<ResolvePause>>>,
+}
+
+struct CallAuditCallerDirectory {
+    peer: BusName,
+    module: ModuleId,
+    hide_peer: std::sync::atomic::AtomicBool,
+}
+
+impl CallerDirectory for CallAuditCallerDirectory {
+    fn module_for_sender(&self, sender: &BusName) -> Option<ModuleId> {
+        if self.hide_peer.load(Ordering::Acquire) || sender != &self.peer {
+            None
+        } else {
+            Some(self.module.clone())
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Environment<RelayContext> for CallAuditEnvironment {
+    async fn resolve(
+        &self,
+        _context: &RelayContext,
+        _module: &ModuleId,
+    ) -> Result<ResolvedStorage, HostFailure> {
+        let pause = self.resolve_pause.lock().unwrap().clone();
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause
+                .release
+                .acquire()
+                .await
+                .map_err(|_| HostFailure::Denied("test-pause-closed"))?
+                .forget();
+        }
+        assert!(
+            !self.panic_resolve.load(Ordering::Acquire),
+            "audit fixture resolution panicked"
+        );
+        if self.fail_resolve.load(Ordering::Acquire) {
+            return Err(HostFailure::Denied("test-resolution-refused"));
+        }
+        Ok(ResolvedStorage {
+            backend_identity: "audit-fixture-backend".to_string(),
+            binding_epoch: 1,
+            canonical_scope: "audit-fixture-private-scope".to_string(),
+            grant: self.grant.clone(),
+            server: Arc::clone(&self.server),
+        })
+    }
+
+    async fn admit_write(
+        &self,
+        _context: &RelayContext,
+        _module: &ModuleId,
+    ) -> Result<(), HostFailure> {
+        if self.fail_write.load(Ordering::Acquire) {
+            Err(HostFailure::Storage(StorageFailure {
+                kind: StorageKind::Fenced,
+            }))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct CallAuditFixture<A: AuditSink> {
+    endpoint: Arc<GovernedEndpoint<CallAuditEnvironment, A, RelayContext>>,
+    environment: Arc<CallAuditEnvironment>,
+    callers: Arc<CallAuditCallerDirectory>,
+    sender: BusName,
+    _host: ModuleHost,
+    _broker_task: tokio::task::JoinHandle<Result<(), tinybus::Error>>,
+}
+
+async fn call_audit_module_peer() -> (
+    ModuleHost,
+    tokio::task::JoinHandle<Result<(), tinybus::Error>>,
+    BusName,
+    ModuleId,
+) {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let (caller_tx, caller_rx) = tokio::sync::oneshot::channel();
+    host.attach_linked_with_setup(
+        relay_test_caller::linked_module().unwrap(),
+        json!({}),
+        move |connection| async move {
+            caller_tx
+                .send(connection.clone())
+                .map_err(|_| tinybus::Error::failed("audit fixture receiver closed"))
+        },
+    )
+    .await
+    .unwrap();
+    let caller = tokio::time::timeout(Duration::from_secs(2), caller_rx)
+        .await
+        .expect("audit fixture module setup completes")
+        .unwrap();
+    let sender = caller.unique_name().unwrap();
+    let module = host
+        .sender_lookup()
+        .module_for_sender(&sender)
+        .expect("linked module has an admitted id");
+    (host, broker_task, sender, module)
+}
+
+async fn call_audit_environment() -> Arc<CallAuditEnvironment> {
+    let storage = MemoryStorage::new();
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    scoped
+        .documents()
+        .ensure_collection(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    let queues = Arc::new(
+        tinystoragedrivers_core::queue::QueueManifest::from_json(
+            r#"{"version":1,"queues":[{"name":"inbound"}]}"#,
+        )
+        .unwrap(),
+    );
+    let server = Arc::new(StorageServer::new(scoped).with_queue_manifest(Arc::clone(&queues)));
+    let collection = [WireCollectionSpec {
+        name: "notes".to_string(),
+        indexes: Vec::new(),
+        ttl_field: None,
+        search: None,
+    }];
+    let blob_prefixes = ["attachments/"];
+    let secret_prefixes = ["private/"];
+    let grant = crate::StorageGrant::from_needs(
+        StorageNeeds {
+            collections: &collection,
+            blob_prefixes: &blob_prefixes,
+            secret_prefixes: &secret_prefixes,
+            ..StorageNeeds::default()
+        },
+        &GrantPolicy {
+            writable: true,
+            allow_secrets: true,
+            ..GrantPolicy::default()
+        },
+    )
+    .unwrap()
+    .with_queue_manifest(queues)
+    .unwrap();
+
+    Arc::new(CallAuditEnvironment {
+        grant,
+        server,
+        fail_resolve: std::sync::atomic::AtomicBool::new(false),
+        panic_resolve: std::sync::atomic::AtomicBool::new(false),
+        fail_write: std::sync::atomic::AtomicBool::new(false),
+        resolve_pause: std::sync::Mutex::new(None),
+    })
+}
+
+async fn call_audit_fixture<A: AuditSink>(
+    audit: Arc<A>,
+    max_blob_bytes: u64,
+) -> CallAuditFixture<A> {
+    let (host, broker_task, sender, module) = call_audit_module_peer().await;
+    let environment = call_audit_environment().await;
+    let callers = Arc::new(CallAuditCallerDirectory {
+        peer: sender.clone(),
+        module: module.clone(),
+        hide_peer: std::sync::atomic::AtomicBool::new(false),
+    });
+    let endpoint = Arc::new(GovernedEndpoint::for_lease(LeaseEndpointConfig {
+        environment: Arc::clone(&environment),
+        audit: Arc::clone(&audit),
+        callers: callers.clone(),
+        context: HostStorageContext::new(RelayContext),
+        lease: LeaseClaims {
+            registration_id: 91,
+            epoch: 1,
+            caller_peer: sender.clone(),
+            module,
+            revoked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            published: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        },
+        limits: GovernedEndpointLimits { max_blob_bytes },
+        binding_slots: Arc::new(Semaphore::new(4)),
+        runtime: tokio::runtime::Handle::current(),
+    }));
+
+    CallAuditFixture {
+        endpoint,
+        environment,
+        callers,
+        sender,
+        _host: host,
+        _broker_task: broker_task,
+    }
+}
+
+fn audit_get<'a>(sender: Option<&'a BusName>, collection: &str) -> StorageCall<'a> {
+    StorageCall {
+        object: Object::Documents,
+        selector: "Get",
+        request: json!({"collection":collection,"document_id":"audit-record"}),
+        sender,
+        admission: Admission::Private,
+    }
+}
+
+#[tokio::test]
+async fn record_only_audit_sinks_receive_early_refusals_once() {
+    let legacy_audit = Arc::new(RecordOnlyAudit::default());
+    let legacy_fixture = call_audit_fixture(Arc::clone(&legacy_audit), 1024).await;
+    assert_eq!(
+        legacy_fixture
+            .endpoint
+            .call(audit_get(Some(&legacy_fixture.sender), "not-granted"))
+            .await,
+        Err(HostFailure::Denied("target-not-granted"))
+    );
+    let legacy_events = legacy_audit.events();
+    assert_eq!(
+        legacy_events.len(),
+        1,
+        "default record-only sinks see refusals"
+    );
+    assert_eq!(legacy_events[0].outcome, "target-not-granted");
+}
+
+#[tokio::test]
+async fn call_audit_records_success_and_sanitizes_denied_targets_and_selectors() {
+    let audit = Arc::new(RecordingCallAudit::default());
+    let fixture = call_audit_fixture(Arc::clone(&audit), 1024).await;
+
+    fixture
+        .endpoint
+        .call(audit_get(Some(&fixture.sender), "notes"))
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .endpoint
+            .call(audit_get(Some(&fixture.sender), "not-granted"))
+            .await,
+        Err(HostFailure::Denied("target-not-granted"))
+    );
+
+    assert_eq!(
+        fixture
+            .endpoint
+            .call(StorageCall {
+                object: Object::Documents,
+                selector: "not-a-protocol-selector:selector-marker",
+                request: serde_json::Value::Null,
+                sender: Some(&fixture.sender),
+                admission: Admission::Private,
+            })
+            .await,
+        Err(HostFailure::Denied("malformed-request"))
+    );
+
+    let events = audit.events();
+    assert_eq!(events.len(), 3, "each completed call emits one record");
+    assert_eq!(events[0].event.outcome, "allowed");
+    assert!(events[0].has_module);
+    assert_eq!(
+        events[0].canonical_scope.as_deref(),
+        Some("audit-fixture-private-scope")
+    );
+    assert_eq!(events[0].selector.as_deref(), Some("Get"));
+    assert_eq!(events[0].target.as_deref(), Some("notes"));
+    assert_eq!(events[1].event.outcome, "target-not-granted");
+    assert_eq!(events[1].target, None, "a denied target is not audited");
+    assert_eq!(events[2].event.outcome, "malformed-request");
+    assert_eq!(events[2].selector.as_deref(), Some("unknown"));
+    assert_eq!(events[2].target, None);
+    let rendered = format!("{events:?}");
+    assert!(!rendered.contains("selector-marker"));
+}
+
+#[tokio::test]
+async fn call_audit_leaves_unvalidated_resolution_metadata_absent() {
+    let audit = Arc::new(RecordingCallAudit::default());
+    let fixture = call_audit_fixture(Arc::clone(&audit), 1024).await;
+
+    fixture.callers.hide_peer.store(true, Ordering::Release);
+    assert!(matches!(
+        fixture
+            .endpoint
+            .call(audit_get(Some(&fixture.sender), "notes"))
+            .await,
+        Err(HostFailure::Denied("unknown-caller"))
+    ));
+    fixture.callers.hide_peer.store(false, Ordering::Release);
+
+    fixture
+        .environment
+        .fail_resolve
+        .store(true, Ordering::Release);
+    assert!(matches!(
+        fixture
+            .endpoint
+            .call(audit_get(Some(&fixture.sender), "notes"))
+            .await,
+        Err(HostFailure::Denied("test-resolution-refused"))
+    ));
+    fixture
+        .environment
+        .fail_resolve
+        .store(false, Ordering::Release);
+
+    let events = audit.events();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event.outcome, "unknown-caller");
+    assert!(!events[0].has_module);
+    assert_eq!(events[0].canonical_scope, None);
+    assert_eq!(events[0].target, None);
+    assert_eq!(events[1].event.outcome, "test-resolution-refused");
+    assert!(events[1].has_module);
+    assert_eq!(events[1].canonical_scope, None);
+    assert_eq!(events[1].target, None);
+}
+
+#[tokio::test]
+async fn call_audit_records_fenced_writes_and_redacted_secret_targets() {
+    let audit = Arc::new(RecordingCallAudit::default());
+    let fixture = call_audit_fixture(Arc::clone(&audit), 1024).await;
+
+    fixture
+        .environment
+        .fail_write
+        .store(true, Ordering::Release);
+    assert_eq!(
+        fixture
+            .endpoint
+            .call(StorageCall {
+                object: Object::Queues,
+                selector: "Enqueue",
+                request: json!({
+                    "queue":"inbound",
+                    "messages":[{"payload_json":"{\"audit\":true}"}]
+                }),
+                sender: Some(&fixture.sender),
+                admission: Admission::Private,
+            })
+            .await,
+        Err(HostFailure::Storage(StorageFailure {
+            kind: StorageKind::Fenced,
+        }))
+    );
+    fixture
+        .environment
+        .fail_write
+        .store(false, Ordering::Release);
+
+    assert!(matches!(
+        fixture
+            .endpoint
+            .call(StorageCall {
+                object: Object::Secrets,
+                selector: "Get",
+                request: json!({"name":"private/provider-key"}),
+                sender: Some(&fixture.sender),
+                admission: Admission::Confidential,
+            })
+            .await,
+        Err(HostFailure::Storage(_))
+    ));
+
+    let events = audit.events();
+    assert_eq!(events.len(), 2, "each completed call emits one record");
+    assert_eq!(events[0].event.outcome, "fenced");
+    assert!(events[0].event.write);
+    assert_eq!(events[0].target.as_deref(), Some("inbound"));
+    assert_eq!(events[1].event.outcome, "storage-error");
+    assert_eq!(events[1].target.as_deref(), Some("[REDACTED]"));
+    let rendered = format!("{events:?}");
+    assert!(!rendered.contains("private/provider-key"));
+}
+
+#[tokio::test]
+async fn call_audit_metadata_debug_redacts_scope_and_target() {
+    let audit = Arc::new(RecordingCallAudit::default());
+    let fixture = call_audit_fixture(audit, 1024).await;
+    let metadata = CallAuditMetadata {
+        module: Some(&fixture.endpoint.lease.module),
+        canonical_scope: Some("scope-marker"),
+        selector: "Get",
+        target: Some("target-marker"),
+    };
+    let debug = format!("{metadata:?}");
+    assert!(debug.contains("Get"));
+    assert!(!debug.contains("scope-marker"));
+    assert!(!debug.contains("target-marker"));
+    assert!(debug.contains("[validated]"));
+}
+
+#[tokio::test]
+async fn call_audit_records_guarded_panics_and_stream_entry_results_once() {
+    let audit = Arc::new(RecordingCallAudit::default());
+    let fixture = call_audit_fixture(Arc::clone(&audit), 1).await;
+    fixture
+        .environment
+        .panic_resolve
+        .store(true, Ordering::Release);
+    assert!(matches!(
+        fixture
+            .endpoint
+            .call(audit_get(Some(&fixture.sender), "notes"))
+            .await,
+        Err(HostFailure::Storage(_))
+    ));
+    fixture
+        .environment
+        .panic_resolve
+        .store(false, Ordering::Release);
+
+    let oversized = tinystoragedrivers_bus::PutBlobStreamRequest {
+        key: "attachments/large".to_string(),
+        len: 2,
+        content_type: None,
+        ttl_ms: None,
+    };
+    assert!(
+        fixture
+            .endpoint
+            .put_blob_stream(
+                Some(&fixture.sender),
+                oversized,
+                Box::pin(tokio::io::empty()),
+            )
+            .await
+            .is_err()
+    );
+    let oversized_until = tinystoragedrivers_bus::PutBlobStreamUntilRequest {
+        key: "attachments/large".to_string(),
+        len: 2,
+        content_type: None,
+        expires_at_ms: None,
+    };
+    assert!(
+        fixture
+            .endpoint
+            .put_blob_stream_until(
+                Some(&fixture.sender),
+                oversized_until,
+                Box::pin(tokio::io::empty()),
+            )
+            .await
+            .is_err()
+    );
+
+    let missing = tinystoragedrivers_bus::BlobKeyRequest {
+        key: "attachments/missing".to_string(),
+    };
+    let _ = fixture
+        .endpoint
+        .get_blob_stream(Some(&fixture.sender), missing.clone())
+        .await;
+    let _ = fixture
+        .endpoint
+        .get_blob_stream_with_expiry(Some(&fixture.sender), missing)
+        .await;
+
+    let events = audit.events();
+    assert_eq!(
+        events.len(),
+        5,
+        "each public request and stream entry logs once"
+    );
+    assert_eq!(
+        events[0].event.outcome, "storage-error",
+        "guarded panic is sanitized"
+    );
+    assert_eq!(
+        events[1].event.outcome, "denied",
+        "oversized upload is refused"
+    );
+    assert_eq!(events[1].selector.as_deref(), Some("PutStream"));
+    assert!(events[1].event.write);
+    assert_eq!(
+        events[2].event.outcome, "denied",
+        "oversized upload is refused"
+    );
+    assert_eq!(events[2].selector.as_deref(), Some("PutStreamUntil"));
+    assert!(events[2].event.write);
+    assert_eq!(events[3].selector.as_deref(), Some("GetStream"));
+    assert_eq!(events[4].selector.as_deref(), Some("GetStreamWithExpiry"));
+}
+
+#[tokio::test]
+async fn cancelling_a_governed_call_does_not_emit_a_synthetic_audit_event() {
+    let audit = Arc::new(RecordingCallAudit::default());
+    let fixture = call_audit_fixture(Arc::clone(&audit), 1024).await;
+    let pause = Arc::new(ResolvePause {
+        entered: tokio::sync::Notify::new(),
+        release: Semaphore::new(0),
+    });
+    *fixture.environment.resolve_pause.lock().unwrap() = Some(Arc::clone(&pause));
+
+    let endpoint = Arc::clone(&fixture.endpoint);
+    let sender = fixture.sender.clone();
+    let call = tokio::spawn(async move { endpoint.call(audit_get(Some(&sender), "notes")).await });
+    tokio::time::timeout(Duration::from_secs(2), pause.entered.notified())
+        .await
+        .expect("the call reached the gated resolution");
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    assert!(
+        audit.events().is_empty(),
+        "cancellation is not a completed call"
+    );
+}
+
 struct DropCountingLegacyEndpoint(Arc<AtomicU64>);
 
 impl Drop for DropCountingLegacyEndpoint {

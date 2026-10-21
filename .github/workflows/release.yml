@@ -12,6 +12,11 @@ on:
           - minor
           - major
           - current
+      make_latest:
+        description: Mark the release as the latest GitHub release
+        type: boolean
+        required: false
+        default: true
 
 concurrency:
   # All releases share one immutable tag space.
@@ -202,6 +207,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           REPOSITORY: ${{ github.repository }}
+          MAKE_LATEST: ${{ inputs.make_latest }}
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
@@ -211,5 +217,6 @@ jobs:
               --repo "$REPOSITORY" \
               --verify-tag \
               --title "$RELEASE_TAG" \
-              --generate-notes
+              --generate-notes \
+              --latest="$MAKE_LATEST"
           fi

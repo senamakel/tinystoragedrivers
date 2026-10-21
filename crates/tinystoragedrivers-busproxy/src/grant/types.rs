@@ -1,9 +1,10 @@
 //! Data types for storage grant policy, authority, and request decisions.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use serde_json::Value;
 use tinystoragedrivers_bus::CollectionSpec;
+use tinystoragedrivers_core::queue::QueueManifest;
 
 /// Policy the host applies when turning requested needs into authority.
 #[derive(Default)]
@@ -35,6 +36,9 @@ pub struct StorageGrant {
     pub(super) secret_prefixes: Vec<String>,
     pub(super) exact_secret_names: Vec<String>,
     pub(super) writable: bool,
+    /// Host-selected queue authority. The server still enforces this same
+    /// manifest while executing the queue operation.
+    pub(super) queues: Option<Arc<QueueManifest>>,
 }
 
 impl fmt::Debug for StorageGrant {
@@ -46,9 +50,28 @@ impl fmt::Debug for StorageGrant {
             .field("secret_prefixes", &"[REDACTED]")
             .field("exact_secret_names", &"[REDACTED]")
             .field("writable", &self.writable)
+            .field(
+                "queue_names",
+                &self.queues.as_ref().map(|manifest| manifest.queues.len()),
+            )
             .finish()
     }
 }
+
+/// A content-free failure while admitting a host queue manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueGrantError {
+    /// The host-supplied queue manifest is invalid.
+    InvalidManifest,
+}
+
+impl fmt::Display for QueueGrantError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid queue manifest")
+    }
+}
+
+impl std::error::Error for QueueGrantError {}
 
 /// A content-free grant construction failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

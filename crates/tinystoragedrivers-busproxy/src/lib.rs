@@ -66,11 +66,14 @@ pub mod test_support;
 mod transport;
 
 pub use governed::{
-    AuditEvent, AuditSink, CallerDirectory, Environment, GovernedEndpoint, GovernedEndpointLimits,
-    GovernedStorage, HostContext, HostStorageContext, ResolvedStorage, StorageDescriptor,
-    StorageLease, StorageRegistration, TinyBusCallerDirectory,
+    AuditEvent, AuditSink, CallAuditMetadata, CallerDirectory, Environment, GovernedEndpoint,
+    GovernedEndpointLimits, GovernedStorage, HostContext, HostStorageContext, ResolvedStorage,
+    StorageDescriptor, StorageLease, StorageRegistration, TinyBusCallerDirectory,
 };
-pub use grant::{Denied, GrantError, GrantPolicy, Plan, ReplyFilter, StorageGrant};
+pub use grant::{
+    Denied, GrantError, GrantPolicy, Plan, QueueGrantError, QueueManifest, ReplyFilter,
+    StorageGrant,
+};
 pub use host::{HostFailure, ServedStorage, StorageCall, StorageEndpoint, serve};
 pub use names::{
     ERROR_DENIED, ERROR_STORAGE, HOST_NAME, OBJECT_ROOT, WATCH_MEMBER, object_path, watch_path,

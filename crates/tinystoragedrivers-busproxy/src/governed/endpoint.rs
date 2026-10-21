@@ -1,6 +1,7 @@
 //! Per-call authorization adapters for host-owned storage context.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -115,10 +116,52 @@ pub struct AuditEvent {
     pub write: bool,
 }
 
-/// Host audit sink. It receives no request, resource name, or error message.
+/// Optional validated request context for hosts that need detailed audit logs.
+///
+/// `canonical_scope` and `target` can identify tenant resources and should be
+/// handled as sensitive metadata. This value never includes a request body,
+/// error prose, or broker peer name. Its `Debug` implementation redacts the
+/// scope and target.
+#[non_exhaustive]
+pub struct CallAuditMetadata<'a> {
+    /// Registry module resolved from the authenticated sender, when available.
+    pub module: Option<&'a ModuleId>,
+    /// Host-resolved storage scope, when resolution completed.
+    pub canonical_scope: Option<&'a str>,
+    /// A known storage protocol selector, or the stable unknown label.
+    pub selector: &'a str,
+    /// A target from an authorized forward plan, when one was produced.
+    pub target: Option<&'a str>,
+}
+
+impl fmt::Debug for CallAuditMetadata<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallAuditMetadata")
+            .field("module", &self.module.map(|_| "[validated]"))
+            .field(
+                "canonical_scope",
+                &self.canonical_scope.map(|_| "[REDACTED]"),
+            )
+            .field("selector", &self.selector)
+            .field("target", &self.target.map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+/// Host audit sink. It never receives a request, payload, or error message.
 pub trait AuditSink: Send + Sync + 'static {
     /// Record one content-free event.
     fn record(&self, event: AuditEvent);
+
+    /// Record an event with opt-in validated metadata.
+    ///
+    /// The default delegates to [`Self::record`], so existing sinks continue
+    /// to receive only the content-free event. Hosts overriding this method
+    /// must treat canonical scopes and resource targets as sensitive metadata.
+    fn record_call(&self, event: AuditEvent, _metadata: CallAuditMetadata<'_>) {
+        self.record(event);
+    }
 }
 
 /// Limits applied before a governed binding is made visible.
@@ -831,6 +874,32 @@ struct BoundServer {
     server: Arc<StorageServer>,
 }
 
+#[derive(Default)]
+struct CallAuditState {
+    module: Option<ModuleId>,
+    canonical_scope: Option<String>,
+    target: Option<String>,
+    write: bool,
+}
+
+impl CallAuditState {
+    fn for_call(object: Object, selector: &str) -> Self {
+        Self {
+            write: crate::grant::is_write(object, selector).unwrap_or(false),
+            ..Self::default()
+        }
+    }
+
+    fn metadata<'a>(&'a self, selector: &'a str) -> CallAuditMetadata<'a> {
+        CallAuditMetadata {
+            module: self.module.as_ref(),
+            canonical_scope: self.canonical_scope.as_deref(),
+            selector,
+            target: self.target.as_deref(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct WatchOwner {
     server: Arc<StorageServer>,
@@ -1018,14 +1087,17 @@ where
     async fn resolved(
         &self,
         sender: Option<&BusName>,
+        audit: &mut CallAuditState,
     ) -> Result<(ModuleId, ResolvedStorage, u64), HostFailure> {
         let module = self.module(sender)?;
+        audit.module = Some(module.clone());
         let ticket = self.resolution_gate.begin();
         let _binding = self
             .binding_slots
             .try_acquire()
             .map_err(|_| HostFailure::Denied("binding-capacity"))?;
         let mut resolved = guarded(self.environment.resolve(&self.context, &module)).await??;
+        audit.canonical_scope = Some(resolved.canonical_scope.clone());
         let sender = sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?;
         self.module(Some(sender))?;
         if let Ok(held) = self.bound_server.lock()
@@ -1101,13 +1173,32 @@ where
         Ok(())
     }
 
-    fn audit(&self, object: Object, outcome: &'static str, write: bool) {
-        self.audit.record(AuditEvent {
-            registration_id: self.lease.registration_id,
-            object,
-            outcome,
-            write,
-        });
+    fn record_call_result<T>(
+        &self,
+        object: Object,
+        selector: &str,
+        audit: &CallAuditState,
+        result: &Result<T, HostFailure>,
+    ) {
+        let outcome = match result {
+            Ok(_) => "allowed",
+            Err(HostFailure::Denied(label)) => *label,
+            Err(HostFailure::Storage(failure)) => match failure.kind {
+                StorageKind::InvalidInput => "denied",
+                StorageKind::Fenced => "fenced",
+                StorageKind::ScopeGenerationRejected => "scope-generation-rejected",
+                _ => "storage-error",
+            },
+        };
+        self.audit.record_call(
+            AuditEvent {
+                registration_id: self.lease.registration_id,
+                object,
+                outcome,
+                write: audit.write,
+            },
+            audit.metadata(selector),
+        );
     }
 
     async fn publish_server(
@@ -1417,88 +1508,80 @@ where
         reason = "The per-call policy, backend fence, and watch ownership transaction must stay ordered."
     )]
     async fn call(&self, call: StorageCall<'_>) -> Result<Value, HostFailure> {
-        let opens_watch = call.object == Object::Documents && call.selector == "WatchOpen";
-        let closes_watch = if call.object == Object::Documents && call.selector == "WatchClose" {
-            call.request
-                .get("watch_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        } else {
-            None
-        };
-        let (module, resolved, ticket) = self.resolved(call.sender).await?;
-        let plan = resolved
-            .grant
-            .authorize(call.object, call.selector, &call.request)
-            .map_err(map_denied)?;
-        let (mut request, filter, write) = match plan {
-            crate::Plan::Answer(answer) => {
-                self.audit(call.object, "allowed", false);
-                return Ok(answer);
-            }
-            crate::Plan::Forward { filter, write, .. } => (call.request, filter, write),
-        };
-        if write {
-            guarded(self.environment.admit_write(&self.context, &module)).await??;
-        }
-        let mut close_owner = None;
-        if let Some(watch_id) = closes_watch.as_deref() {
-            self.publish_server(call.sender, &resolved, ticket).await?;
-            let owner = self
-                .watch_ids
-                .lock()
-                .ok()
-                .and_then(|ids| ids.get(watch_id).cloned())
-                .filter(|owner| {
-                    owner.binding_epoch == resolved.binding_epoch
-                        && Arc::ptr_eq(&owner.server, &resolved.server)
-                });
-            let Some(owner) = owner else {
-                self.audit(call.object, "denied", false);
-                return Err(HostFailure::Denied("watch-handle-not-owned"));
-            };
-            request["watch_id"] = serde_json::json!(owner.backend_watch_id);
-            close_owner = Some((watch_id.to_owned(), owner));
-        } else {
-            self.publish_server(call.sender, &resolved, ticket).await?;
-        }
-        let result = guarded(resolved.server.handle(
-            call.admission,
-            call.object.as_str(),
-            call.selector,
-            request,
-        ))
-        .await??;
-        let sender = call
-            .sender
-            .ok_or(HostFailure::Denied("unauthenticated-caller"))?;
-        if let Err(error) = self
-            .revalidate_after_backend(sender, &resolved, ticket)
-            .await
-        {
-            if opens_watch && let Some(watch_id) = result.get("watch_id").and_then(Value::as_str) {
-                let _ = guarded(resolved.server.handle(
-                    call.admission,
-                    Object::Documents.as_str(),
-                    "WatchClose",
-                    serde_json::json!({"watch_id": watch_id}),
-                ))
-                .await;
-            }
-            return Err(error);
-        }
-        let opened_watch_id = opens_watch
-            .then(|| {
-                result
+        let object = call.object;
+        let selector = crate::grant::audit_selector(object, call.selector).to_owned();
+        let mut audit = CallAuditState::for_call(object, call.selector);
+        let result = async {
+            let opens_watch = call.object == Object::Documents && call.selector == "WatchOpen";
+            let closes_watch = if call.object == Object::Documents && call.selector == "WatchClose"
+            {
+                call.request
                     .get("watch_id")
                     .and_then(Value::as_str)
                     .map(str::to_owned)
-            })
-            .flatten();
-        let mut filtered = match resolved.grant.filter_reply(filter, result) {
-            Ok(filtered) => filtered,
-            Err(error) => {
-                if let Some(watch_id) = opened_watch_id {
+            } else {
+                None
+            };
+            let (module, resolved, ticket) = self.resolved(call.sender, &mut audit).await?;
+            let plan = resolved
+                .grant
+                .authorize(call.object, call.selector, &call.request)
+                .map_err(map_denied)?;
+            let (mut request, filter, write) = match plan {
+                crate::Plan::Answer(answer) => {
+                    audit.write = false;
+                    return Ok(answer);
+                }
+                crate::Plan::Forward {
+                    target,
+                    filter,
+                    write,
+                } => {
+                    audit.target = Some(target);
+                    audit.write = write;
+                    (call.request, filter, write)
+                }
+            };
+            if write {
+                guarded(self.environment.admit_write(&self.context, &module)).await??;
+            }
+            let mut close_owner = None;
+            if let Some(watch_id) = closes_watch.as_deref() {
+                self.publish_server(call.sender, &resolved, ticket).await?;
+                let owner = self
+                    .watch_ids
+                    .lock()
+                    .ok()
+                    .and_then(|ids| ids.get(watch_id).cloned())
+                    .filter(|owner| {
+                        owner.binding_epoch == resolved.binding_epoch
+                            && Arc::ptr_eq(&owner.server, &resolved.server)
+                    });
+                let Some(owner) = owner else {
+                    return Err(HostFailure::Denied("watch-handle-not-owned"));
+                };
+                request["watch_id"] = serde_json::json!(owner.backend_watch_id);
+                close_owner = Some((watch_id.to_owned(), owner));
+            } else {
+                self.publish_server(call.sender, &resolved, ticket).await?;
+            }
+            let result = guarded(resolved.server.handle(
+                call.admission,
+                call.object.as_str(),
+                call.selector,
+                request,
+            ))
+            .await??;
+            let sender = call
+                .sender
+                .ok_or(HostFailure::Denied("unauthenticated-caller"))?;
+            if let Err(error) = self
+                .revalidate_after_backend(sender, &resolved, ticket)
+                .await
+            {
+                if opens_watch
+                    && let Some(watch_id) = result.get("watch_id").and_then(Value::as_str)
+                {
                     let _ = guarded(resolved.server.handle(
                         call.admission,
                         Object::Documents.as_str(),
@@ -1507,49 +1590,74 @@ where
                     ))
                     .await;
                 }
-                return Err(map_denied(error));
+                return Err(error);
             }
-        };
-        if opens_watch
-            && let Some(backend_watch_id) = filtered.get("watch_id").and_then(Value::as_str)
-        {
-            let backend_watch_id = backend_watch_id.to_owned();
-            let Some(sender) = call.sender else {
-                let _ = guarded(resolved.server.handle(
-                    call.admission,
-                    Object::Documents.as_str(),
-                    "WatchClose",
-                    serde_json::json!({"watch_id": backend_watch_id}),
-                ))
-                .await;
-                return Err(HostFailure::Denied("unauthenticated-caller"));
+            let opened_watch_id = opens_watch
+                .then(|| {
+                    result
+                        .get("watch_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .flatten();
+            let mut filtered = match resolved.grant.filter_reply(filter, result) {
+                Ok(filtered) => filtered,
+                Err(error) => {
+                    if let Some(watch_id) = opened_watch_id {
+                        let _ = guarded(resolved.server.handle(
+                            call.admission,
+                            Object::Documents.as_str(),
+                            "WatchClose",
+                            serde_json::json!({"watch_id": watch_id}),
+                        ))
+                        .await;
+                    }
+                    return Err(map_denied(error));
+                }
             };
-            let Some(watch_id) =
-                self.record_watch_if_current(sender, &resolved, ticket, &backend_watch_id)
-            else {
-                let _ = guarded(resolved.server.handle(
-                    call.admission,
-                    Object::Documents.as_str(),
-                    "WatchClose",
-                    serde_json::json!({"watch_id": backend_watch_id}),
-                ))
-                .await;
-                return Err(HostFailure::Denied("stale-binding-resolution"));
-            };
-            filtered["watch_id"] = serde_json::json!(watch_id);
+            if opens_watch
+                && let Some(backend_watch_id) = filtered.get("watch_id").and_then(Value::as_str)
+            {
+                let backend_watch_id = backend_watch_id.to_owned();
+                let Some(sender) = call.sender else {
+                    let _ = guarded(resolved.server.handle(
+                        call.admission,
+                        Object::Documents.as_str(),
+                        "WatchClose",
+                        serde_json::json!({"watch_id": backend_watch_id}),
+                    ))
+                    .await;
+                    return Err(HostFailure::Denied("unauthenticated-caller"));
+                };
+                let Some(watch_id) =
+                    self.record_watch_if_current(sender, &resolved, ticket, &backend_watch_id)
+                else {
+                    let _ = guarded(resolved.server.handle(
+                        call.admission,
+                        Object::Documents.as_str(),
+                        "WatchClose",
+                        serde_json::json!({"watch_id": backend_watch_id}),
+                    ))
+                    .await;
+                    return Err(HostFailure::Denied("stale-binding-resolution"));
+                };
+                filtered["watch_id"] = serde_json::json!(watch_id);
+            }
+            if let Some((watch_id, closed_owner)) = close_owner
+                && let Ok(mut ids) = self.watch_ids.lock()
+                && ids.get(&watch_id).is_some_and(|owner| {
+                    owner.binding_epoch == closed_owner.binding_epoch
+                        && owner.backend_watch_id == closed_owner.backend_watch_id
+                        && Arc::ptr_eq(&owner.server, &closed_owner.server)
+                })
+            {
+                ids.remove(&watch_id);
+            }
+            Ok(filtered)
         }
-        if let Some((watch_id, closed_owner)) = close_owner
-            && let Ok(mut ids) = self.watch_ids.lock()
-            && ids.get(&watch_id).is_some_and(|owner| {
-                owner.binding_epoch == closed_owner.binding_epoch
-                    && owner.backend_watch_id == closed_owner.backend_watch_id
-                    && Arc::ptr_eq(&owner.server, &closed_owner.server)
-            })
-        {
-            ids.remove(&watch_id);
-        }
-        self.audit(call.object, "allowed", write);
-        Ok(filtered)
+        .await;
+        self.record_call_result(object, &selector, &audit, &result);
+        result
     }
 
     async fn put_blob_stream(
@@ -1558,29 +1666,41 @@ where
         head: PutBlobStreamRequest,
         body: BlobReader,
     ) -> Result<Value, HostFailure> {
-        if head.len > self.limits.max_blob_bytes {
-            self.audit(Object::Blobs, "denied", true);
-            return Err(invalid());
+        let object = Object::Blobs;
+        let selector = "PutStream";
+        let mut audit = CallAuditState::for_call(object, selector);
+        let result = async {
+            if head.len > self.limits.max_blob_bytes {
+                return Err(invalid());
+            }
+            let (module, resolved, ticket) = self.resolved(sender, &mut audit).await?;
+            let request = serde_json::to_value(&head).map_err(|_| invalid())?;
+            let plan = resolved
+                .grant
+                .authorize(Object::Blobs, "PutStream", &request)
+                .map_err(map_denied)?;
+            let (target, write) = match plan {
+                crate::Plan::Forward { target, write, .. } => (target, write),
+                crate::Plan::Answer(_) => return Err(HostFailure::Denied("invalid-storage-plan")),
+            };
+            audit.target = Some(target);
+            audit.write = write;
+            if write {
+                guarded(self.environment.admit_write(&self.context, &module)).await??;
+            }
+            self.publish_server(sender, &resolved, ticket).await?;
+            let value = guarded(resolved.server.put_blob_stream(head, body)).await??;
+            self.revalidate_after_backend(
+                sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
+                &resolved,
+                ticket,
+            )
+            .await?;
+            serde_json::to_value(value).map_err(|_| invalid())
         }
-        let (module, resolved, ticket) = self.resolved(sender).await?;
-        let request = serde_json::to_value(&head).map_err(|_| invalid())?;
-        let plan = resolved
-            .grant
-            .authorize(Object::Blobs, "PutStream", &request)
-            .map_err(map_denied)?;
-        let write = matches!(plan, crate::Plan::Forward { write: true, .. });
-        if write {
-            guarded(self.environment.admit_write(&self.context, &module)).await??;
-        }
-        self.publish_server(sender, &resolved, ticket).await?;
-        let value = guarded(resolved.server.put_blob_stream(head, body)).await??;
-        self.revalidate_after_backend(
-            sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
-            &resolved,
-            ticket,
-        )
-        .await?;
-        serde_json::to_value(value).map_err(|_| invalid())
+        .await;
+        self.record_call_result(object, selector, &audit, &result);
+        result
     }
 
     async fn put_blob_stream_until(
@@ -1589,29 +1709,41 @@ where
         head: PutBlobStreamUntilRequest,
         body: BlobReader,
     ) -> Result<Value, HostFailure> {
-        if head.len > self.limits.max_blob_bytes {
-            self.audit(Object::Blobs, "denied", true);
-            return Err(invalid());
+        let object = Object::Blobs;
+        let selector = "PutStreamUntil";
+        let mut audit = CallAuditState::for_call(object, selector);
+        let result = async {
+            if head.len > self.limits.max_blob_bytes {
+                return Err(invalid());
+            }
+            let (module, resolved, ticket) = self.resolved(sender, &mut audit).await?;
+            let request = serde_json::to_value(&head).map_err(|_| invalid())?;
+            let plan = resolved
+                .grant
+                .authorize(Object::Blobs, "PutStreamUntil", &request)
+                .map_err(map_denied)?;
+            let (target, write) = match plan {
+                crate::Plan::Forward { target, write, .. } => (target, write),
+                crate::Plan::Answer(_) => return Err(HostFailure::Denied("invalid-storage-plan")),
+            };
+            audit.target = Some(target);
+            audit.write = write;
+            if write {
+                guarded(self.environment.admit_write(&self.context, &module)).await??;
+            }
+            self.publish_server(sender, &resolved, ticket).await?;
+            let value = guarded(resolved.server.put_blob_stream_until(head, body)).await??;
+            self.revalidate_after_backend(
+                sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
+                &resolved,
+                ticket,
+            )
+            .await?;
+            serde_json::to_value(value).map_err(|_| invalid())
         }
-        let (module, resolved, ticket) = self.resolved(sender).await?;
-        let request = serde_json::to_value(&head).map_err(|_| invalid())?;
-        let plan = resolved
-            .grant
-            .authorize(Object::Blobs, "PutStreamUntil", &request)
-            .map_err(map_denied)?;
-        let write = matches!(plan, crate::Plan::Forward { write: true, .. });
-        if write {
-            guarded(self.environment.admit_write(&self.context, &module)).await??;
-        }
-        self.publish_server(sender, &resolved, ticket).await?;
-        let value = guarded(resolved.server.put_blob_stream_until(head, body)).await??;
-        self.revalidate_after_backend(
-            sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
-            &resolved,
-            ticket,
-        )
-        .await?;
-        serde_json::to_value(value).map_err(|_| invalid())
+        .await;
+        self.record_call_result(object, selector, &audit, &result);
+        result
     }
 
     async fn get_blob_stream(
@@ -1619,28 +1751,42 @@ where
         sender: Option<&BusName>,
         request: BlobKeyRequest,
     ) -> Result<Option<(BlobStreamHead, BlobReader)>, HostFailure> {
-        let (_module, resolved, ticket) = self.resolved(sender).await?;
-        let value = serde_json::to_value(&request).map_err(|_| invalid())?;
-        resolved
-            .grant
-            .authorize(Object::Blobs, "GetStream", &value)
-            .map_err(map_denied)?;
-        self.publish_server(sender, &resolved, ticket).await?;
-        let found = guarded(resolved.server.get_blob_stream(request)).await??;
-        self.revalidate_after_backend(
-            sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
-            &resolved,
-            ticket,
-        )
-        .await?;
-        if found
-            .as_ref()
-            .is_some_and(|(head, _)| head.meta.len > self.limits.max_blob_bytes)
-        {
-            self.audit(Object::Blobs, "denied", false);
-            return Err(invalid());
+        let object = Object::Blobs;
+        let selector = "GetStream";
+        let mut audit = CallAuditState::for_call(object, selector);
+        let result = async {
+            let (_module, resolved, ticket) = self.resolved(sender, &mut audit).await?;
+            let value = serde_json::to_value(&request).map_err(|_| invalid())?;
+            let plan = resolved
+                .grant
+                .authorize(Object::Blobs, "GetStream", &value)
+                .map_err(map_denied)?;
+            match plan {
+                crate::Plan::Forward { target, write, .. } => {
+                    audit.target = Some(target);
+                    audit.write = write;
+                }
+                crate::Plan::Answer(_) => return Err(HostFailure::Denied("invalid-storage-plan")),
+            }
+            self.publish_server(sender, &resolved, ticket).await?;
+            let found = guarded(resolved.server.get_blob_stream(request)).await??;
+            self.revalidate_after_backend(
+                sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
+                &resolved,
+                ticket,
+            )
+            .await?;
+            if found
+                .as_ref()
+                .is_some_and(|(head, _)| head.meta.len > self.limits.max_blob_bytes)
+            {
+                return Err(invalid());
+            }
+            Ok(found)
         }
-        Ok(found)
+        .await;
+        self.record_call_result(object, selector, &audit, &result);
+        result
     }
 
     async fn get_blob_stream_with_expiry(
@@ -1648,28 +1794,42 @@ where
         sender: Option<&BusName>,
         request: BlobKeyRequest,
     ) -> Result<Option<(BlobStreamHeadWithExpiry, BlobReader)>, HostFailure> {
-        let (_module, resolved, ticket) = self.resolved(sender).await?;
-        let value = serde_json::to_value(&request).map_err(|_| invalid())?;
-        resolved
-            .grant
-            .authorize(Object::Blobs, "GetStreamWithExpiry", &value)
-            .map_err(map_denied)?;
-        self.publish_server(sender, &resolved, ticket).await?;
-        let found = guarded(resolved.server.get_blob_stream_with_expiry(request)).await??;
-        self.revalidate_after_backend(
-            sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
-            &resolved,
-            ticket,
-        )
-        .await?;
-        if found
-            .as_ref()
-            .is_some_and(|(head, _)| head.meta.len > self.limits.max_blob_bytes)
-        {
-            self.audit(Object::Blobs, "denied", false);
-            return Err(invalid());
+        let object = Object::Blobs;
+        let selector = "GetStreamWithExpiry";
+        let mut audit = CallAuditState::for_call(object, selector);
+        let result = async {
+            let (_module, resolved, ticket) = self.resolved(sender, &mut audit).await?;
+            let value = serde_json::to_value(&request).map_err(|_| invalid())?;
+            let plan = resolved
+                .grant
+                .authorize(Object::Blobs, "GetStreamWithExpiry", &value)
+                .map_err(map_denied)?;
+            match plan {
+                crate::Plan::Forward { target, write, .. } => {
+                    audit.target = Some(target);
+                    audit.write = write;
+                }
+                crate::Plan::Answer(_) => return Err(HostFailure::Denied("invalid-storage-plan")),
+            }
+            self.publish_server(sender, &resolved, ticket).await?;
+            let found = guarded(resolved.server.get_blob_stream_with_expiry(request)).await??;
+            self.revalidate_after_backend(
+                sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?,
+                &resolved,
+                ticket,
+            )
+            .await?;
+            if found
+                .as_ref()
+                .is_some_and(|(head, _)| head.meta.len > self.limits.max_blob_bytes)
+            {
+                return Err(invalid());
+            }
+            Ok(found)
         }
-        Ok(found)
+        .await;
+        self.record_call_result(object, selector, &audit, &result);
+        result
     }
 
     fn watch_signals(&self, sender: &BusName) -> Option<broadcast::Receiver<WatchChanged>> {

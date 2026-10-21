@@ -11,13 +11,21 @@ selection, backend choice, or fence management.
   `GrantPolicy`.
 - `StorageGrant::from_needs_with_exact_secrets` accepts the additive exact-name
   wrapper while preserving the legacy `StorageNeeds` prefix behavior.
+- `StorageGrant::with_queue_manifest` is a separate host-policy opt-in for the
+  host-selected queues. Grants deny queue operations by default; an opted-in
+  grant validates the selector and request, restricts the target to the
+  manifest, and applies the grant's write policy. The host must supply the same
+  manifest to its bound `StorageServer`, which enforces the queue declaration
+  while executing the operation. The manifest participates in grant equality.
 - `StorageGrant::authorize` checks the object, current selector, typed request,
   schema operation, target, and write permission. It returns a `Plan` to
   forward the call or answer a host-only operation locally. An ungranted
   `Queues.Features` request is answered locally with every optional feature
-  disabled so clients can initialize; queue operations remain denied.
+  disabled so clients can initialize; queue operations remain denied until the
+  host opts in with `with_queue_manifest`.
 - `StorageGrant::filter_reply` filters collection enumeration replies.
-- `GrantError` and `Denied` expose content-free error labels.
+- `QueueGrantError`, `GrantError`, and `Denied` expose content-free error
+  labels.
 
 `StorageNeeds` borrows the bus crate's existing owned `CollectionSpec` values
 and resource-prefix slices. A grant clones those values, so it does not borrow
@@ -31,6 +39,12 @@ resource policy before calling `from_needs`. Never derive a grant from
 request-supplied needs. The constructor applies generic syntax checks,
 reserved-resource rules, the writable flag, and explicit secret admission; it
 does not authenticate the source or maintain per-module allow-lists.
+
+Queue access is independent of `StorageNeeds`: the host may attach a validated
+queue manifest after selecting the module's authority. It must bind the
+`StorageServer` to that same manifest and include manifest/backend changes in
+the governed binding revision so a cached server cannot retain stale queue
+policy.
 
 The host then binds the returned grant to its authenticated caller, scope,
 backend, and fence. Requests do not carry those values. Secret operations must

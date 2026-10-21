@@ -261,6 +261,10 @@ did not previously exist. The workflow then commits and tags `vX.Y.Z`, pushes,
 and creates a GitHub release. Consumers pin the tag through a git dependency
 or a submodule gitlink, so there are no binary assets.
 
+`make_latest` defaults to `true`, preserving GitHub's usual latest-release
+selection. Set it to `false` when publishing an older maintained release line
+that must not replace the latest release.
+
 Consequently:
 
 - Do not hand-edit the `version` field in the root `[workspace.package]`; the
