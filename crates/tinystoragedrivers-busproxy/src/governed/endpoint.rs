@@ -39,8 +39,8 @@ type LeaseEntries = Mutex<
             ServedLease,
             Arc<AtomicBool>,
             Arc<AtomicBool>,
-            BusName,
-            ModuleId,
+            Arc<std::sync::OnceLock<BusName>>,
+            String,
         ),
     >,
 >;
@@ -492,7 +492,9 @@ where
         let module = self
             .callers
             .module_for_sender(&intended_peer)
-            .ok_or(HostFailure::Denied("unknown-caller"))?;
+            .ok_or(HostFailure::Denied("unknown-caller"))?
+            .as_str()
+            .to_owned();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         if id == u64::MAX {
             return Err(HostFailure::Denied("lease-capacity"));
@@ -524,12 +526,15 @@ where
                 runtime.spawn(served.shutdown());
             }
         }));
+        let peer_pin = Arc::new(std::sync::OnceLock::new());
+        let _ = peer_pin.set(intended_peer.clone());
         let lease = StorageLease {
             registration_id: id,
             owner: Arc::clone(&self.owner),
             epoch: id,
-            caller_peer: intended_peer,
+            caller_peer: Some(intended_peer.clone()),
             module,
+            peer_pin,
             // Closed while paths are installed; activated only after all
             // four objects and the registration owner are published.
             revoked,
@@ -546,7 +551,7 @@ where
             binding_slots: Arc::clone(&self.binding_slots),
             runtime: self.runtime.clone(),
         });
-        endpoint.warm(&lease.caller_peer).await?;
+        endpoint.warm(&intended_peer).await?;
         let root = format!("{}/Leases/{id}", crate::names::OBJECT_ROOT);
         let served = serve_lease_on(
             &self.connection,
@@ -556,7 +561,13 @@ where
         )
         .await
         .map_err(|_| unavailable())?;
-        if self.callers.module_for_sender(&lease.caller_peer).as_ref() != Some(&lease.module) {
+        if self
+            .callers
+            .module_for_sender(&intended_peer)
+            .as_ref()
+            .map(ModuleId::as_str)
+            != Some(lease.module.as_str())
+        {
             lease.revoked.store(true, Ordering::Release);
             served.shutdown().await;
             return Err(HostFailure::Denied("unknown-caller"));
@@ -594,7 +605,153 @@ where
                     served,
                     Arc::clone(&lease.revoked),
                     Arc::clone(&lease.published),
-                    lease.caller_peer.clone(),
+                    Arc::clone(&lease.peer_pin),
+                    lease.module.clone(),
+                ),
+            )
+            .is_some()
+        {
+            lease.revoked.store(true, Ordering::Release);
+            return Err(HostFailure::Denied("lease-capacity"));
+        }
+        lease.published.store(true, Ordering::Release);
+        lease.revoked.store(false, Ordering::Release);
+        reservation.commit();
+        Ok((lease, descriptor))
+    }
+
+    /// Prepare a lease for one host-selected module before that module starts.
+    ///
+    /// The first authenticated peer resolved to `expected_module` will be
+    /// pinned to the lease; later peers cannot take it over. Unlike
+    /// [`Self::register_lease`], this route must defer storage resolution until
+    /// that peer's first call so the module can publish its migration service
+    /// during setup.
+    /// The expected id is a host registry identifier compared exactly against
+    /// the authenticated caller directory result. The caller directory must
+    /// resolve this id to one intended module instance; use
+    /// [`Self::register_lease`] when several instances share an id.
+    ///
+    /// No module request supplies or selects this identifier.
+    ///
+    /// # Errors
+    /// Returns a content-free refusal for an invalid module id, exhausted
+    /// lease capacity, registration shutdown, unavailable host state, or
+    /// failure to publish the lease objects.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The pending lease publication transaction keeps reservation, rollback, and publication ordered."
+    )]
+    pub async fn register_expected_module_lease(
+        &self,
+        context: HostStorageContext<C>,
+        expected_module: &str,
+    ) -> Result<(StorageLease, StorageDescriptor), HostFailure> {
+        if expected_module.is_empty() || expected_module.len() > 64 {
+            return Err(HostFailure::Denied("invalid-module-id"));
+        }
+        if self.closed.load(Ordering::Acquire) {
+            return Err(HostFailure::Denied("registration-shutdown"));
+        }
+        let reservation = reserve_lease_slot(&self.lease_count, self.max_leases)?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        if id == u64::MAX {
+            return Err(HostFailure::Denied("lease-capacity"));
+        }
+        let revoked = Arc::new(AtomicBool::new(true));
+        let published = Arc::new(AtomicBool::new(false));
+        let peer_pin = Arc::new(std::sync::OnceLock::new());
+        let leases = Arc::downgrade(&self.leases);
+        let count = Arc::clone(&self.lease_count);
+        let runtime = self.runtime.clone();
+        let revoked_on_drop = Arc::clone(&revoked);
+        let published_on_drop = Arc::clone(&published);
+        let peer_pin_on_drop = Arc::clone(&peer_pin);
+        let drop_guard = Arc::new(LeaseDropGuard::new(move || {
+            revoked_on_drop.store(true, Ordering::Release);
+            published_on_drop.store(false, Ordering::Release);
+            let Some(leases) = leases.upgrade() else {
+                return;
+            };
+            let removed = leases.lock().ok().and_then(|mut leases| {
+                let entry = leases.get(&id)?;
+                if !Arc::ptr_eq(&entry.1, &revoked_on_drop)
+                    || !Arc::ptr_eq(&entry.2, &published_on_drop)
+                    || !Arc::ptr_eq(&entry.3, &peer_pin_on_drop)
+                {
+                    return None;
+                }
+                leases.remove(&id)
+            });
+            if let Some((served, _, _, _, _)) = removed {
+                count.fetch_sub(1, Ordering::AcqRel);
+                runtime.spawn(served.shutdown());
+            }
+        }));
+        let lease = StorageLease {
+            registration_id: id,
+            owner: Arc::clone(&self.owner),
+            epoch: id,
+            caller_peer: None,
+            module: expected_module.to_owned(),
+            peer_pin,
+            revoked,
+            published,
+            _drop_guard: drop_guard,
+        };
+        let endpoint = GovernedEndpoint::for_lease(LeaseEndpointConfig {
+            environment: Arc::clone(&self.environment),
+            audit: Arc::clone(&self.audit),
+            callers: Arc::clone(&self.callers),
+            context,
+            lease: LeaseClaims::from(&lease),
+            limits: self.limits,
+            binding_slots: Arc::clone(&self.binding_slots),
+            runtime: self.runtime.clone(),
+        });
+        let root = format!("{}/Leases/{id}", crate::names::OBJECT_ROOT);
+        let served = serve_lease_on(
+            &self.connection,
+            &root,
+            Arc::new(endpoint),
+            self.runtime.clone(),
+        )
+        .await
+        .map_err(|_| unavailable())?;
+        if self.closed.load(Ordering::Acquire) {
+            lease.revoked.store(true, Ordering::Release);
+            served.shutdown().await;
+            return Err(HostFailure::Denied("registration-shutdown"));
+        }
+        let Some(service_peer) = self.connection.unique_name() else {
+            lease.revoked.store(true, Ordering::Release);
+            served.shutdown().await;
+            return Err(unavailable());
+        };
+        let descriptor = StorageDescriptor {
+            service_peer: service_peer.as_str().to_owned(),
+            registration_id: id,
+            object_root: root,
+        };
+        let Ok(mut leases) = self.leases.lock() else {
+            lease.revoked.store(true, Ordering::Release);
+            served.shutdown().await;
+            return Err(HostFailure::Denied("host-unavailable"));
+        };
+        if self.closed.load(Ordering::Acquire) {
+            lease.revoked.store(true, Ordering::Release);
+            drop(leases);
+            served.shutdown().await;
+            return Err(HostFailure::Denied("registration-shutdown"));
+        }
+        if leases
+            .insert(
+                id,
+                (
+                    served,
+                    Arc::clone(&lease.revoked),
+                    Arc::clone(&lease.published),
+                    Arc::clone(&lease.peer_pin),
                     lease.module.clone(),
                 ),
             )
@@ -620,7 +777,8 @@ where
             let entry = leases.get(&lease.registration_id)?;
             if !Arc::ptr_eq(&entry.1, &lease.revoked)
                 || !Arc::ptr_eq(&entry.2, &lease.published)
-                || entry.3 != lease.caller_peer
+                || !Arc::ptr_eq(&entry.3, &lease.peer_pin)
+                || entry.4 != lease.module
             {
                 return None;
             }
@@ -646,7 +804,9 @@ where
             .map(|mut leases| {
                 let ids = leases
                     .iter()
-                    .filter_map(|(id, (_, _, _, caller, _))| (caller == peer).then_some(*id))
+                    .filter_map(|(id, (_, _, _, pinned, _))| {
+                        (pinned.get() == Some(peer)).then_some(*id)
+                    })
                     .collect::<Vec<_>>();
                 ids.into_iter()
                     .filter_map(|id| leases.remove(&id))
@@ -672,9 +832,15 @@ where
             .map(|leases| {
                 leases
                     .values()
-                    .filter_map(|(_, _, _, peer, module)| {
-                        (self.callers.module_for_sender(peer).as_ref() != Some(module))
-                            .then_some(peer.clone())
+                    .filter_map(|(_, _, _, pinned, module)| {
+                        let peer = pinned.get()?;
+                        (self
+                            .callers
+                            .module_for_sender(peer)
+                            .as_ref()
+                            .map(ModuleId::as_str)
+                            != Some(module.as_str()))
+                        .then_some(peer.clone())
                     })
                     .collect::<HashSet<_>>()
             })
@@ -1071,15 +1237,30 @@ where
             return Err(HostFailure::Denied("lease-revoked"));
         }
         let sender = sender.ok_or(HostFailure::Denied("unauthenticated-caller"))?;
-        if sender != &self.lease.caller_peer {
+        if self
+            .lease
+            .caller_peer
+            .as_ref()
+            .is_some_and(|caller_peer| sender != caller_peer)
+        {
             return Err(HostFailure::Denied("lease-caller-mismatch"));
         }
         let module = self
             .callers
             .module_for_sender(sender)
             .ok_or(HostFailure::Denied("unknown-caller"))?;
-        if module != self.lease.module {
+        if module.as_str() != self.lease.module {
             return Err(HostFailure::Denied("lease-module-mismatch"));
+        }
+        if self.lease.caller_peer.is_none() {
+            if !sender.is_unique() {
+                return Err(HostFailure::Denied("unique-caller-required"));
+            }
+            match self.lease.peer_pin.set(sender.clone()) {
+                Ok(()) => {}
+                Err(_) if self.lease.peer_pin.get() == Some(sender) => {}
+                Err(_) => return Err(HostFailure::Denied("lease-caller-mismatch")),
+            }
         }
         Ok(module)
     }
@@ -1124,7 +1305,7 @@ where
             .callers
             .module_for_sender(sender)
             .ok_or(HostFailure::Denied("unknown-caller"))?;
-        if sender != &self.lease.caller_peer || module != self.lease.module {
+        if self.lease.caller_peer.as_ref() != Some(sender) || module.as_str() != self.lease.module {
             return Err(HostFailure::Denied("lease-module-mismatch"));
         }
         let _binding = self

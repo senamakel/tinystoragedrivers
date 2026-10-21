@@ -97,6 +97,24 @@ impl AuditSink for RelayAudit {
     fn record(&self, _event: AuditEvent) {}
 }
 
+fn fixed_lease_claims(
+    registration_id: u64,
+    caller_peer: BusName,
+    module: &ModuleId,
+) -> LeaseClaims {
+    let peer_pin = Arc::new(std::sync::OnceLock::new());
+    peer_pin.set(caller_peer.clone()).unwrap();
+    LeaseClaims {
+        registration_id,
+        epoch: registration_id,
+        caller_peer: Some(caller_peer),
+        module: module.as_str().to_owned(),
+        peer_pin,
+        revoked: Arc::new(AtomicBool::new(false)),
+        published: Arc::new(AtomicBool::new(true)),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CapturedCallAudit {
     event: AuditEvent,
@@ -160,6 +178,7 @@ struct ResolvePause {
 struct CallAuditEnvironment {
     grant: crate::StorageGrant,
     server: Arc<StorageServer>,
+    resolve_calls: std::sync::atomic::AtomicUsize,
     fail_resolve: std::sync::atomic::AtomicBool,
     panic_resolve: std::sync::atomic::AtomicBool,
     fail_write: std::sync::atomic::AtomicBool,
@@ -170,6 +189,16 @@ struct CallAuditCallerDirectory {
     peer: BusName,
     module: ModuleId,
     hide_peer: std::sync::atomic::AtomicBool,
+}
+
+struct ExpectedModuleCallerDirectory(
+    std::sync::Mutex<std::collections::HashMap<BusName, ModuleId>>,
+);
+
+impl CallerDirectory for ExpectedModuleCallerDirectory {
+    fn module_for_sender(&self, sender: &BusName) -> Option<ModuleId> {
+        self.0.lock().unwrap().get(sender).cloned()
+    }
 }
 
 impl CallerDirectory for CallAuditCallerDirectory {
@@ -189,6 +218,7 @@ impl Environment<RelayContext> for CallAuditEnvironment {
         _context: &RelayContext,
         _module: &ModuleId,
     ) -> Result<ResolvedStorage, HostFailure> {
+        self.resolve_calls.fetch_add(1, Ordering::AcqRel);
         let pause = self.resolve_pause.lock().unwrap().clone();
         if let Some(pause) = pause {
             pause.entered.notify_one();
@@ -316,11 +346,368 @@ async fn call_audit_environment() -> Arc<CallAuditEnvironment> {
     Arc::new(CallAuditEnvironment {
         grant,
         server,
+        resolve_calls: std::sync::atomic::AtomicUsize::new(0),
         fail_resolve: std::sync::atomic::AtomicBool::new(false),
         panic_resolve: std::sync::atomic::AtomicBool::new(false),
         fail_write: std::sync::atomic::AtomicBool::new(false),
         resolve_pause: std::sync::Mutex::new(None),
     })
+}
+
+mod expected_peer_export {
+    async fn setup(_: tinybus::Connection) -> tinybus::Result<()> {
+        Ok(())
+    }
+
+    tinybus_module::module_export_static! {
+        setup = setup,
+        worker_threads = 1,
+        provides = ["ai.tinyhumans.test.ExpectedStoragePeer"],
+        methods = [],
+        signals = [],
+        requires = [],
+        optional = [],
+        lazy = false,
+    }
+}
+
+async fn attach_expected_peer(
+    host: &ModuleHost,
+    module_id: &str,
+    bus_name: &str,
+    object_path: &str,
+) -> (Connection, ModuleId) {
+    let mut export = expected_peer_export::linked_module().unwrap();
+    export.descriptor.module_name = [0; 64];
+    export.descriptor.module_name[..module_id.len()].copy_from_slice(module_id.as_bytes());
+    export.manifest.module.name = module_id.to_owned();
+    export.manifest.bus_name = bus_name.parse().unwrap();
+    export.manifest.object_path = object_path.parse().unwrap();
+    let (connection_tx, connection_rx) = tokio::sync::oneshot::channel();
+    host.attach_linked_with_setup(export, json!({}), move |connection| async move {
+        connection_tx
+            .send(connection.clone())
+            .map_err(|_| tinybus::Error::failed("expected peer receiver closed"))
+    })
+    .await
+    .unwrap();
+    let connection = connection_rx.await.unwrap();
+    let peer = connection.unique_name().unwrap();
+    let module = host.sender_lookup().module_for_sender(&peer).unwrap();
+    (connection, module)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This broker-level test verifies pending publication, caller rejection, atomic peer claim, and revoke as one transaction."
+)]
+async fn expected_module_lease_defers_resolution_and_pins_the_first_matching_peer() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let (expected_peer, expected_module) = attach_expected_peer(
+        &host,
+        "expected-storage-peer",
+        "ai.tinyhumans.test.expectedstoragepeer",
+        "/ai/tinyhumans/test/expected_storage_peer",
+    )
+    .await;
+    let (wrong_peer, wrong_module) = attach_expected_peer(
+        &host,
+        "wrong-storage-peer",
+        "ai.tinyhumans.test.wrongstoragepeer",
+        "/ai/tinyhumans/test/wrong_storage_peer",
+    )
+    .await;
+    let second_expected_peer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let unknown_peer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let first_expected_name = expected_peer.unique_name().unwrap();
+    let second_expected_name = second_expected_peer.unique_name().unwrap();
+    let service = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let directory = Arc::new(ExpectedModuleCallerDirectory(std::sync::Mutex::new(
+        [
+            (
+                expected_peer.unique_name().unwrap(),
+                expected_module.clone(),
+            ),
+            (
+                second_expected_peer.unique_name().unwrap(),
+                expected_module.clone(),
+            ),
+            (wrong_peer.unique_name().unwrap(), wrong_module),
+        ]
+        .into_iter()
+        .collect(),
+    )));
+    let environment = call_audit_environment().await;
+    let registration = GovernedStorage::new(
+        Arc::clone(&environment),
+        Arc::new(RecordOnlyAudit::default()),
+        GovernedEndpointLimits::default(),
+    )
+    .register(service, directory, tokio::runtime::Handle::current());
+
+    assert_eq!(
+        registration
+            .register_expected_module_lease(HostStorageContext::new(RelayContext), "")
+            .await
+            .err(),
+        Some(HostFailure::Denied("invalid-module-id")),
+        "an empty host registry id cannot receive a lease"
+    );
+    let oversized_module_id = "x".repeat(65);
+    assert_eq!(
+        registration
+            .register_expected_module_lease(
+                HostStorageContext::new(RelayContext),
+                &oversized_module_id,
+            )
+            .await
+            .err(),
+        Some(HostFailure::Denied("invalid-module-id")),
+        "module ids cannot exceed TinyBus's fixed descriptor bound"
+    );
+
+    let (lease, descriptor) = registration
+        .register_expected_module_lease(
+            HostStorageContext::new(RelayContext),
+            expected_module.as_str(),
+        )
+        .await
+        .expect("host can publish an expected-module route before the module starts");
+    assert_eq!(
+        environment.resolve_calls.load(Ordering::Acquire),
+        0,
+        "a pending route must not resolve storage before its authenticated peer calls"
+    );
+
+    let unknown = BusTransport::connect_bound(unknown_peer, descriptor.clone())
+        .await
+        .unwrap();
+    assert!(
+        unknown
+            .call(
+                Object::Documents,
+                "Get",
+                json!({"collection":"notes","document_id":"x"}),
+            )
+            .await
+            .is_err(),
+        "an unknown peer cannot claim the route"
+    );
+    assert_eq!(
+        environment.resolve_calls.load(Ordering::Acquire),
+        0,
+        "unknown peer refusal happens before Environment::resolve"
+    );
+
+    let wrong = BusTransport::connect_bound(wrong_peer, descriptor.clone())
+        .await
+        .unwrap();
+    assert!(
+        wrong
+            .call(
+                Object::Documents,
+                "Get",
+                json!({"collection":"notes","document_id":"x"})
+            )
+            .await
+            .is_err(),
+        "an admitted peer for another module cannot claim the route"
+    );
+    assert_eq!(
+        environment.resolve_calls.load(Ordering::Acquire),
+        0,
+        "foreign module refusal happens before Environment::resolve"
+    );
+
+    let first = BusTransport::connect_bound(expected_peer, descriptor.clone())
+        .await
+        .unwrap();
+    let second = BusTransport::connect_bound(second_expected_peer, descriptor)
+        .await
+        .unwrap();
+    let first_call = first.call(
+        Object::Documents,
+        "Get",
+        json!({"collection":"notes","document_id":"x"}),
+    );
+    let second_call = second.call(
+        Object::Documents,
+        "Get",
+        json!({"collection":"notes","document_id":"x"}),
+    );
+    let (first_result, second_result) = tokio::join!(first_call, second_call);
+    assert_ne!(
+        first_result.is_ok(),
+        second_result.is_ok(),
+        "exactly one concurrently authenticating peer pins the lease"
+    );
+    assert_eq!(
+        environment.resolve_calls.load(Ordering::Acquire),
+        2,
+        "only the winning peer reaches initial and post-backend resolution"
+    );
+
+    let (winner, loser, winner_peer) = if first_result.is_ok() {
+        (&first, &second, first_expected_name)
+    } else {
+        (&second, &first, second_expected_name)
+    };
+    assert!(
+        loser
+            .call(
+                Object::Documents,
+                "Get",
+                json!({"collection":"notes","document_id":"x"}),
+            )
+            .await
+            .is_err(),
+        "the losing same-module peer cannot take over after the first claim"
+    );
+    assert_eq!(environment.resolve_calls.load(Ordering::Acquire), 2);
+    assert!(
+        winner
+            .call(
+                Object::Documents,
+                "Get",
+                json!({"collection":"notes","document_id":"x"}),
+            )
+            .await
+            .is_ok(),
+        "the pinned peer remains authorized"
+    );
+    assert_eq!(environment.resolve_calls.load(Ordering::Acquire), 4);
+
+    assert_eq!(
+        registration.revoke_peer(&winner_peer).await,
+        1,
+        "peer detach revokes the pinned pre-load lease"
+    );
+    assert!(
+        winner
+            .call(
+                Object::Documents,
+                "Get",
+                json!({"collection":"notes","document_id":"x"})
+            )
+            .await
+            .is_err(),
+        "revocation permanently closes the published route"
+    );
+    assert!(
+        !registration.revoke(&lease).await,
+        "peer revocation cannot unpin and reassign the same lease handle"
+    );
+    registration.shutdown().await.unwrap();
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expected_module_lease_retries_failed_first_resolution_only_for_its_pinned_peer() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let _broker_task = broker.clone().spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let (expected_peer, expected_module) = attach_expected_peer(
+        &host,
+        "expected-storage-peer",
+        "ai.tinyhumans.test.expectedstoragepeer",
+        "/ai/tinyhumans/test/expected_storage_peer",
+    )
+    .await;
+    let second_expected_peer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let service = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let directory = Arc::new(ExpectedModuleCallerDirectory(std::sync::Mutex::new(
+        [
+            (
+                expected_peer.unique_name().unwrap(),
+                expected_module.clone(),
+            ),
+            (
+                second_expected_peer.unique_name().unwrap(),
+                expected_module.clone(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    )));
+    let environment = call_audit_environment().await;
+    let registration = GovernedStorage::new(
+        Arc::clone(&environment),
+        Arc::new(RecordOnlyAudit::default()),
+        GovernedEndpointLimits::default(),
+    )
+    .register(service, directory, tokio::runtime::Handle::current());
+    let (lease, descriptor) = registration
+        .register_expected_module_lease(
+            HostStorageContext::new(RelayContext),
+            expected_module.as_str(),
+        )
+        .await
+        .unwrap();
+    let first = BusTransport::connect_bound(expected_peer, descriptor.clone())
+        .await
+        .unwrap();
+    environment.fail_resolve.store(true, Ordering::Release);
+    assert!(
+        first
+            .call(
+                Object::Documents,
+                "Get",
+                json!({"collection":"notes","document_id":"x"})
+            )
+            .await
+            .is_err(),
+        "a failed first resolution is refused"
+    );
+    assert_eq!(environment.resolve_calls.load(Ordering::Acquire), 1);
+
+    let second = BusTransport::connect_bound(second_expected_peer, descriptor)
+        .await
+        .unwrap();
+    assert!(
+        second
+            .call(
+                Object::Documents,
+                "Get",
+                json!({"collection":"notes","document_id":"x"})
+            )
+            .await
+            .is_err(),
+        "a failed warm does not let another peer claim the lease"
+    );
+    assert_eq!(environment.resolve_calls.load(Ordering::Acquire), 1);
+
+    environment.fail_resolve.store(false, Ordering::Release);
+    first
+        .call(
+            Object::Documents,
+            "Get",
+            json!({"collection":"notes","document_id":"x"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        environment.resolve_calls.load(Ordering::Acquire),
+        3,
+        "the pinned peer can retry the failed first resolution"
+    );
+    registration.revoke(&lease).await;
+    registration.shutdown().await.unwrap();
+    host.shutdown(Duration::from_secs(1)).await;
 }
 
 async fn call_audit_fixture<A: AuditSink>(
@@ -339,14 +726,7 @@ async fn call_audit_fixture<A: AuditSink>(
         audit: Arc::clone(&audit),
         callers: callers.clone(),
         context: HostStorageContext::new(RelayContext),
-        lease: LeaseClaims {
-            registration_id: 91,
-            epoch: 1,
-            caller_peer: sender.clone(),
-            module,
-            revoked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            published: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        },
+        lease: fixed_lease_claims(91, sender.clone(), &module),
         limits: GovernedEndpointLimits { max_blob_bytes },
         binding_slots: Arc::new(Semaphore::new(4)),
         runtime: tokio::runtime::Handle::current(),
@@ -548,7 +928,7 @@ async fn call_audit_metadata_debug_redacts_scope_and_target() {
     let audit = Arc::new(RecordingCallAudit::default());
     let fixture = call_audit_fixture(audit, 1024).await;
     let metadata = CallAuditMetadata {
-        module: Some(&fixture.endpoint.lease.module),
+        module: Some(&fixture.callers.module),
         canonical_scope: Some("scope-marker"),
         selector: "Get",
         target: Some("target-marker"),
@@ -808,14 +1188,7 @@ async fn a_lagged_backend_signal_relay_resets_only_its_live_watch() {
             module: module.clone(),
         }),
         context: HostStorageContext::new(RelayContext),
-        lease: LeaseClaims {
-            registration_id: 1,
-            epoch: 1,
-            caller_peer: peer.clone(),
-            module,
-            revoked: Arc::new(AtomicBool::new(false)),
-            published: Arc::new(AtomicBool::new(true)),
-        },
+        lease: fixed_lease_claims(1, peer.clone(), &module),
         limits: GovernedEndpointLimits::default(),
         binding_slots: Arc::new(Semaphore::new(2)),
         runtime: tokio::runtime::Handle::current(),
@@ -1327,14 +1700,7 @@ async fn a_late_epoch_cannot_replace_the_latest_watch_relay_after_publication() 
         peer: peer.clone(),
         module: module.clone(),
     });
-    let lease = LeaseClaims {
-        registration_id: 1,
-        epoch: 1,
-        caller_peer: peer.clone(),
-        module,
-        revoked: Arc::new(AtomicBool::new(false)),
-        published: Arc::new(AtomicBool::new(true)),
-    };
+    let lease = fixed_lease_claims(1, peer.clone(), &module);
     let endpoint = Arc::new(GovernedEndpoint::for_lease(LeaseEndpointConfig {
         environment: Arc::clone(&environment),
         audit: Arc::new(RelayAudit),
@@ -1580,14 +1946,7 @@ async fn a_stale_publication_cannot_reset_a_newer_binding_watch() {
         peer: peer.clone(),
         module: module.clone(),
     });
-    let lease = LeaseClaims {
-        registration_id: 1,
-        epoch: 1,
-        caller_peer: peer.clone(),
-        module,
-        revoked: Arc::new(AtomicBool::new(false)),
-        published: Arc::new(AtomicBool::new(true)),
-    };
+    let lease = fixed_lease_claims(1, peer.clone(), &module);
     let endpoint = Arc::new(GovernedEndpoint::for_lease(LeaseEndpointConfig {
         environment: Arc::clone(&environment),
         audit: Arc::new(RelayAudit),
@@ -1814,21 +2173,14 @@ async fn a_same_epoch_newer_ticket_repairs_a_paused_publication_relay() {
     });
     let callers: Arc<dyn CallerDirectory> = Arc::new(RelayCallerDirectory {
         peer: peer.clone(),
-        module,
+        module: module.clone(),
     });
     let endpoint = Arc::new(GovernedEndpoint::for_lease(LeaseEndpointConfig {
         environment: Arc::clone(&environment),
         audit: Arc::new(RelayAudit),
         callers,
         context: HostStorageContext::new(RelayContext),
-        lease: LeaseClaims {
-            registration_id: 1,
-            epoch: 1,
-            caller_peer: peer.clone(),
-            module: host.sender_lookup().module_for_sender(&peer).unwrap(),
-            revoked: Arc::new(AtomicBool::new(false)),
-            published: Arc::new(AtomicBool::new(true)),
-        },
+        lease: fixed_lease_claims(1, peer.clone(), &module),
         limits: GovernedEndpointLimits::default(),
         binding_slots: Arc::new(Semaphore::new(4)),
         runtime: tokio::runtime::Handle::current(),
@@ -2021,14 +2373,7 @@ async fn reset_notices_and_signals_keep_lease_unique_watch_handles_after_rebind(
             module: module.clone(),
         }),
         context: HostStorageContext::new(RelayContext),
-        lease: LeaseClaims {
-            registration_id: 1,
-            epoch: 1,
-            caller_peer: peer.clone(),
-            module,
-            revoked: Arc::new(AtomicBool::new(false)),
-            published: Arc::new(AtomicBool::new(true)),
-        },
+        lease: fixed_lease_claims(1, peer.clone(), &module),
         limits: GovernedEndpointLimits::default(),
         binding_slots: Arc::new(Semaphore::new(4)),
         runtime: tokio::runtime::Handle::current(),
@@ -2266,14 +2611,7 @@ async fn an_old_watch_close_cannot_close_a_new_backend_watch_with_the_same_nativ
             module: module.clone(),
         }),
         context: HostStorageContext::new(RelayContext),
-        lease: LeaseClaims {
-            registration_id: 1,
-            epoch: 1,
-            caller_peer: peer.clone(),
-            module,
-            revoked: Arc::new(AtomicBool::new(false)),
-            published: Arc::new(AtomicBool::new(true)),
-        },
+        lease: fixed_lease_claims(1, peer.clone(), &module),
         limits: GovernedEndpointLimits::default(),
         binding_slots: Arc::new(Semaphore::new(4)),
         runtime: tokio::runtime::Handle::current(),
