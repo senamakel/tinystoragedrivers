@@ -85,10 +85,7 @@ impl Interface for StorageModule {
                 Ok(json!(value.doc["value"] == 63))
             }
             "AddressedSecretsDenied" => {
-                let result = storage
-                    .secrets()
-                    .get_versioned("addressed/secret")
-                    .await;
+                let result = storage.secrets().get_versioned("addressed/secret").await;
                 Ok(json!(result.is_err()))
             }
             "AddressedRead" => storage
@@ -136,10 +133,8 @@ impl StorageModule {
         self.storage
             .get_or_try_init(|| async {
                 let storage = if let Some(object_root) = &self.config.object_root {
-                    let address = StorageAddress::try_new(
-                        self.config.host.clone(),
-                        object_root.parse()?,
-                    )?;
+                    let address =
+                        StorageAddress::try_new(self.config.host.clone(), object_root.parse()?)?;
                     connect_storage_at_address(self.connection.clone(), address).await
                 } else {
                     connect_storage_at(self.connection.clone(), self.config.host.clone()).await
@@ -307,10 +302,7 @@ async fn setup(connection: Connection, config: Config) -> Result<()> {
         module.storage().await?;
     }
     connection
-        .serve_at(
-            "/storage_proof".parse()?,
-            module,
-        )
+        .serve_at("/storage_proof".parse()?, module)
         .await?;
     connection
         .request_name("org.example.StorageCallbackProof")

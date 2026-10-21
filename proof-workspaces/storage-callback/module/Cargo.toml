@@ -15,7 +15,7 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 tinybus.workspace = true
-tinybus-module = { git = "https://github.com/senamakel/tinybus", rev = "24ec2ccafcc98fab35fa10ffcbcefa87eb32e3e8" }
+tinybus-module = { git = "https://github.com/senamakel/tinybus", rev = "0de2d283f35cbbff08efad6fbe05537ffb74611b" }
 tinystoragedrivers-api.workspace = true
 tinystoragedrivers-types.workspace = true
 tinystoragedrivers-busproxy = { path = "../../../crates/tinystoragedrivers-busproxy" }

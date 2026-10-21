@@ -6,7 +6,10 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_core::Stream;
-use tinybus::{BusName, Connection, ObjectPath, broker::Broker, transport::memory::MemoryBus};
+use tinybus::{
+    BusName, Connection, Interface, InterfaceName, MemberName, ObjectPath, broker::Broker,
+    transport::memory::MemoryBus,
+};
 use tinystoragedrivers_api::{Storage, StorageBackend};
 use tinystoragedrivers_testkit::{MemoryBackend, conformance};
 use tinystoragedrivers_types::{Result, Scope};
@@ -195,6 +198,134 @@ async fn invocation_addresses_isolate_parallel_endpoints_on_one_attested_connect
     drop(second_guard);
     assert!(storage_b.kv().get("same").await.is_err());
     fixed.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_duplicate_invocation_address_cannot_replace_the_live_endpoint() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let address = StorageAddress::try_new(
+        host.unique_name().unwrap(),
+        ObjectPath::new(format!("{INVOCATION_OBJECT_ROOT}/duplicate")).unwrap(),
+    )
+    .unwrap();
+    let make_endpoint = |scope: &str| {
+        let storage = MemoryBackend::new()
+            .for_scope(&Scope::new(scope).unwrap())
+            .unwrap();
+        Arc::new(PerCallerEndpoint::new(move |_| {
+            Some(StorageServer::new(storage.clone()))
+        }))
+    };
+
+    let first = serve_at_address(&host, address.clone(), make_endpoint("first"))
+        .await
+        .unwrap();
+    let module = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let storage = connect_storage_at_address(module, address.clone())
+        .await
+        .unwrap();
+    storage
+        .kv()
+        .put("owner", serde_json::json!("first"))
+        .await
+        .unwrap();
+
+    let duplicate = serve_at_address(&host, address, make_endpoint("second")).await;
+    assert!(
+        duplicate.is_err(),
+        "a live endpoint address cannot be replaced"
+    );
+    assert_eq!(
+        storage.kv().get("owner").await.unwrap().unwrap().doc,
+        serde_json::json!("first"),
+        "refusing a duplicate leaves the first endpoint active"
+    );
+    first.shutdown().await.unwrap();
+    assert!(storage.kv().get("owner").await.is_err());
+}
+
+struct ExistingInvocationPort;
+
+#[async_trait::async_trait]
+impl Interface for ExistingInvocationPort {
+    fn name(&self) -> InterfaceName {
+        InterfaceName::new("ai.tinyhumans.tinystorage.Preexisting").unwrap()
+    }
+
+    fn members(&self) -> Vec<MemberName> {
+        vec![MemberName::new("Probe").unwrap()]
+    }
+
+    async fn call(
+        &self,
+        _member: &MemberName,
+        _args: serde_json::Value,
+    ) -> tinybus::Result<serde_json::Value> {
+        Ok(serde_json::json!("preexisting"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_invocation_registration_rolls_back_only_its_own_paths() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let address = StorageAddress::try_new(
+        host.unique_name().unwrap(),
+        ObjectPath::new(format!("{INVOCATION_OBJECT_ROOT}/partial")).unwrap(),
+    )
+    .unwrap();
+    let preexisting_path = address.port_path(Object::Streams).clone();
+    host.serve_at(preexisting_path.clone(), ExistingInvocationPort)
+        .await
+        .unwrap();
+    let storage = MemoryBackend::new()
+        .for_scope(&Scope::new("partial-registration").unwrap())
+        .unwrap();
+    let endpoint = Arc::new(PerCallerEndpoint::new(move |_| {
+        Some(StorageServer::new(storage.clone()))
+    }));
+
+    assert!(
+        serve_at_address(&host, address.clone(), endpoint)
+            .await
+            .is_err()
+    );
+
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let probe = client
+        .proxy(
+            address.host().clone(),
+            preexisting_path,
+            "ai.tinyhumans.tinystorage.Preexisting",
+        )
+        .unwrap();
+    let response: String = probe.call("Probe", ()).await.unwrap();
+    assert_eq!(response, "preexisting");
+
+    let first_port_client = client
+        .proxy(
+            address.host().clone(),
+            address.port_path(Object::Documents).clone(),
+            tinystoragedrivers_bus::STORAGE_INTERFACE,
+        )
+        .unwrap();
+    assert!(
+        first_port_client
+            .call::<serde_json::Value>("Get", ("x",))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

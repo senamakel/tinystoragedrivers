@@ -640,12 +640,25 @@ pub async fn serve(
 ///
 /// # Errors
 /// The host identity does not match the connection or `TinyBus` refuses a path
-/// registration.
+/// registration because an interface already owns it.
 pub async fn serve_at_address(
     connection: &Connection,
     address: StorageAddress,
     endpoint: Arc<dyn StorageEndpoint>,
 ) -> tinybus::Result<ServedStorage> {
+    serve_at_address_with_registration_hook(connection, address, endpoint, |_| async {}).await
+}
+
+async fn serve_at_address_with_registration_hook<F, Fut>(
+    connection: &Connection,
+    address: StorageAddress,
+    endpoint: Arc<dyn StorageEndpoint>,
+    mut after_registration: F,
+) -> tinybus::Result<ServedStorage>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     if connection.unique_name().as_ref() != Some(address.host()) {
         return Err(tinybus::Error::failed(
             "storage address host does not match this connection",
@@ -655,7 +668,7 @@ pub async fn serve_at_address(
         .into_iter()
         .map(|object| address.port_path(object).clone())
         .collect();
-    let active = Arc::new(AtomicBool::new(true));
+    let active = Arc::new(AtomicBool::new(false));
     let transport = HostTransport::Addressed {
         connection: connection.downgrade(),
         watch_path: address.watch_path().clone(),
@@ -667,9 +680,9 @@ pub async fn serve_at_address(
         forwarders: Mutex::new(HashMap::new()),
     });
     let mut registered = Vec::new();
-    for (object, path) in ALL.into_iter().zip(paths.iter()) {
+    for (index, (object, path)) in ALL.into_iter().zip(paths.iter()).enumerate() {
         if let Err(error) = connection
-            .serve_at(
+            .try_serve_at(
                 path.clone(),
                 ObjectService {
                     object,
@@ -684,7 +697,9 @@ pub async fn serve_at_address(
             return Err(error);
         }
         registered.push(path.clone());
+        after_registration(index).await;
     }
+    active.store(true, Ordering::Release);
     Ok(ServedStorage {
         mode: ServedMode::Addressed {
             connection: connection.downgrade(),

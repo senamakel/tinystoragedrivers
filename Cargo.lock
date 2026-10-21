@@ -3681,7 +3681,7 @@ dependencies = [
 [[package]]
 name = "tinybus"
 version = "0.1.6"
-source = "git+https://github.com/senamakel/tinybus?rev=24ec2ccafcc98fab35fa10ffcbcefa87eb32e3e8#24ec2ccafcc98fab35fa10ffcbcefa87eb32e3e8"
+source = "git+https://github.com/senamakel/tinybus?rev=0de2d283f35cbbff08efad6fbe05537ffb74611b#0de2d283f35cbbff08efad6fbe05537ffb74611b"
 dependencies = [
  "async-trait",
  "flate2",

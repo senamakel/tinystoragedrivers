@@ -37,7 +37,7 @@ tinystoragedrivers-secrets = { version = "2.1.0", path = "crates/tinystoragedriv
 tinystoragedrivers-testkit = { version = "2.1.0", path = "crates/tinystoragedrivers-testkit" }
 # Pure declarations and transform wire contracts, shared without runtime dependencies.
 # Minimal document wire clients and confined host callbacks; never linked by core.
-tinybus = { git = "https://github.com/senamakel/tinybus", rev = "24ec2ccafcc98fab35fa10ffcbcefa87eb32e3e8", default-features = false }
+tinybus = { git = "https://github.com/senamakel/tinybus", rev = "0de2d283f35cbbff08efad6fbe05537ffb74611b", default-features = false }
 tinystoragedrivers-bus = { path = "crates/tinystoragedrivers-bus" }
 # Bus client implementing the storage ports, plus the reference server adapter.
 # The real TinyBus transport for the storage bus: module-side connect and host-side serve.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::INVOCATION_OBJECT_ROOT;
 use crate::PerCallerEndpoint;
 use crate::StorageServer;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +14,144 @@ struct SignalEndpoint {
     signals: Mutex<Option<tokio::sync::broadcast::Sender<WatchChanged>>>,
     has_signals: bool,
     epoch: AtomicU64,
+}
+
+struct ReplyEndpoint(Value);
+
+struct CountingEndpoint(Arc<AtomicU64>);
+
+#[async_trait::async_trait]
+impl StorageEndpoint for ReplyEndpoint {
+    async fn call(&self, _call: StorageCall<'_>) -> Result<Value, HostFailure> {
+        Ok(self.0.clone())
+    }
+
+    async fn put_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _head: PutBlobStreamRequest,
+        _body: tinystoragedrivers_api::BlobReader,
+    ) -> Result<Value, HostFailure> {
+        Err(HostFailure::Denied("test-endpoint"))
+    }
+
+    async fn get_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHead, tinystoragedrivers_api::BlobReader)>, HostFailure> {
+        Err(HostFailure::Denied("test-endpoint"))
+    }
+
+    fn watch_signals(
+        &self,
+        _sender: &BusName,
+    ) -> Option<tokio::sync::broadcast::Receiver<WatchChanged>> {
+        None
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageEndpoint for CountingEndpoint {
+    async fn call(&self, _call: StorageCall<'_>) -> Result<Value, HostFailure> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(json!("called"))
+    }
+
+    async fn put_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _head: PutBlobStreamRequest,
+        _body: tinystoragedrivers_api::BlobReader,
+    ) -> Result<Value, HostFailure> {
+        Err(HostFailure::Denied("test-endpoint"))
+    }
+
+    async fn get_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHead, tinystoragedrivers_api::BlobReader)>, HostFailure> {
+        Err(HostFailure::Denied("test-endpoint"))
+    }
+
+    fn watch_signals(
+        &self,
+        _sender: &BusName,
+    ) -> Option<tokio::sync::broadcast::Receiver<WatchChanged>> {
+        None
+    }
+}
+
+struct MarkerInterface(&'static str);
+
+#[async_trait::async_trait]
+impl tinybus::Interface for MarkerInterface {
+    fn name(&self) -> tinybus::InterfaceName {
+        tinybus::InterfaceName::new("org.example.RegistrationMarker").unwrap()
+    }
+
+    fn members(&self) -> Vec<MemberName> {
+        vec![member("Probe")]
+    }
+
+    async fn call(&self, _member: &MemberName, _args: Value) -> tinybus::Result<Value> {
+        Ok(json!(self.0))
+    }
+}
+
+fn addressed(host: &Connection, component: &str) -> StorageAddress {
+    StorageAddress::try_new(
+        host.unique_name().unwrap(),
+        format!("{INVOCATION_OBJECT_ROOT}/{component}")
+            .parse()
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+async fn call_addressed(
+    connection: &Connection,
+    address: &StorageAddress,
+    object: Object,
+) -> tinybus::Result<Value> {
+    connection
+        .proxy(
+            address.host().as_str(),
+            address.port_path(object).as_str(),
+            interface().as_str(),
+        )
+        .unwrap()
+        .call("Capabilities", ())
+        .await
+}
+
+async fn call_fixed(connection: &Connection) -> tinybus::Result<Value> {
+    connection
+        .proxy(
+            HOST_NAME,
+            object_path(Object::Documents).as_str(),
+            interface().as_str(),
+        )
+        .unwrap()
+        .call("Capabilities", ())
+        .await
+}
+
+async fn call_marker_interface(
+    connection: &Connection,
+    host: &Connection,
+    path: &tinybus::ObjectPath,
+) -> tinybus::Result<Value> {
+    connection
+        .proxy(
+            host.unique_name().unwrap().as_str(),
+            path.as_str(),
+            "org.example.RegistrationMarker",
+        )
+        .unwrap()
+        .call("Probe", ())
+        .await
 }
 
 #[async_trait::async_trait]
@@ -213,6 +352,340 @@ async fn a_failed_object_registration_does_not_claim_the_host_name() {
 
     assert!(result.is_err());
     assert_eq!(observer.name_owner(HOST_NAME).await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_address_registration_refuses_without_replacing_the_live_endpoint() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let fixed = serve(&host, Arc::new(ReplyEndpoint(json!("fixed-service"))))
+        .await
+        .unwrap();
+    let address = addressed(&host, "duplicate_address");
+    let first = serve_at_address(
+        &host,
+        address.clone(),
+        Arc::new(ReplyEndpoint(json!("original-endpoint"))),
+    )
+    .await
+    .unwrap();
+
+    let duplicate = serve_at_address(
+        &host,
+        address.clone(),
+        Arc::new(ReplyEndpoint(json!("replacement-endpoint"))),
+    )
+    .await;
+
+    assert!(duplicate.is_err(), "an occupied address must be refused");
+    assert_eq!(
+        call_addressed(&caller, &address, Object::Documents)
+            .await
+            .unwrap(),
+        json!("original-endpoint"),
+        "refusing a duplicate must leave the original endpoint serving"
+    );
+    first.shutdown().await.unwrap();
+    assert!(
+        call_addressed(&caller, &address, Object::Documents)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        call_fixed(&caller).await.unwrap(),
+        json!("fixed-service"),
+        "address cleanup must not withdraw the fixed service"
+    );
+    fixed.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn address_registration_refuses_an_occupied_different_interface_untouched() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let fixed = serve(&host, Arc::new(ReplyEndpoint(json!("fixed-service"))))
+        .await
+        .unwrap();
+    let address = addressed(&host, "different_interface");
+    let documents_path = address.port_path(Object::Documents).clone();
+    host.serve_at(
+        documents_path.clone(),
+        MarkerInterface("unrelated-interface"),
+    )
+    .await
+    .unwrap();
+
+    let result = serve_at_address(
+        &host,
+        address.clone(),
+        Arc::new(ReplyEndpoint(json!("storage-endpoint"))),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a different interface already owns the path"
+    );
+    assert_eq!(
+        call_marker_interface(&caller, &host, &documents_path)
+            .await
+            .unwrap(),
+        json!("unrelated-interface"),
+        "refusal must preserve the existing interface at the path"
+    );
+    assert!(
+        call_addressed(&caller, &address, Object::Documents)
+            .await
+            .is_err()
+    );
+    assert_eq!(call_fixed(&caller).await.unwrap(), json!("fixed-service"));
+    fixed.shutdown().await.unwrap();
+    host.unserve(&documents_path).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_address_registration_rolls_back_only_new_paths_and_preserves_siblings() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let fixed = serve(&host, Arc::new(ReplyEndpoint(json!("fixed-service"))))
+        .await
+        .unwrap();
+    let address = addressed(&host, "partial_registration");
+    let documents_path = address.port_path(Object::Documents).clone();
+    let streams_path = address.port_path(Object::Streams).clone();
+    let blobs_path = address.port_path(Object::Blobs).clone();
+    host.serve_at(
+        blobs_path.clone(),
+        MarkerInterface("late-unrelated-interface"),
+    )
+    .await
+    .unwrap();
+
+    let result = serve_at_address(
+        &host,
+        address.clone(),
+        Arc::new(ReplyEndpoint(json!("partial-storage-endpoint"))),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "registration must stop at the occupied blob path"
+    );
+    assert!(
+        call_addressed(&caller, &address, Object::Documents)
+            .await
+            .is_err()
+    );
+    assert!(
+        call_addressed(&caller, &address, Object::Streams)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        call_marker_interface(&caller, &host, &blobs_path)
+            .await
+            .unwrap(),
+        json!("late-unrelated-interface"),
+        "rollback must not unregister the preexisting blob-path interface"
+    );
+    assert_eq!(call_fixed(&caller).await.unwrap(), json!("fixed-service"));
+    fixed.shutdown().await.unwrap();
+    host.unserve(&blobs_path).await;
+    host.unserve(&documents_path).await;
+    host.unserve(&streams_path).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partially_registered_address_does_not_dispatch_before_all_paths_are_claimed() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let fixed = serve(&host, Arc::new(ReplyEndpoint(json!("fixed-service"))))
+        .await
+        .unwrap();
+    let address = addressed(&host, "registration_window");
+    let blobs_path = address.port_path(Object::Blobs).clone();
+    host.serve_at(
+        blobs_path.clone(),
+        MarkerInterface("late-unrelated-interface"),
+    )
+    .await
+    .unwrap();
+
+    let calls = Arc::new(AtomicU64::new(0));
+    let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+    let mut registered_tx = Some(registered_tx);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let release_registration = Arc::clone(&release);
+    let registration_host = host.clone();
+    let registration_address = address.clone();
+    let endpoint = Arc::new(CountingEndpoint(Arc::clone(&calls)));
+    let result = tokio::spawn(async move {
+        serve_at_address_with_registration_hook(
+            &registration_host,
+            registration_address,
+            endpoint,
+            move |index| {
+                let release = Arc::clone(&release_registration);
+                let registered = (index == 0).then(|| registered_tx.take()).flatten();
+                async move {
+                    if let Some(registered) = registered {
+                        registered
+                            .send(())
+                            .expect("registration observer should still be listening");
+                        release.notified().await;
+                    }
+                }
+            },
+        )
+        .await
+    });
+
+    registered_rx.await.unwrap();
+    assert!(
+        call_addressed(&caller, &address, Object::Documents)
+            .await
+            .is_err(),
+        "the first claimed path stays inactive until later paths are claimed"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    release.notify_one();
+    assert!(result.await.unwrap().is_err());
+    assert!(
+        call_addressed(&caller, &address, Object::Documents)
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(call_fixed(&caller).await.unwrap(), json!("fixed-service"));
+
+    fixed.shutdown().await.unwrap();
+    host.unserve(&blobs_path).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn addressed_shutdown_preserves_sibling_invocations_and_fixed_service() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let fixed = serve(&host, Arc::new(ReplyEndpoint(json!("fixed-service"))))
+        .await
+        .unwrap();
+    let removed_address = addressed(&host, "removed_invocation");
+    let sibling_address = addressed(&host, "sibling_invocation");
+    let removed = serve_at_address(
+        &host,
+        removed_address.clone(),
+        Arc::new(ReplyEndpoint(json!("removed-endpoint"))),
+    )
+    .await
+    .unwrap();
+    let sibling = serve_at_address(
+        &host,
+        sibling_address.clone(),
+        Arc::new(ReplyEndpoint(json!("sibling-endpoint"))),
+    )
+    .await
+    .unwrap();
+
+    removed.shutdown().await.unwrap();
+
+    assert!(
+        call_addressed(&caller, &removed_address, Object::Documents)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        call_addressed(&caller, &sibling_address, Object::Documents)
+            .await
+            .unwrap(),
+        json!("sibling-endpoint"),
+        "cleaning one invocation must preserve its sibling's endpoint"
+    );
+    assert_eq!(call_fixed(&caller).await.unwrap(), json!("fixed-service"));
+    sibling.shutdown().await.unwrap();
+    fixed.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_an_addressed_guard_preserves_sibling_invocations() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let removed_address = addressed(&host, "dropped_invocation");
+    let sibling_address = addressed(&host, "surviving_invocation");
+    let removed = serve_at_address(
+        &host,
+        removed_address.clone(),
+        Arc::new(ReplyEndpoint(json!("removed-endpoint"))),
+    )
+    .await
+    .unwrap();
+    let sibling = serve_at_address(
+        &host,
+        sibling_address.clone(),
+        Arc::new(ReplyEndpoint(json!("sibling-endpoint"))),
+    )
+    .await
+    .unwrap();
+
+    drop(removed);
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if call_addressed(&caller, &removed_address, Object::Documents)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping a guard asynchronously unregisters its invocation");
+    assert_eq!(
+        call_addressed(&caller, &sibling_address, Object::Documents)
+            .await
+            .unwrap(),
+        json!("sibling-endpoint")
+    );
+    sibling.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -555,6 +1028,65 @@ async fn watch_signals_are_forwarded_only_to_the_bound_caller() {
     assert_eq!(message.body[0]["watch_id"], "watch-15");
     observer.name_owner(HOST_NAME).await.unwrap();
     assert!(observer_signals.try_recv().is_err());
+    for (_, (_, task)) in shared.forwarders.lock().unwrap().drain() {
+        task.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn addressed_watch_signals_use_the_invocation_watch_path() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller_name = caller.unique_name().unwrap();
+    let address = addressed(&host, "watch_invocation");
+    let mut received = caller
+        .add_match(tinybus::MatchRule {
+            kind: Some(tinybus::MessageKind::Signal),
+            sender: None,
+            interface: Some(interface()),
+            member: Some(member(WATCH_MEMBER)),
+            path: Some(address.watch_path().clone()),
+            path_namespace: None,
+        })
+        .await
+        .unwrap();
+    let (endpoint, sender) = signal_endpoint(true);
+    let shared = Shared {
+        transport: HostTransport::Addressed {
+            connection: host.downgrade(),
+            watch_path: address.watch_path().clone(),
+            active: Arc::new(AtomicBool::new(true)),
+        },
+        endpoint: Arc::new(endpoint),
+        forwarders: Mutex::new(HashMap::new()),
+    };
+
+    shared.forward_watch_signals(&caller_name);
+    sender
+        .send(WatchChanged {
+            watch_id: "addressed-watch".into(),
+            notice: tinystoragedrivers_bus::WatchNotice::Invalidated { cursor: None },
+        })
+        .unwrap();
+
+    let message = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let message = received.recv().await.unwrap();
+            if message.body[0]["watch_id"] == "addressed-watch" {
+                break message;
+            }
+        }
+    })
+    .await
+    .expect("addressed watch signals reach their invocation path");
+    assert_eq!(message.header.path, Some(address.watch_path().clone()));
+    assert_eq!(message.body[0]["watch_id"], "addressed-watch");
     for (_, (_, task)) in shared.forwarders.lock().unwrap().drain() {
         task.abort();
     }

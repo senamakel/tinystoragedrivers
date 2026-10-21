@@ -1,9 +1,5 @@
 //! Real hashed and admitted TinyBus module storage callback proofs.
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -16,7 +12,7 @@ use tinybus::{
 use tinystoragedrivers_api::{BlobReader, Storage, StorageBackend};
 use tinystoragedrivers_bus::{
     BlobCapabilities, CapabilitiesReply, KvCapabilitiesReply, QueueFeaturesReply,
-    SecretsCapabilitiesReply, STORAGE_INTERFACE, WatchChanged,
+    STORAGE_INTERFACE, SecretsCapabilitiesReply, WatchChanged,
 };
 use tinystoragedrivers_busproxy::{
     HostFailure, Object, PerCallerEndpoint, ServedStorage, StorageAddress, StorageCall,
