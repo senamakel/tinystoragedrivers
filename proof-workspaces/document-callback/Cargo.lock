@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-bus"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-busproxy"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-client"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-core"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-schema"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "atomicwrites",
@@ -1076,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-tinybus"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "serde",
