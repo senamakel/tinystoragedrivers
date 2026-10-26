@@ -58,6 +58,15 @@ impl LocalLeases {
         &self,
         read_fallback: bool,
     ) -> io::Result<Option<LocalLeaseGuard>> {
+        self.acquire_with_options(read_fallback, LOCK_TIMEOUT, LOCK_POLL)
+    }
+
+    fn acquire_with_options(
+        &self,
+        read_fallback: bool,
+        timeout: Duration,
+        poll: Duration,
+    ) -> io::Result<Option<LocalLeaseGuard>> {
         let parent = self
             .lock_path
             .parent()
@@ -70,8 +79,8 @@ impl LocalLeases {
             match in_process.try_lock() {
                 Ok(guard) => break guard,
                 Err(TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-                Err(TryLockError::WouldBlock) if started.elapsed() < LOCK_TIMEOUT => {
-                    thread::sleep(LOCK_POLL);
+                Err(TryLockError::WouldBlock) if started.elapsed() < timeout => {
+                    thread::sleep(poll);
                 }
                 Err(TryLockError::WouldBlock) => {
                     return Err(io::Error::new(
@@ -90,7 +99,12 @@ impl LocalLeases {
             let opened = create_lock_file(&self.lock_path);
             match opened {
                 Ok(mut file) => {
-                    if let Err(error) = writeln!(file, "pid={}", std::process::id()) {
+                    #[cfg(test)]
+                    let write_result = tests::injected_write_error()
+                        .map_or_else(|| writeln!(file, "pid={}", std::process::id()), Err);
+                    #[cfg(not(test))]
+                    let write_result = writeln!(file, "pid={}", std::process::id());
+                    if let Err(error) = write_result {
                         let _ = retry_remove(|| fs::remove_file(&self.lock_path));
                         return Err(error);
                     }
@@ -110,13 +124,13 @@ impl LocalLeases {
                 }
                 Err(error) => return Err(error),
             }
-            if started.elapsed() >= LOCK_TIMEOUT {
+            if started.elapsed() >= timeout {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "timed out waiting for local lease",
                 ));
             }
-            thread::sleep(LOCK_POLL);
+            thread::sleep(poll);
         }
     }
 
@@ -218,18 +232,17 @@ fn create_lock_file(path: &Path) -> io::Result<File> {
 }
 
 fn retry_remove(mut remove: impl FnMut() -> io::Result<()>) -> io::Result<()> {
-    for attempt in 0..REMOVE_RETRIES {
+    let mut attempt = 0;
+    loop {
         match remove() {
             Ok(()) => return Ok(()),
-            Err(error) if is_transient_remove_error(&error) && attempt + 1 < REMOVE_RETRIES => {
-                thread::sleep(Duration::from_millis(20 * (1 << attempt)));
+            Err(error) if is_transient_remove_error(&error) && attempt < REMOVE_RETRIES - 1 => {
+                attempt += 1;
+                thread::sleep(Duration::from_millis(20 * (1 << (attempt - 1))));
             }
             Err(error) => return Err(error),
         }
     }
-    Err(io::Error::other(
-        "local lease remove retry loop ended unexpectedly",
-    ))
 }
 
 fn is_transient_remove_error(error: &io::Error) -> bool {
