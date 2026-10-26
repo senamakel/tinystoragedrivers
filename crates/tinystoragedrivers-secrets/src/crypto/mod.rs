@@ -38,6 +38,8 @@ pub const NONCE_LEN: usize = 12;
 pub const TAG_LEN: usize = 16;
 /// The prefix of an encrypted string value.
 pub const ENC2_PREFIX: &str = "enc2:";
+/// Prefix for legacy XOR-obfuscated string values accepted for migration.
+pub const LEGACY_ENC_PREFIX: &str = "enc:";
 
 /// A fresh random key from the OS generator.
 ///
@@ -135,6 +137,26 @@ pub fn decrypt_enc2(key: &[u8; KEY_LEN], value: &str) -> Result<Zeroizing<Vec<u8
 #[must_use]
 pub fn is_enc2(value: &str) -> bool {
     value.starts_with(ENC2_PREFIX)
+}
+
+/// Decode a legacy `enc:<hex>` value using repeating-key XOR.
+///
+/// This unauthenticated format is retained only so hosts can migrate old
+/// values to [`encrypt_enc2`]. It must not be used to protect new data.
+///
+/// # Errors
+///
+/// Returns a crypto error if `value` lacks the `enc:` prefix or contains
+/// malformed hexadecimal data.
+pub fn decrypt_legacy_enc(key: &[u8; KEY_LEN], value: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let hex = value
+        .strip_prefix(LEGACY_ENC_PREFIX)
+        .ok_or_else(|| StorageError::crypto("value is not a legacy enc: ciphertext"))?;
+    let mut bytes = Zeroizing::new(hex_decode(hex)?);
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte ^= key[index % KEY_LEN];
+    }
+    Ok(bytes)
 }
 
 /// Parse host-owned hexadecimal key material. Surrounding whitespace is
