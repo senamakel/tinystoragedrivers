@@ -88,6 +88,7 @@ current v2 APIs. Superseded v1 schema and migration specs are not normative;
 retain only historical fixtures that are exercised by compatibility tests.
 
 The release workflow updates the inherited workspace version and publishes a
-tag. Do not bump package versions by hand. Release dispatches are restricted
-to validated branches by workflow conditions and must be performed only by the
-maintainer after CI and coverage pass.
+tag with a source archive and its `checksum.toml`. Do not bump package
+versions by hand. Release dispatches are restricted to canonical `main` and
+the exact validated fork epic branches listed in `.github/workflows/release.yml`.
+Only the maintainer may dispatch a release, after CI and coverage pass.

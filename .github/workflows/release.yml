@@ -28,7 +28,7 @@ env:
 jobs:
   prepare:
     name: Prepare release
-    if: ${{ (github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8131-storage-primitives') }}
+    if: ${{ (github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8131-storage-primitives') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8369-security-migration') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -74,6 +74,9 @@ jobs:
 
       - name: Test release version and proof lockfile updates
         run: python3 .github/scripts/release_version_tests.py
+
+      - name: Verify source release assets and checksums
+        run: python3 .github/scripts/release_assets_tests.py
 
       - name: Check memory-only and each facade feature
         run: scripts/test-features.sh
@@ -213,13 +216,18 @@ jobs:
   github-release:
     name: Create GitHub release
     needs: prepare
-    if: ${{ (github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8131-storage-primitives') }}
+    if: ${{ (github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8131-storage-primitives') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8369-security-migration') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      # A library release is the tag: consumers pin the git revision (directly
-      # or through a submodule gitlink), so there are no binary assets.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      # Consumers pin the git revision; the source archive and its checksum
+      # make the exact tag verifiable by TinyBus-compatible release tooling.
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -236,3 +244,21 @@ jobs:
               --title "$RELEASE_TAG" \
               --generate-notes
           fi
+
+      - name: Build source archive and checksum manifest
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: python3 .github/scripts/create-release-assets.py --tag "$RELEASE_TAG" --output-dir target/release-assets
+
+      - name: Upload source archive and checksum manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            "target/release-assets/tinystoragedrivers-${RELEASE_TAG}.tar.gz" \
+            target/release-assets/checksum.toml \
+            --repo "$REPOSITORY" \
+            --clobber

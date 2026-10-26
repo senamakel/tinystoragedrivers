@@ -180,25 +180,37 @@ class ReleaseLocks(unittest.TestCase):
 
 
 class ReleaseWorkflowRefs(unittest.TestCase):
-    def test_release_jobs_allow_canonical_main_and_exact_fork_epic(self):
+    def test_release_jobs_allow_canonical_main_and_exact_fork_epics(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        condition = ("(github.repository == 'tinyhumansai/tinystoragedrivers' && "
-                    "github.ref == 'refs/heads/main') || "
-                    "(github.repository == 'senamakel/tinystoragedrivers' && "
-                    "github.ref == 'refs/heads/epic/8131-storage-primitives')")
-        self.assertEqual(workflow.count(condition), 2)
+        legacy_condition = ("(github.repository == 'tinyhumansai/tinystoragedrivers' && "
+                           "github.ref == 'refs/heads/main') || "
+                           "(github.repository == 'senamakel/tinystoragedrivers' && "
+                           "github.ref == 'refs/heads/epic/8131-storage-primitives')")
+        migration_condition = (legacy_condition + " || "
+                               "(github.repository == 'senamakel/tinystoragedrivers' && "
+                               "github.ref == 'refs/heads/epic/8369-security-migration')")
+        self.assertEqual(workflow.count(migration_condition), 2)
 
         def allowed(repository, ref):
             return (repository, ref) in {
                 ("tinyhumansai/tinystoragedrivers", "refs/heads/main"),
                 ("senamakel/tinystoragedrivers", "refs/heads/epic/8131-storage-primitives"),
+                ("senamakel/tinystoragedrivers", "refs/heads/epic/8369-security-migration"),
             }
 
         self.assertTrue(allowed("tinyhumansai/tinystoragedrivers", "refs/heads/main"))
         self.assertTrue(allowed("senamakel/tinystoragedrivers",
                                 "refs/heads/epic/8131-storage-primitives"))
+        self.assertTrue(allowed("senamakel/tinystoragedrivers",
+                                "refs/heads/epic/8369-security-migration"))
         self.assertFalse(allowed("senamakel/tinystoragedrivers", "refs/heads/main"))
         self.assertFalse(allowed("tinyhumansai/tinystoragedrivers", "refs/heads/feature"))
+
+    def test_release_uploads_a_hashed_source_archive_and_checksum(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn(".github/scripts/create-release-assets.py", workflow)
+        self.assertIn('gh release upload "$RELEASE_TAG"', workflow)
+        self.assertIn("target/release-assets/checksum.toml", workflow)
 
 
 if __name__ == "__main__":
