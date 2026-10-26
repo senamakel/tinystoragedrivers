@@ -504,8 +504,6 @@ impl Inner {
                 .map_err(|error| io_error("identify the corruption archive", error))?
                 != corrupt_identity
             {
-                #[cfg(test)]
-                tests::after_quarantine_mismatch();
                 Self::restore_replaced_source(namespace, &archived, name)?;
                 return Err(StorageError::conflict(
                     "quarantined secrets file identity changed",

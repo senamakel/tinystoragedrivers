@@ -1317,34 +1317,6 @@ mod quarantine_source_pause {
     }
 }
 
-mod quarantine_restore_pause {
-    use std::cell::RefCell;
-    type Callback = Box<dyn FnOnce()>;
-    thread_local! {
-        static CALLBACK: RefCell<Option<Callback>> = const { RefCell::new(None) };
-    }
-    pub(super) struct Guard;
-    impl Guard {
-        pub(super) fn install(callback: impl FnOnce() + 'static) -> Self {
-            CALLBACK.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
-            Self
-        }
-    }
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            CALLBACK.with(|slot| {
-                slot.borrow_mut().take();
-            });
-        }
-    }
-    pub(super) fn run() {
-        let callback = CALLBACK.with(|slot| slot.borrow_mut().take());
-        if let Some(callback) = callback {
-            callback();
-        }
-    }
-}
-
 pub(super) fn after_quarantine_absence_check(candidate: &Path) {
     quarantine_pause::after_absence_check(candidate);
 }
@@ -1355,10 +1327,6 @@ pub(super) fn before_quarantine_archive_check(candidate: &Path) {
 
 pub(super) fn after_quarantine_source_check() {
     quarantine_source_pause::run();
-}
-
-pub(super) fn after_quarantine_mismatch() {
-    quarantine_restore_pause::run();
 }
 
 pub(super) fn after_staged_publication_identity() {
