@@ -51,9 +51,11 @@ class ReleaseAssets(unittest.TestCase):
             "sha256": {archive_name: hashlib.sha256(archive_path.read_bytes()).hexdigest()}
         })
         with tarfile.open(archive_path, "r:gz") as archive:
-            self.assertEqual(archive.getnames(), [
+            self.assertEqual([name for name in archive.getnames() if not name.endswith("/")], [
                 "tinystoragedrivers-v2.1.2/README.md",
             ])
+            self.assertEqual(archive.extractfile(
+                "tinystoragedrivers-v2.1.2/README.md").read(), b"release source fixture\n")
 
     def test_archive_generation_requires_a_semver_release_tag(self):
         result = self.generate("feature/branch")
