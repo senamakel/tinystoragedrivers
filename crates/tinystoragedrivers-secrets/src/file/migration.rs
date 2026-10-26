@@ -9,7 +9,7 @@ use super::{
     run_blocking, secure, validate_name, write_atomic_in,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2_11::{Digest, Sha256};
 
 /// The native API boundary actually acknowledged by a file publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -312,7 +312,7 @@ fn ledger_path(inner: &Inner) -> PathBuf {
 }
 
 fn read_ledger(inner: &Inner, namespace: &secure::Namespace) -> Result<SecretMap> {
-    let blob = match read_private(namespace, &ledger_path(inner)) {
+    let (blob, _) = match read_private(namespace, &ledger_path(inner)) {
         Ok(blob) => blob,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(SecretMap::default());
