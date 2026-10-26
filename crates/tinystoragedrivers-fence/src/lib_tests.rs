@@ -73,7 +73,7 @@ thread_local! {
     static CREATE_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn injected_create_error() -> Option<io::Error> {
+pub(super) fn injected_create_error() -> Option<io::Error> {
     CREATE_ERROR.with(|value| {
         value
             .replace(false)
