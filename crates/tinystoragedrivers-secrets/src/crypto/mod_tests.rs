@@ -133,9 +133,18 @@ fn legacy_enc_values_can_be_decrypted_for_migration() {
         .map(|(index, byte)| byte ^ key[index % KEY_LEN])
         .collect();
     let value = format!("enc:{}", hex_encode(&encrypted));
-    assert_eq!(decrypt_legacy_enc(&key, &value).unwrap().as_slice(), b"legacy token");
-    assert_eq!(decrypt_legacy_enc(&key, "enc:0g").unwrap_err().kind(), ErrorKind::Crypto);
-    assert_eq!(decrypt_legacy_enc(&key, "enc2:00").unwrap_err().kind(), ErrorKind::Crypto);
+    assert_eq!(
+        decrypt_legacy_enc(&key, &value).unwrap().as_slice(),
+        b"legacy token"
+    );
+    assert_eq!(
+        decrypt_legacy_enc(&key, "enc:0g").unwrap_err().kind(),
+        ErrorKind::Crypto
+    );
+    assert_eq!(
+        decrypt_legacy_enc(&key, "enc2:00").unwrap_err().kind(),
+        ErrorKind::Crypto
+    );
 }
 
 #[test]

@@ -464,7 +464,10 @@ async fn a_file_that_becomes_readable_again_is_not_quarantined() {
     let recovered = store.inner.read_map_in(&lock.namespace).unwrap();
     drop(lock);
 
-    assert_eq!(recovered.0.get("healthy").map(String::as_str), Some("credential"));
+    assert_eq!(
+        recovered.0.get("healthy").map(String::as_str),
+        Some("credential")
+    );
     assert_eq!(fs::read(path).unwrap(), healthy);
     assert_eq!(
         fs::read_dir(&dir.0)
