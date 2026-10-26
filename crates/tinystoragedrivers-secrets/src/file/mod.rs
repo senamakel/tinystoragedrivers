@@ -46,14 +46,14 @@ use crate::crypto::{self, KEY_LEN, key_from_hex, key_to_hex};
 use crate::store::{SecretStore, require_utf8};
 use crate::task::{io_error, run_blocking};
 
-mod secure;
 mod hex_key_source;
 mod migration;
-pub use secure::Locked;
+mod secure;
 pub use hex_key_source::{HexKeyFileSource, MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile};
 pub use migration::{
     CleanupAcknowledgment, FileImportSource, PublicationBoundary, VerifiedFileImport,
 };
+pub use secure::Locked;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]

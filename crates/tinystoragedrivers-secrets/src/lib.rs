@@ -66,16 +66,15 @@ pub mod testkit;
 
 #[cfg(feature = "document")]
 pub use document::{DEFAULT_COLLECTION, DocumentSecrets};
+#[cfg(all(feature = "file", unix))]
+pub use file::sync_parent_dir;
 #[cfg(feature = "file")]
 pub use file::{
     CleanupAcknowledgment, CorruptFilePolicy, EncryptedFileSecrets, FileImportSource,
-    HexKeyFileSource, KEY_FILE_NAME, MAX_HEX_KEY_FILE_BYTES, Locked, ProtectedHexKeyFile,
-    PublicationBoundary, SECRETS_FILE_NAME, VerifiedFileImport, load_or_create_key_file,
-    lock_file,
+    HexKeyFileSource, KEY_FILE_NAME, Locked, MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile,
+    PublicationBoundary, SECRETS_FILE_NAME, VerifiedFileImport, load_or_create_key_file, lock_file,
     write_atomic as write_atomic_private,
 };
-#[cfg(all(feature = "file", unix))]
-pub use file::sync_parent_dir;
 #[cfg(feature = "keyring")]
 pub use keyring::KeyringSecrets;
 #[cfg(any(feature = "document", feature = "kms-aws", feature = "kms-gcp"))]

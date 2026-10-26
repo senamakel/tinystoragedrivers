@@ -79,7 +79,7 @@ async fn an_exact_import_retry_reconciles_and_another_operation_conflicts() {
             .await
             .unwrap_err()
             .kind(),
-        tinystoragedrivers_core::ErrorKind::Conflict
+        tinystoragedrivers_types::ErrorKind::Conflict
     );
     assert_eq!(
         store
@@ -87,7 +87,7 @@ async fn an_exact_import_retry_reconciles_and_another_operation_conflicts() {
             .await
             .unwrap_err()
             .kind(),
-        tinystoragedrivers_core::ErrorKind::Conflict
+        tinystoragedrivers_types::ErrorKind::Conflict
     );
     assert_eq!(
         store.get("fixture").await.unwrap().unwrap().as_slice(),
@@ -243,7 +243,7 @@ fn native_private_sources_preserve_empty_exact_bound_and_oversized_bytes() {
             } else {
                 assert_eq!(
                     result.unwrap_err().kind(),
-                    tinystoragedrivers_core::ErrorKind::InvalidInput
+                    tinystoragedrivers_types::ErrorKind::InvalidInput
                 );
             }
         }
