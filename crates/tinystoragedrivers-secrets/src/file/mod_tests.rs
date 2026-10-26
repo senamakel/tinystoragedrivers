@@ -469,7 +469,7 @@ async fn a_file_that_becomes_readable_again_is_not_quarantined() {
     assert_eq!(
         fs::read_dir(&dir.0)
             .unwrap()
-            .filter_map(Result::ok)
+            .filter_map(std::result::Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt."))
             .count(),
         0
