@@ -129,7 +129,7 @@ impl LocalLeases {
             .and_then(|modified| modified.elapsed().ok());
         let mut contents = String::new();
         match File::open(&self.lock_path).and_then(|mut file| file.read_to_string(&mut contents)) {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
             Err(error) => return Err(error),
         }
