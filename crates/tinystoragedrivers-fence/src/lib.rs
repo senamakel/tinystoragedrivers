@@ -58,9 +58,12 @@ impl LocalLeases {
         &self,
         read_fallback: bool,
     ) -> io::Result<Option<LocalLeaseGuard>> {
-        if let Some(parent) = self.lock_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let parent = self
+            .lock_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
         let in_process = in_process_lock(&self.lock_path);
         let started = Instant::now();
         let in_process_guard = loop {
