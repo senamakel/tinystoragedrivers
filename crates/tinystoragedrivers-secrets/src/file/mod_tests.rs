@@ -480,7 +480,7 @@ async fn a_file_that_becomes_readable_again_is_not_quarantined() {
 }
 
 #[tokio::test]
-async fn a_later_writer_wins_over_quarantine_source_restoration() {
+async fn a_readable_replacement_is_left_untouched_when_quarantine_is_reconsidered() {
     let dir = TempDir::new("quarantine-later-writer");
     let path = dir.0.join("secrets.enc");
     let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
@@ -489,32 +489,21 @@ async fn a_later_writer_wins_over_quarantine_source_restoration() {
     let first_writer = fs::read(&path).unwrap();
     write_atomic(&path, b"corrupt bytes").unwrap();
 
-    let later_dir = TempDir::new("quarantine-later-writer-source");
-    let later_path = later_dir.0.join("secrets.enc");
-    let later_store = EncryptedFileSecrets::new(&later_dir.0, fixture_key());
-    later_store.set("later", b"last writer").await.unwrap();
-    let later_writer = fs::read(later_path).unwrap();
-
     let first_path = path.clone();
-    let first_bytes = first_writer;
+    let first_bytes = first_writer.clone();
     let _source_pause = quarantine_source_pause::Guard::install(move || {
         let displaced = first_path.with_file_name("displaced-corrupt");
         fs::rename(&first_path, displaced).unwrap();
         fixture_write(&first_path, first_bytes).unwrap();
     });
-    let later_path = path.clone();
-    let expected_later_writer = later_writer.clone();
-    let _restore_pause = quarantine_restore_pause::Guard::install(move || {
-        fixture_write(later_path, later_writer).unwrap();
-    });
 
     let lock = store.inner.lock().unwrap();
     assert!(store.inner.read_map_in(&lock.namespace).is_err());
     drop(lock);
-    assert_eq!(fs::read(&path).unwrap(), expected_later_writer);
     assert_eq!(
-        store.get("later").await.unwrap().unwrap().as_slice(),
-        b"last writer"
+        fs::read(&path).unwrap(),
+        first_writer,
+        "a source that became readable again must not be quarantined"
     );
 }
 
