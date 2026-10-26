@@ -53,7 +53,6 @@ pub use secure::Locked;
 pub use hex_key_source::{HexKeyFileSource, MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile};
 pub use migration::{
     CleanupAcknowledgment, FileImportSource, PublicationBoundary, VerifiedFileImport,
-    prepare_file_import, recover_file_import_source,
 };
 #[cfg(unix)]
 mod unix;

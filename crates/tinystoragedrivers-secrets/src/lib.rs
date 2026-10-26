@@ -71,7 +71,7 @@ pub use file::{
     CleanupAcknowledgment, CorruptFilePolicy, EncryptedFileSecrets, FileImportSource,
     HexKeyFileSource, KEY_FILE_NAME, MAX_HEX_KEY_FILE_BYTES, Locked, ProtectedHexKeyFile,
     PublicationBoundary, SECRETS_FILE_NAME, VerifiedFileImport, load_or_create_key_file,
-    lock_file, prepare_file_import, recover_file_import_source,
+    lock_file,
     write_atomic as write_atomic_private,
 };
 #[cfg(all(feature = "file", unix))]
