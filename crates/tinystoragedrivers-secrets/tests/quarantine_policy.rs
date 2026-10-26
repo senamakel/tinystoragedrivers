@@ -1,13 +1,17 @@
+//! Public integration regressions for fail-closed quarantine behavior.
+
 use std::fs;
 
 use tempfile::tempdir;
-use tinystoragedrivers_secrets::{CorruptFilePolicy, EncryptedFileSecrets, SecretStore, crypto};
+use tinystoragedrivers_secrets::{
+    CorruptFilePolicy, EncryptedFileSecrets, SecretStore, crypto, write_atomic_private,
+};
 
 #[tokio::test]
 async fn public_quarantine_recovers_corrupt_files_in_the_production_build() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("secrets.enc");
-    fs::write(&path, b"corrupt ciphertext").unwrap();
+    write_atomic_private(&path, b"corrupt ciphertext").unwrap();
     let store = EncryptedFileSecrets::new(directory.path(), crypto::generate_key().unwrap())
         .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
 
