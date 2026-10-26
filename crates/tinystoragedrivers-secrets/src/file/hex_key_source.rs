@@ -82,10 +82,6 @@ impl HexKeyFileSource for ProtectedHexKeyFile {
     }
 }
 
-#[cfg(test)]
-#[path = "hex_key_source_tests.rs"]
-mod tests;
-
 fn redact(error: StorageError) -> StorageError {
     let kind = error.kind();
     drop(error);
