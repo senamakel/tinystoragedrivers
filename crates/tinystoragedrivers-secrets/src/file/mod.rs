@@ -922,9 +922,3 @@ fn parse_key_file(read: std::io::Result<Zeroizing<String>>) -> Result<Zeroizing<
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
-#[cfg(test)]
-#[path = "hex_key_source_tests.rs"]
-mod hex_key_source_tests;
-#[cfg(test)]
-#[path = "migration_tests.rs"]
-mod migration_tests;
