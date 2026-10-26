@@ -7,7 +7,7 @@ migrations, tenant policy, or secret-key acquisition.
 
 ## Crates
 
-The workspace contains twelve crates:
+The workspace contains thirteen crates:
 
 | Crate | Responsibility |
 | --- | --- |
@@ -19,6 +19,7 @@ The workspace contains twelve crates:
 | `tinystoragedrivers-queue` | Queue port with memory, document, and RabbitMQ engines |
 | `tinystoragedrivers-secrets` | Secret port with memory, file, document, keyring, and KMS engines |
 | `tinystoragedrivers-connect` | Shared connection handles for primitive engines |
+| `tinystoragedrivers-fence` | Local process-owned lockfile leases for host coordination |
 | `tinystoragedrivers` | Optional application composition facade |
 | `tinystoragedrivers-testkit` | In-memory bundles, conformance suites, and test decorators |
 | `tinystoragedrivers-bus` | Versioned storage module wire contract |
