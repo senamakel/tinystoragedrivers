@@ -163,6 +163,23 @@ impl EncryptedFileSecrets {
         Ok(Self::new(dir, key))
     }
 
+    /// Open the store using an existing `dir/.secret_key` without creating
+    /// the key or any key-creation lock file.
+    ///
+    /// This is intended for read-only inspection paths that must not turn a
+    /// missing key into a new identity. Store operations still use the normal
+    /// encrypted-file locking and write behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if the directory or key file is missing or cannot
+    /// be read, and a crypto error if the key is not valid hex.
+    pub fn with_key_file_read_only(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let key = parse_key_file(read_key_file(&dir.join(KEY_FILE_NAME)))?;
+        Ok(Self::new(dir, key))
+    }
+
     /// The secrets file this store reads and writes.
     #[must_use]
     pub fn path(&self) -> &Path {

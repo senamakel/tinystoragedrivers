@@ -724,7 +724,7 @@ async fn owned_key_file_constructor_reuses_the_master_and_refuses_its_loss() {
 fn read_only_key_file_constructor_never_creates_key_or_lock_files() {
     let dir = TempDir::new("readonly-keyfile");
     let error = EncryptedFileSecrets::with_key_file_read_only(&dir.0).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Io);
+    assert_eq!(error.kind(), ErrorKind::Backend);
     assert!(!dir.0.join(KEY_FILE_NAME).exists());
     assert!(!dir.0.join(format!("{KEY_FILE_NAME}.lock")).exists());
 
