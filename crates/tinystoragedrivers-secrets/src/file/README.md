@@ -31,19 +31,32 @@ interval. New staging, key, data and lock files are private before bytes.
 
 `EncryptedFileSecrets` fails closed on decryption and serialization errors by
 default. A host that wants desktop recovery can opt into
-`CorruptFilePolicy::QuarantineAndContinue`: the driver moves the corrupt file
-to a unique `.corrupt.*` sibling under the same held lock and syncs the
-directory on Unix before continuing with an empty store. Windows uses a
+`CorruptFilePolicy::QuarantineAndContinue`: before quarantine the driver
+rechecks the opened identity and probes the current bytes again under the same
+held lock. If the original object has become readable, it returns those
+secrets and leaves the file in place. Otherwise it moves the corrupt file to a
+unique `.corrupt.*` sibling and syncs the directory on Unix before continuing
+with an empty store. A failed move is an error. Windows uses a
 no-replace `MoveFileExW` write-through move. It never removes archived bytes.
 An incorrect key is indistinguishable from damaged ciphertext and is also
 quarantined under this opt-in policy. Permission, namespace and other I/O
 failures remain errors.
 
+`with_key_file_read_only` reads an existing `.secret_key` without creating the
+key or its key-creation lock. `ProtectedHexKeyFile` provides bounded,
+read-only admission for a host-selected legacy key file. `FileImportSource`
+and `prepare_file_import` bind a verified source to a destination publication
+and retain an encrypted recovery backup; the host still owns source selection,
+user consent, and conversion policy. `cleanup_file_import` only removes the
+exact source represented by a live verified receipt and reports the native
+publication boundary.
+
 Hosts that need to atomically write plaintext secrets can use the public
 `write_atomic_private` helper. Its staging file is owner-only before bytes are
 written. Publication flushes staged content, publishes, then verifies the
 actual published identity and content. Unix also syncs the admitted directory.
-Windows uses `std::fs::rename`, including its POSIX replacement fallback. The
+Windows uses `std::fs::rename`, including its POSIX replacement fallback, with
+bounded retries for transient antivirus sharing violations. The
 write-through, no-replace move is used only for corruption quarantine.
 Namespace verification surrounds replacement. Published FileID verification,
 explicit file flush and exact byte readback precede acknowledgment. Unsupported

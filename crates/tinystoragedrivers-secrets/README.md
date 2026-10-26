@@ -5,8 +5,10 @@ The contract is specified in
 
 Secret storage primitives: the API `SecretStore` port and engines for memory,
 encrypted files, documents, OS keyrings, and cloud KMS. Engines depend on the
-new API and types crates; host migration and key-source policy stay with the
-host.
+new API and types crates. The host chooses which secrets exist, how names are
+scoped per user, and when a legacy value is migrated. The file feature also
+provides protected source admission and verified import primitives so hosts do
+not duplicate native filesystem identity and publication checks.
 
 | Driver | Where the bytes live | Use |
 | --- | --- | --- |
