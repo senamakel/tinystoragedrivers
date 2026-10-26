@@ -501,7 +501,10 @@ impl Inner {
             #[cfg(not(test))]
             let move_result = namespace.move_noreplace(name, &archived);
             match move_result {
-                Ok(()) => {}
+                Ok(()) => {
+                    #[cfg(test)]
+                    tests::after_quarantine_move(name, &archived);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(io_error("quarantine the corrupt secrets file", error)),
             }

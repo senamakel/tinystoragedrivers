@@ -373,6 +373,78 @@ fn a_quarantine_name_collision_preserves_both_files() {
     assert_eq!(archives, [b"corrupt bytes".to_vec(), sentinel.to_vec()]);
 }
 
+#[tokio::test]
+async fn quarantine_rechecks_archive_identity_and_keeps_a_later_source() {
+    let dir = TempDir::new("quarantine-archive-identity");
+    let path = dir.0.join(SECRETS_FILE_NAME);
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+    store.set("healthy", b"credential").await.unwrap();
+    let healthy = fs::read(&path).unwrap();
+    fs::write(&path, b"corrupt bytes").unwrap();
+
+    let directory = dir.0.clone();
+    let healthy_replacement = healthy.clone();
+    let _pause = quarantine_after_move_pause::Guard::install(move |source_name, archive_name| {
+        let archive = directory.join(archive_name);
+        fs::rename(&archive, directory.join("displaced-corrupt")).unwrap();
+        fixture_write(directory.join(source_name), healthy_replacement).unwrap();
+        fixture_write(archive, b"archive identity changed").unwrap();
+    });
+
+    let lock = store.inner.lock().unwrap();
+    assert!(store.inner.read_map_in(&lock.namespace).is_err());
+    drop(lock);
+    assert_eq!(fs::read(path).unwrap(), healthy);
+    assert_eq!(
+        fs::read(dir.0.join("displaced-corrupt")).unwrap(),
+        b"corrupt bytes"
+    );
+}
+
+#[test]
+fn quarantine_restores_the_archive_when_the_source_name_stays_absent() {
+    let dir = TempDir::new("quarantine-restore-archive");
+    let path = dir.0.join(SECRETS_FILE_NAME);
+    fixture_write(&path, b"corrupt bytes").unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+
+    let directory = dir.0.clone();
+    let _pause = quarantine_after_move_pause::Guard::install(move |_, archive_name| {
+        let archive = directory.join(archive_name);
+        fs::rename(&archive, directory.join("displaced-corrupt")).unwrap();
+        fixture_write(archive, b"changed archive").unwrap();
+    });
+
+    let lock = store.inner.lock().unwrap();
+    assert!(store.inner.read_map_in(&lock.namespace).is_err());
+    drop(lock);
+    assert_eq!(fs::read(path).unwrap(), b"changed archive");
+    assert_eq!(
+        fs::read(dir.0.join("displaced-corrupt")).unwrap(),
+        b"corrupt bytes"
+    );
+}
+
+#[test]
+fn unsafe_quarantine_archive_candidate_fails_without_moving_source() {
+    let dir = TempDir::new("quarantine-archive-error");
+    let path = dir.0.join(SECRETS_FILE_NAME);
+    fixture_write(&path, b"corrupt bytes").unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+    let directory = dir.0.clone();
+    let _pause = quarantine_fill_pause::Guard::install(move |candidate| {
+        fs::create_dir(directory.join(candidate)).unwrap();
+    });
+
+    let lock = store.inner.lock().unwrap();
+    assert!(store.inner.read_map_in(&lock.namespace).is_err());
+    drop(lock);
+    assert_eq!(fs::read(path).unwrap(), b"corrupt bytes");
+}
+
 #[test]
 fn a_full_quarantine_namespace_fails_without_moving_the_corrupt_source() {
     let dir = TempDir::new("quarantine-exhaustion");
@@ -1362,6 +1434,41 @@ mod quarantine_move_failure {
     }
 }
 
+mod quarantine_after_move_pause {
+    use super::Path;
+    use std::cell::RefCell;
+
+    type Callback = Box<dyn FnOnce(&Path, &Path)>;
+
+    thread_local! {
+        static CALLBACK: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Guard;
+
+    impl Guard {
+        pub(super) fn install(callback: impl FnOnce(&Path, &Path) + 'static) -> Self {
+            CALLBACK.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CALLBACK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    pub(super) fn run(source: &Path, archive: &Path) {
+        let callback = CALLBACK.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback(source, archive);
+        }
+    }
+}
+
 pub(super) fn after_quarantine_absence_check(candidate: &Path) {
     quarantine_pause::after_absence_check(candidate);
 }
@@ -1376,6 +1483,10 @@ pub(super) fn after_quarantine_source_check() {
 
 pub(super) fn fail_quarantine_move() -> bool {
     quarantine_move_failure::take()
+}
+
+pub(super) fn after_quarantine_move(source: &Path, archive: &Path) {
+    quarantine_after_move_pause::run(source, archive);
 }
 
 pub(super) fn after_staged_publication_identity() {
