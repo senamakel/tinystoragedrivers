@@ -1,5 +1,7 @@
 //! Public integration regressions for fail-closed quarantine behavior.
 
+#![cfg(feature = "file")]
+
 use std::fs;
 
 use tempfile::tempdir;
