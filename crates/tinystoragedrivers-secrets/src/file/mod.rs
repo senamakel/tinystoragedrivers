@@ -402,8 +402,9 @@ impl Inner {
         let json = match crypto::decrypt(&self.key, &blob) {
             Ok(json) => json,
             Err(_error) if self.corrupt_file_policy == CorruptFilePolicy::QuarantineAndContinue => {
-                self.quarantine_corrupt_in(namespace, source_identity)?;
-                return Ok(SecretMap::default());
+                return Ok(self
+                    .quarantine_corrupt_in(namespace, source_identity)?
+                    .unwrap_or_default());
             }
             Err(error) => return Err(error),
         };
@@ -412,8 +413,9 @@ impl Inner {
         match serde_json::from_slice(&json) {
             Ok(map) => Ok(SecretMap(map)),
             Err(_) if self.corrupt_file_policy == CorruptFilePolicy::QuarantineAndContinue => {
-                self.quarantine_corrupt_in(namespace, source_identity)?;
-                Ok(SecretMap::default())
+                Ok(self
+                    .quarantine_corrupt_in(namespace, source_identity)?
+                    .unwrap_or_default())
             }
             Err(_) => Err(StorageError::serialization(
                 "decrypted secrets file is not a json object of strings",
@@ -425,7 +427,7 @@ impl Inner {
         &self,
         namespace: &secure::Namespace,
         corrupt_identity: secure::Identity,
-    ) -> Result<()> {
+    ) -> Result<Option<SecretMap>> {
         static QUARANTINE_COUNTER: AtomicU64 = AtomicU64::new(0);
         let name =
             secure::file_name(&self.path).map_err(|e| io_error("admit the secret name", e))?;
@@ -460,6 +462,22 @@ impl Inner {
             }
             #[cfg(test)]
             tests::after_quarantine_source_check();
+            let mut current = namespace
+                .open_file(name, false)
+                .map_err(|error| io_error("probe the corrupt secrets file", error))?;
+            let mut current_bytes = Vec::new();
+            current
+                .read_to_end(&mut current_bytes)
+                .map_err(|error| io_error("probe the corrupt secrets file", error))?;
+            namespace
+                .verify()
+                .map_err(|error| io_error("revalidate the corruption probe", error))?;
+            if let Ok(json) = crypto::decrypt(&self.key, &current_bytes)
+                && let Ok(map) = serde_json::from_slice(&json)
+            {
+                return Ok(Some(SecretMap(map)));
+            }
+            drop(current);
             match namespace.move_noreplace(name, &archived) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -483,7 +501,7 @@ impl Inner {
             namespace
                 .sync()
                 .map_err(|error| io_error("persist the secrets quarantine", error))?;
-            return Ok(());
+            return Ok(None);
         }
         Err(StorageError::backend(
             "could not find an unused secrets quarantine name",

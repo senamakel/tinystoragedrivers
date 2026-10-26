@@ -444,6 +444,38 @@ async fn a_replaced_healthy_file_remains_available_after_quarantine_race() {
     assert_eq!(fs::read(&path).unwrap(), healthy);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_file_that_becomes_readable_again_is_not_quarantined() {
+    let dir = TempDir::new("quarantine-readable-again");
+    let path = dir.0.join(SECRETS_FILE_NAME);
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+    store.set("healthy", b"credential").await.unwrap();
+    let healthy = fs::read(&path).unwrap();
+    fs::write(&path, b"corrupt bytes").unwrap();
+
+    let replacement_path = path.clone();
+    let healthy_replacement = healthy.clone();
+    let _pause = quarantine_source_pause::Guard::install(move || {
+        fs::write(replacement_path, healthy_replacement).unwrap();
+    });
+    let lock = store.inner.lock().unwrap();
+    let recovered = store.inner.read_map_in(&lock.namespace).unwrap();
+    drop(lock);
+
+    assert_eq!(recovered.0.get("healthy").map(String::as_str), Some("credential"));
+    assert_eq!(fs::read(path).unwrap(), healthy);
+    assert_eq!(
+        fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt."))
+            .count(),
+        0
+    );
+}
+
 #[tokio::test]
 async fn a_later_writer_wins_over_quarantine_source_restoration() {
     let dir = TempDir::new("quarantine-later-writer");
