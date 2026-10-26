@@ -83,6 +83,19 @@ fn in_process_contention_returns_the_lock_timeout() {
 }
 
 #[test]
+fn in_process_contention_waits_before_the_timeout_expires() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("profiles.lock");
+    let leases = LocalLeases::new(&path);
+    let held = leases.acquire().unwrap();
+    let error = leases
+        .acquire_with_options(false, Duration::from_millis(2), Duration::from_millis(1))
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    drop(held);
+}
+
+#[test]
 fn a_fresh_lock_with_an_unparseable_dead_pid_is_not_stolen() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("profiles.lock");
