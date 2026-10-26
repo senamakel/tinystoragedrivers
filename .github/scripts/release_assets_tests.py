@@ -51,7 +51,8 @@ class ReleaseAssets(unittest.TestCase):
             "sha256": {archive_name: hashlib.sha256(archive_path.read_bytes()).hexdigest()}
         })
         with tarfile.open(archive_path, "r:gz") as archive:
-            self.assertEqual([name for name in archive.getnames() if not name.endswith("/")], [
+            files = [member for member in archive.getmembers() if member.isfile()]
+            self.assertEqual([member.name for member in files], [
                 "tinystoragedrivers-v2.1.2/README.md",
             ])
             self.assertEqual(archive.extractfile(
