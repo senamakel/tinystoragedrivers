@@ -159,16 +159,17 @@ impl Namespace {
 
 fn retry_av_transient<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     const RETRIES: u32 = 5;
-    for attempt in 0..RETRIES {
+    let mut attempt = 0;
+    loop {
         match operation() {
             Ok(value) => return Ok(value),
-            Err(error) if transient_av_error(&error) && attempt + 1 < RETRIES => {
+            Err(error) if transient_av_error(&error) && attempt < RETRIES - 1 => {
                 thread::sleep(Duration::from_millis(20 * (1 << attempt)));
+                attempt += 1;
             }
             Err(error) => return Err(error),
         }
     }
-    Err(io::Error::other("Windows retry operation did not execute"))
 }
 
 fn transient_av_error(error: &io::Error) -> bool {
