@@ -4,7 +4,7 @@ use super::{
     File, Path, PathBuf, Read, Result, StorageError, Zeroizing, crypto, fmt, open_parent, secure,
 };
 use async_trait::async_trait;
-use tinystoragedrivers_core::ErrorKind;
+use tinystoragedrivers_types::ErrorKind;
 
 /// Maximum original encoded bytes, including surrounding UTF-8 whitespace.
 pub const MAX_HEX_KEY_FILE_BYTES: usize = 4096;

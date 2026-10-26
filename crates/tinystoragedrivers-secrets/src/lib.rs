@@ -68,8 +68,11 @@ pub mod testkit;
 pub use document::{DEFAULT_COLLECTION, DocumentSecrets};
 #[cfg(feature = "file")]
 pub use file::{
-    CorruptFilePolicy, EncryptedFileSecrets, KEY_FILE_NAME, Locked, SECRETS_FILE_NAME,
-    load_or_create_key_file, lock_file, write_atomic as write_atomic_private,
+    CleanupAcknowledgment, CorruptFilePolicy, EncryptedFileSecrets, FileImportSource,
+    HexKeyFileSource, KEY_FILE_NAME, MAX_HEX_KEY_FILE_BYTES, Locked, ProtectedHexKeyFile,
+    PublicationBoundary, SECRETS_FILE_NAME, VerifiedFileImport, load_or_create_key_file,
+    lock_file, prepare_file_import, recover_file_import_source,
+    write_atomic as write_atomic_private,
 };
 #[cfg(all(feature = "file", unix))]
 pub use file::sync_parent_dir;

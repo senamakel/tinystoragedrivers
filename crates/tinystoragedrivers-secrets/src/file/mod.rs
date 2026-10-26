@@ -47,7 +47,14 @@ use crate::store::{SecretStore, require_utf8};
 use crate::task::{io_error, run_blocking};
 
 mod secure;
+mod hex_key_source;
+mod migration;
 pub use secure::Locked;
+pub use hex_key_source::{HexKeyFileSource, MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile};
+pub use migration::{
+    CleanupAcknowledgment, FileImportSource, PublicationBoundary, VerifiedFileImport,
+    prepare_file_import, recover_file_import_source,
+};
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -916,3 +923,9 @@ fn parse_key_file(read: std::io::Result<Zeroizing<String>>) -> Result<Zeroizing<
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "hex_key_source_tests.rs"]
+mod hex_key_source_tests;
+#[cfg(test)]
+#[path = "migration_tests.rs"]
+mod migration_tests;
