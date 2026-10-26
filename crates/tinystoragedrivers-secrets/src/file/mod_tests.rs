@@ -720,6 +720,21 @@ async fn owned_key_file_constructor_reuses_the_master_and_refuses_its_loss() {
     assert!(!dir.0.join(KEY_FILE_NAME).exists());
 }
 
+#[test]
+fn read_only_key_file_constructor_never_creates_key_or_lock_files() {
+    let dir = TempDir::new("readonly-keyfile");
+    let error = EncryptedFileSecrets::with_key_file_read_only(&dir.0).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io);
+    assert!(!dir.0.join(KEY_FILE_NAME).exists());
+    assert!(!dir.0.join(format!("{KEY_FILE_NAME}.lock")).exists());
+
+    let _writer = EncryptedFileSecrets::with_key_file(&dir.0).unwrap();
+    let read_only = EncryptedFileSecrets::with_key_file_read_only(&dir.0).unwrap();
+    assert!(dir.0.join(KEY_FILE_NAME).is_file());
+    assert!(!dir.0.join(format!("{KEY_FILE_NAME}.lock")).exists());
+    drop(read_only);
+}
+
 #[tokio::test]
 async fn key_file_constructor_preserves_secrets_for_owned_and_borrowed_paths() {
     // Every accepted path form must create and reopen the same protected store.
