@@ -1335,6 +1335,33 @@ mod quarantine_source_pause {
     }
 }
 
+mod quarantine_move_failure {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAIL_NEXT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) struct Guard;
+
+    impl Guard {
+        pub(super) fn install() -> Self {
+            FAIL_NEXT.with(|flag| flag.set(true));
+            Self
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            FAIL_NEXT.with(|flag| flag.set(false));
+        }
+    }
+
+    pub(super) fn take() -> bool {
+        FAIL_NEXT.with(|flag| flag.replace(false))
+    }
+}
+
 pub(super) fn after_quarantine_absence_check(candidate: &Path) {
     quarantine_pause::after_absence_check(candidate);
 }
