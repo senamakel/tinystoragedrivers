@@ -4,8 +4,5 @@ Source symbols below include public definitions, associated methods, public fiel
 
 | Source | Public item(s) | v2 destination |
 | --- | --- | --- |
-| `src/backend.rs` | `for_scope_fenced (L16)` | Deleted; lease/fencing policy belongs to the consumer that owns the lease. |
-| `src/document.rs` | `DocumentLeases (L24)`, `new (L54)`, `with_endpoint (L86)` | Deleted; lease/fencing policy belongs to the consumer that owns the lease. |
-| `src/lease.rs` | `LeaseRecord (L7)`, `LeaseError (L11)`, `LeaseGrant (L25)` and its fields, `LeaseStore (L42)` methods `acquire`, `renew`, `release`, `inspect`, `holder`, `driver_fence`, `is_live (L73)`, `retry_after_ms (L82)` | Deleted with reverted fence crate (#24); lease state and fencing policy are owned by the concrete lease consumer (tinyagents session reservation and OpenHuman host), not a generic TSD crate. |
-| `src/lib.rs` | `use backend::for_scope_fenced (L11)`, `use document::DocumentLeases (L12)`, `use lease::{LeaseError, LeaseGrant, LeaseRecord, LeaseStore, is_live, retry_after_ms} (L13)`, `use local::LocalLeases (L19)` | Deleted; lease/fencing policy belongs to the consumer that owns the lease. |
-| `src/local.rs` | `LocalLeases (L38)`, `new (L52)`, `with_endpoint (L71)` | Deleted; lease/fencing policy belongs to the consumer that owns the lease. |
+| `src/lib.rs` | `LocalLeases`, `LocalLeaseGuard`, `is_pid_alive` | Concrete local lockfile helper only; no generic lease port or distributed fencing API is exported. |
+| `src/lib.rs` | `LocalLeases::new`, `acquire`, `acquire_for_read` | `tinystoragedrivers-fence`: lock acquisition, stale/dead PID and same-process leak recovery, retrying release, and a lock-free read result only when lock creation fails on a full/read-only filesystem. |
