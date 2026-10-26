@@ -210,7 +210,7 @@ class ReleaseWorkflowRefs(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn(".github/scripts/create-release-assets.py", workflow)
         self.assertIn('gh release upload "$RELEASE_TAG"', workflow)
-        self.assertIn('"$RELEASE_ASSETS/checksum.toml"', workflow)
+        self.assertIn("target/release-assets/checksum.toml", workflow)
 
 
 if __name__ == "__main__":
