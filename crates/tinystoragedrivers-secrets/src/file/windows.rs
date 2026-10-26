@@ -168,12 +168,16 @@ fn retry_av_transient<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Re
             Err(error) => return Err(error),
         }
     }
-    unreachable!("retry loop returns on its final attempt")
+    Err(io::Error::other("Windows retry operation did not execute"))
 }
 
 fn transient_av_error(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(5 | 32 | 33))
 }
+
+#[cfg(test)]
+#[path = "windows_tests.rs"]
+mod tests;
 
 fn directory_options() -> OpenOptions {
     let mut options = OpenOptions::new();
