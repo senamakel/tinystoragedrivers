@@ -471,6 +471,14 @@ impl Inner {
             let mut current = namespace
                 .open_file(name, false)
                 .map_err(|error| io_error("probe the corrupt secrets file", error))?;
+            if secure::identity(&current)
+                .map_err(|error| io_error("identify the corruption probe", error))?
+                != corrupt_identity
+            {
+                return Err(StorageError::conflict(
+                    "secrets file changed before corruption probe",
+                ));
+            }
             let mut current_bytes = Vec::new();
             current
                 .read_to_end(&mut current_bytes)
