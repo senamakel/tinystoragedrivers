@@ -23,7 +23,7 @@ class ReleaseAssets(unittest.TestCase):
         (self.root / "README.md").write_text("release source fixture\n")
         self.run_command("git", "add", "README.md")
         self.run_command("git", "commit", "--quiet", "-m", "release fixture")
-        self.run_command("git", "tag", "v2.1.2")
+        self.run_command("git", "-c", "tag.gpgSign=false", "tag", "v2.1.2")
 
     def run_command(self, *command, check=True):
         result = subprocess.run(command, cwd=self.root, text=True,
