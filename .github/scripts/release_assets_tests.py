@@ -50,6 +50,7 @@ class ReleaseAssets(unittest.TestCase):
         self.assertEqual(manifest, {
             "sha256": {archive_name: hashlib.sha256(archive_path.read_bytes()).hexdigest()}
         })
+        archive_bytes = archive_path.read_bytes()
         with tarfile.open(archive_path, "r:gz") as archive:
             files = [member for member in archive.getmembers() if member.isfile()]
             self.assertEqual([member.name for member in files], [
@@ -57,6 +58,8 @@ class ReleaseAssets(unittest.TestCase):
             ])
             self.assertEqual(archive.extractfile(
                 "tinystoragedrivers-v2.1.2/README.md").read(), b"release source fixture\n")
+        self.assertEqual(self.generate().returncode, 0)
+        self.assertEqual(archive_path.read_bytes(), archive_bytes)
 
     def test_archive_generation_requires_a_semver_release_tag(self):
         result = self.generate("feature/branch")
