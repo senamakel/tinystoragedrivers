@@ -34,7 +34,7 @@ mongodb = { version = "3.6", default-features = false, features = ["compat-3-0-0
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tempfile = { workspace = true }
-tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.1" }
+tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.2" }
 
 [lints]
 workspace = true

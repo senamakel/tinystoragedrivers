@@ -3734,7 +3734,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -3752,7 +3752,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-api"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3765,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-blob"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3787,7 +3787,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-bus"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3798,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-busproxy"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3817,7 +3817,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-connect"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "lapin",
  "mongodb",
@@ -3833,7 +3833,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-document"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -3856,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-fence"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "sysinfo",
  "tempfile",
@@ -3864,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-kv"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3883,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-queue"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -3903,7 +3903,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "async-trait",
  "atomicwrites",
@@ -3937,7 +3937,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-testkit"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3959,7 +3959,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-types"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "serde",
  "serde_json",

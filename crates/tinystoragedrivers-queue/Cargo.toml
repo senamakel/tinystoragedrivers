@@ -21,14 +21,14 @@ sha2 = { workspace = true }
 data-encoding = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 lapin = { workspace = true, optional = true }
-tinystoragedrivers-connect = { path = "../tinystoragedrivers-connect", version = "2.1.1", optional = true, features = ["amqp"] }
+tinystoragedrivers-connect = { path = "../tinystoragedrivers-connect", version = "2.1.2", optional = true, features = ["amqp"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
-tinystoragedrivers-document = { path = "../tinystoragedrivers-document", version = "2.1.1", default-features = false, features = ["memory", "sqlite"] }
-tinystoragedrivers-connect = { path = "../tinystoragedrivers-connect", version = "2.1.1", features = ["sqlite"] }
+tinystoragedrivers-document = { path = "../tinystoragedrivers-document", version = "2.1.2", default-features = false, features = ["memory", "sqlite"] }
+tinystoragedrivers-connect = { path = "../tinystoragedrivers-connect", version = "2.1.2", features = ["sqlite"] }
 tempfile = { workspace = true }
-tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.1" }
+tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.2" }
 
 [features]
 default = ["memory"]

@@ -33,7 +33,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"], 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tempfile = { workspace = true }
-tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.1" }
+tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.2" }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true, optional = true }
