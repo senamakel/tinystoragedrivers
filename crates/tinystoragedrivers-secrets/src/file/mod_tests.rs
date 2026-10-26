@@ -729,9 +729,13 @@ fn read_only_key_file_constructor_never_creates_key_or_lock_files() {
     assert!(!dir.0.join(format!("{KEY_FILE_NAME}.lock")).exists());
 
     let _writer = EncryptedFileSecrets::with_key_file(&dir.0).unwrap();
+    let lock_existed_before = dir.0.join(format!("{KEY_FILE_NAME}.lock")).exists();
     let read_only = EncryptedFileSecrets::with_key_file_read_only(&dir.0).unwrap();
     assert!(dir.0.join(KEY_FILE_NAME).is_file());
-    assert!(!dir.0.join(format!("{KEY_FILE_NAME}.lock")).exists());
+    assert_eq!(
+        dir.0.join(format!("{KEY_FILE_NAME}.lock")).exists(),
+        lock_existed_before
+    );
     drop(read_only);
 }
 
