@@ -125,6 +125,29 @@ fn malformed_values_are_crypto_errors_without_echoing_input() {
 }
 
 #[test]
+fn legacy_enc_values_can_be_decrypted_for_migration() {
+    let key = [0x2a; KEY_LEN];
+    let encrypted: Vec<u8> = b"legacy token"
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ key[index % KEY_LEN])
+        .collect();
+    let value = format!("enc:{}", hex_encode(&encrypted));
+    assert_eq!(
+        decrypt_legacy_enc(&key, &value).unwrap().as_slice(),
+        b"legacy token"
+    );
+    assert_eq!(
+        decrypt_legacy_enc(&key, "enc:0g").unwrap_err().kind(),
+        ErrorKind::Crypto
+    );
+    assert_eq!(
+        decrypt_legacy_enc(&key, "enc2:00").unwrap_err().kind(),
+        ErrorKind::Crypto
+    );
+}
+
+#[test]
 fn keys_round_trip_through_hex_and_reject_bad_lengths() {
     let key = generate_key().unwrap();
     let hex = key_to_hex(&key);

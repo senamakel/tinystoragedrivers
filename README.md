@@ -41,8 +41,10 @@ always available; production features are opt-in and the default feature set
 is empty.
 
 The facade does not define consumer schemas, migrations, tenant naming,
-retention, lease/fencing policy, or secret-key ownership. Those remain with the
-host or module that owns the records and lifecycle. Durable backends expose an
+retention policy, distributed fencing, or secret-key ownership. Those remain
+with the host or module that owns the records and lifecycle. The separate
+`tinystoragedrivers-fence` crate supplies only a local PID lockfile lease for
+host coordination. Durable backends expose an
 unsupported secret port until the host supplies an explicit secret store and
 key provider. Shared durable connections come from
 `tinystoragedrivers-connect`.

@@ -8,6 +8,8 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf, Prefix};
+use std::thread;
+use std::time::Duration;
 
 use super::secure::{Identity, denied};
 use windows_permissions::{
@@ -129,7 +131,7 @@ impl Namespace {
         // Rust's Windows rename fallback uses FileRenameInfoEx with
         // POSIX_SEMANTICS, preserving admitted old handles while replacing.
         // Keep this separate from the write-through quarantine move below.
-        std::fs::rename(self.path.join(source), self.path.join(target))?;
+        retry_av_transient(|| std::fs::rename(self.path.join(source), self.path.join(target)))?;
         self.verify()
     }
 
@@ -151,9 +153,32 @@ impl Namespace {
     pub(super) fn remove(&self, name: &Path) -> io::Result<()> {
         self.verify()?;
         valid_leaf(name)?;
-        std::fs::remove_file(self.path.join(name))
+        retry_av_transient(|| std::fs::remove_file(self.path.join(name)))
     }
 }
+
+fn retry_av_transient<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    const RETRIES: u32 = 5;
+    let mut attempt = 0;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if transient_av_error(&error) && attempt < RETRIES - 1 => {
+                thread::sleep(Duration::from_millis(20 * (1 << attempt)));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn transient_av_error(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(test)]
+#[path = "windows_tests.rs"]
+mod tests;
 
 fn directory_options() -> OpenOptions {
     let mut options = OpenOptions::new();

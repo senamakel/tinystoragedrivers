@@ -158,6 +158,10 @@ pub(super) fn identity(file: &File) -> io::Result<Identity> {
     Ok(Identity(metadata.dev(), metadata.ino()))
 }
 
+pub(super) fn is_unlinked(file: &File) -> io::Result<bool> {
+    Ok(file.metadata()?.nlink() == 0)
+}
+
 pub(super) fn verify_file(file: &File) -> io::Result<()> {
     let metadata = file.metadata()?;
     if !metadata.is_file()

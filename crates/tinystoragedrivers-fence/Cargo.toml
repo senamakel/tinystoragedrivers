@@ -1,0 +1,18 @@
+[package]
+name = "tinystoragedrivers-fence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local process-owned file leases for host coordination."
+publish = false
+
+[dependencies]
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

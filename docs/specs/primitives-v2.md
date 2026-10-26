@@ -4,7 +4,8 @@ Status: proposed contract for the v2.0.0-alpha.1 implementation.
 
 This spec splits the current storage surface into static, consumer-owned
 primitives. It does not prescribe a model registry, migration framework,
-repository helper, lease policy, or host configuration format. The exhaustive
+repository helper, distributed lease policy, or host configuration format.
+The local file lease helper is documented separately below. The exhaustive
 source-to-destination audit is in [the public item inventory](primitives-v2-inventory/README.md).
 
 ## Crate map
@@ -18,6 +19,7 @@ source-to-destination audit is in [the public item inventory](primitives-v2-inve
 | `tinystoragedrivers-blob` | Opaque `BlobStore`, streaming and tree operations | `memory` (default), `fs`, `sqlite`, `mongodb`, `s3` |
 | `tinystoragedrivers-queue` | At-least-once `QueueStore`; document-backed queue engine and broker engine | `memory` (default), `document`, `rabbitmq` |
 | `tinystoragedrivers-secrets` | Secret engine adapters implementing the API crate's `SecretStore` | `memory` (default), `file`, `document`, `keyring`, `kms-aws`, `kms-gcp` |
+| `tinystoragedrivers-fence` | Process-local PID lockfile leases with stale-owner recovery; no distributed fencing | None |
 | `tinystoragedrivers-connect` | Private shared engine connection handles. One configured storage URL yields one `storage.db` connection shared by document, stream, blob and KV adapters | `publish = false`; `sqlite`, `mongodb`, `s3`, and `amqp` connection features |
 | `tinystoragedrivers` | Composition-root facade: parse URLs and assemble explicitly selected engines | Forwards `sqlite`, `mongodb`, `file`, `s3`, `rabbitmq`, `secrets`, `keyring`, `kms-aws`, and `kms-gcp` |
 | `tinystoragedrivers-testkit` | Per-port conformance harness, in-memory stores, and fault-injecting decorators | Development dependency only; memory engines enabled |

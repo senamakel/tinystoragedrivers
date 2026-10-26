@@ -46,7 +46,13 @@ use crate::crypto::{self, KEY_LEN, key_from_hex, key_to_hex};
 use crate::store::{SecretStore, require_utf8};
 use crate::task::{io_error, run_blocking};
 
+mod hex_key_source;
+mod migration;
 mod secure;
+pub use hex_key_source::{HexKeyFileSource, MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile};
+pub use migration::{
+    CleanupAcknowledgment, FileImportSource, PublicationBoundary, VerifiedFileImport,
+};
 pub use secure::Locked;
 #[cfg(unix)]
 mod unix;
@@ -160,6 +166,23 @@ impl EncryptedFileSecrets {
         key_lock
             .verify()
             .map_err(|e| io_error("verify the constructor key lock", e))?;
+        Ok(Self::new(dir, key))
+    }
+
+    /// Open the store using an existing `dir/.secret_key` without creating
+    /// the key or any key-creation lock file.
+    ///
+    /// This is intended for read-only inspection paths that must not turn a
+    /// missing key into a new identity. Store operations still use the normal
+    /// encrypted-file locking and write behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if the directory or key file is missing or cannot
+    /// be read, and a crypto error if the key is not valid hex.
+    pub fn with_key_file_read_only(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let key = parse_key_file(read_key_file(&dir.join(KEY_FILE_NAME)))?;
         Ok(Self::new(dir, key))
     }
 
@@ -385,8 +408,9 @@ impl Inner {
         let json = match crypto::decrypt(&self.key, &blob) {
             Ok(json) => json,
             Err(_error) if self.corrupt_file_policy == CorruptFilePolicy::QuarantineAndContinue => {
-                self.quarantine_corrupt_in(namespace, source_identity)?;
-                return Ok(SecretMap::default());
+                return Ok(self
+                    .quarantine_corrupt_in(namespace, source_identity)?
+                    .unwrap_or_default());
             }
             Err(error) => return Err(error),
         };
@@ -395,8 +419,9 @@ impl Inner {
         match serde_json::from_slice(&json) {
             Ok(map) => Ok(SecretMap(map)),
             Err(_) if self.corrupt_file_policy == CorruptFilePolicy::QuarantineAndContinue => {
-                self.quarantine_corrupt_in(namespace, source_identity)?;
-                Ok(SecretMap::default())
+                Ok(self
+                    .quarantine_corrupt_in(namespace, source_identity)?
+                    .unwrap_or_default())
             }
             Err(_) => Err(StorageError::serialization(
                 "decrypted secrets file is not a json object of strings",
@@ -408,7 +433,7 @@ impl Inner {
         &self,
         namespace: &secure::Namespace,
         corrupt_identity: secure::Identity,
-    ) -> Result<()> {
+    ) -> Result<Option<SecretMap>> {
         static QUARANTINE_COUNTER: AtomicU64 = AtomicU64::new(0);
         let name =
             secure::file_name(&self.path).map_err(|e| io_error("admit the secret name", e))?;
@@ -443,8 +468,43 @@ impl Inner {
             }
             #[cfg(test)]
             tests::after_quarantine_source_check();
-            match namespace.move_noreplace(name, &archived) {
-                Ok(()) => {}
+            let mut current = namespace
+                .open_file(name, false)
+                .map_err(|error| io_error("probe the corrupt secrets file", error))?;
+            if secure::identity(&current)
+                .map_err(|error| io_error("identify the corruption probe", error))?
+                != corrupt_identity
+            {
+                return Err(StorageError::conflict(
+                    "secrets file changed before corruption probe",
+                ));
+            }
+            let mut current_bytes = Vec::new();
+            current
+                .read_to_end(&mut current_bytes)
+                .map_err(|error| io_error("probe the corrupt secrets file", error))?;
+            namespace
+                .verify()
+                .map_err(|error| io_error("revalidate the corruption probe", error))?;
+            if let Ok(json) = crypto::decrypt(&self.key, &current_bytes)
+                && let Ok(map) = serde_json::from_slice(&json)
+            {
+                return Ok(Some(SecretMap(map)));
+            }
+            drop(current);
+            #[cfg(test)]
+            let move_result = if tests::fail_quarantine_move() {
+                Err(std::io::Error::other("injected quarantine move failure"))
+            } else {
+                namespace.move_noreplace(name, &archived)
+            };
+            #[cfg(not(test))]
+            let move_result = namespace.move_noreplace(name, &archived);
+            match move_result {
+                Ok(()) => {
+                    #[cfg(test)]
+                    tests::after_quarantine_move(name, &archived);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(io_error("quarantine the corrupt secrets file", error)),
             }
@@ -455,8 +515,6 @@ impl Inner {
                 .map_err(|error| io_error("identify the corruption archive", error))?
                 != corrupt_identity
             {
-                #[cfg(test)]
-                tests::after_quarantine_mismatch();
                 Self::restore_replaced_source(namespace, &archived, name)?;
                 return Err(StorageError::conflict(
                     "quarantined secrets file identity changed",
@@ -466,7 +524,7 @@ impl Inner {
             namespace
                 .sync()
                 .map_err(|error| io_error("persist the secrets quarantine", error))?;
-            return Ok(());
+            return Ok(None);
         }
         Err(StorageError::backend(
             "could not find an unused secrets quarantine name",
@@ -576,6 +634,23 @@ fn read_private(
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let namespace = open_parent(path, true)?;
     write_atomic_in(&namespace, path, bytes)
+}
+
+/// Sync the parent directory of `path` after publishing a file entry.
+///
+/// Unix filesystems use this to make a rename or link durable. Windows does
+/// not expose an equivalent directory sync through this driver, so this helper
+/// is available on Unix only.
+///
+/// # Errors
+///
+/// Returns an I/O error if the parent directory cannot be admitted or synced.
+#[cfg(unix)]
+pub fn sync_parent_dir(path: &Path) -> Result<()> {
+    let namespace = open_parent(path, false)?;
+    namespace
+        .sync()
+        .map_err(|error| io_error("sync the parent directory", error))
 }
 
 fn write_atomic_in(namespace: &secure::Namespace, path: &Path, bytes: &[u8]) -> Result<()> {
