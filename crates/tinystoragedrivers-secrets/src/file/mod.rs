@@ -613,6 +613,23 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     write_atomic_in(&namespace, path, bytes)
 }
 
+/// Sync the parent directory of `path` after publishing a file entry.
+///
+/// Unix filesystems use this to make a rename or link durable. Windows does
+/// not expose an equivalent directory sync through this driver, so this helper
+/// is available on Unix only.
+///
+/// # Errors
+///
+/// Returns an I/O error if the parent directory cannot be admitted or synced.
+#[cfg(unix)]
+pub fn sync_parent_dir(path: &Path) -> Result<()> {
+    let namespace = open_parent(path, false)?;
+    namespace
+        .sync()
+        .map_err(|error| io_error("sync the parent directory", error))
+}
+
 fn write_atomic_in(namespace: &secure::Namespace, path: &Path, bytes: &[u8]) -> Result<()> {
     let name = secure::file_name(path).map_err(|e| io_error("admit the secret name", e))?;
     match namespace.open_file(name, false) {
