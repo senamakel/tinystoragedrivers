@@ -316,6 +316,24 @@ async fn opt_in_recovery_does_not_quarantine_non_corruption_io_errors() {
     }));
 }
 
+#[tokio::test]
+async fn quarantine_move_failure_preserves_corrupt_source_and_fails_closed() {
+    let dir = TempDir::new("quarantine-move-failure");
+    let path = dir.0.join(SECRETS_FILE_NAME);
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+    store.set("healthy", b"credential").await.unwrap();
+    fs::write(&path, b"corrupt bytes").unwrap();
+
+    let _failure = quarantine_move_failure::Guard::install();
+    let lock = store.inner.lock().unwrap();
+    assert!(store.inner.read_map_in(&lock.namespace).is_err());
+    drop(lock);
+
+    assert_eq!(fs::read(path).unwrap(), b"corrupt bytes");
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
+}
+
 #[test]
 fn a_quarantine_name_collision_preserves_both_files() {
     let dir = TempDir::new("quarantine-collision");
@@ -1327,6 +1345,10 @@ pub(super) fn before_quarantine_archive_check(candidate: &Path) {
 
 pub(super) fn after_quarantine_source_check() {
     quarantine_source_pause::run();
+}
+
+pub(super) fn fail_quarantine_move() -> bool {
+    quarantine_move_failure::take()
 }
 
 pub(super) fn after_staged_publication_identity() {
