@@ -492,7 +492,15 @@ impl Inner {
                 return Ok(Some(SecretMap(map)));
             }
             drop(current);
-            match namespace.move_noreplace(name, &archived) {
+            #[cfg(test)]
+            let move_result = if tests::fail_quarantine_move() {
+                Err(std::io::Error::other("injected quarantine move failure"))
+            } else {
+                namespace.move_noreplace(name, &archived)
+            };
+            #[cfg(not(test))]
+            let move_result = namespace.move_noreplace(name, &archived);
+            match move_result {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(io_error("quarantine the corrupt secrets file", error)),
