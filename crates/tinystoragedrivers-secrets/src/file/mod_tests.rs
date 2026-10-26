@@ -642,6 +642,15 @@ fn write_atomic_replaces_an_existing_file() {
     assert_eq!(fs::read(&path).unwrap(), b"new");
 }
 
+#[cfg(unix)]
+#[test]
+fn sync_parent_dir_admits_and_syncs_the_file_parent() {
+    let dir = TempDir::new("sync-parent");
+    let path = dir.0.join("published");
+    fixture_write(&path, b"payload").unwrap();
+    sync_parent_dir(&path).unwrap();
+}
+
 #[test]
 fn a_key_published_concurrently_wins_and_the_temp_file_goes() {
     let dir = TempDir::new("key-race");
