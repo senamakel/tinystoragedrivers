@@ -13,8 +13,10 @@ async fn public_quarantine_recovers_corrupt_files_in_the_production_build() {
 
     assert_eq!(store.get("missing").await.unwrap(), None);
     assert!(!path.exists());
-    assert!(fs::read_dir(directory.path())
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt.")));
+    assert!(
+        fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt."))
+    );
 }
