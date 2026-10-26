@@ -81,7 +81,7 @@ winsafe = { version = "0.0.29", default-features = false, features = ["advapi", 
 [features]
 default = ["memory"]
 memory = []
-file = ["dep:tokio", "dep:chacha20poly1305", "dep:getrandom", "dep:serde_json", "dep:fs4", "dep:sha2_11", "dep:rustix", "dep:clack-private-fs", "dep:windows-permissions", "dep:winsafe", "dep:winapi-util", "dep:atomicwrites"]
+file = ["dep:tokio", "dep:chacha20poly1305", "dep:getrandom", "dep:serde", "dep:serde_json", "dep:fs4", "dep:sha2_11", "dep:rustix", "dep:clack-private-fs", "dep:windows-permissions", "dep:winsafe", "dep:winapi-util", "dep:atomicwrites"]
 document = ["dep:serde", "dep:serde_json", "dep:chacha20poly1305", "dep:getrandom", "dep:hkdf", "dep:sha2_11"]
 # REST transports with authenticated scope context, without heavyweight SDKs.
 kms-aws = ["document", "dep:tokio", "dep:reqwest", "dep:base64", "dep:bytes", "dep:hmac", "dep:chrono"]
