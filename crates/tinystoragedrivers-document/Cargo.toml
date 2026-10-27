@@ -35,8 +35,8 @@ futures-util = { version = "0.3", optional = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }
-tinystoragedrivers-testkit = { version = "2.1.1", path = "../tinystoragedrivers-testkit" }
-tinystoragedrivers-blob = { version = "2.1.1", path = "../tinystoragedrivers-blob", default-features = false, features = ["memory", "mongodb"] }
+tinystoragedrivers-testkit = { version = "2.1.2", path = "../tinystoragedrivers-testkit" }
+tinystoragedrivers-blob = { version = "2.1.2", path = "../tinystoragedrivers-blob", default-features = false, features = ["memory", "mongodb"] }
 
 [lints]
 workspace = true

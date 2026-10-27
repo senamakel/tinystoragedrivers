@@ -63,7 +63,7 @@ atomicwrites = { version = "0.4", optional = true }
 [dev-dependencies]
 # Disposable native ACL fixtures; drop removes the fixture after assertions.
 tempfile = { workspace = true }
-tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.1" }
+tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.2" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync", "net", "io-util"] }
 tinystoragedrivers-document = { workspace = true, features = ["memory", "sqlite", "file", "mongodb"] }
 tinystoragedrivers-connect = { workspace = true, features = ["sqlite", "file", "mongodb"] }
