@@ -89,7 +89,7 @@ ulid = "1"
 # Only the codec is needed, so the dictionary builder and legacy-format
 # decoders are left out. It links a C library but no database client or
 # transport, which is what the core's dependency check forbids.
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 # Documents and stream records are JSON values; `CollectionSpec` and the query
 # types serialize so a host can log or persist them.
 serde = { version = "1", features = ["derive"] }
