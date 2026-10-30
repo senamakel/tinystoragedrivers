@@ -1160,44 +1160,30 @@ async fn cleanup_refuses_a_source_held_by_a_cooperating_writer() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_stalled_cleanup_does_not_block_another_import_sharing_its_operation() {
-    let (_root, path, store, first) = setup();
-    let directory = path.parent().unwrap();
-    let second_path = directory.join("legacy-two");
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&second_path)
-            .unwrap();
-        file.write_all(b"second legacy fixture").unwrap();
-        file.sync_all().unwrap();
-    }
-    let second = FileImportSource::open(&second_path).unwrap();
-    let first_receipt = store
-        .prepare_file_import("shared-operation", "first", b"one", &first)
+async fn cleanup_quarantine_is_keyed_by_the_import_name_not_its_operation() {
+    // Intents are stored and looked up by name, so two imports may share an
+    // operation. An object parked at the operation-named quarantine (another
+    // import's stalled cleanup) must not block this import's cleanup.
+    let (_root, path, store, source) = setup();
+    let receipt = store
+        .prepare_file_import("shared-operation", "fixture", b"value", &source)
         .await
         .unwrap();
-    let second_receipt = store
-        .prepare_file_import("shared-operation", "second", b"two", &second)
-        .await
-        .unwrap();
-
-    // Occupy the first import's quarantine so its cleanup stops there.
-    let first_quarantine = PathBuf::from(format!(
+    let operation_named = PathBuf::from(format!(
         ".import-cleanup-{}",
-        digest(first_receipt.intent.name.as_bytes())
+        digest(receipt.intent.operation.as_bytes())
     ));
-    let mut occupied = first.0.namespace.create_file(&first_quarantine).unwrap();
-    occupied.write_all(b"another object").unwrap();
-    drop(occupied);
-    let e = store.cleanup_file_import(&first_receipt).await; eprintln!("FIRST {e:?}"); assert!(e.is_err());
+    let mut parked = source.0.namespace.create_file(&operation_named).unwrap();
+    parked.write_all(b"another import's capture").unwrap();
+    drop(parked);
 
     assert_eq!(
-        store.cleanup_file_import(&second_receipt).await.unwrap(),
+        store.cleanup_file_import(&receipt).await.unwrap(),
         CleanupAcknowledgment::RemovedAndDirectorySynced
     );
-    assert!(!second_path.exists());
-    assert!(path.exists());
+    assert!(!path.exists());
+    assert_eq!(
+        std::fs::read(path.parent().unwrap().join(&operation_named)).unwrap(),
+        b"another import's capture"
+    );
 }

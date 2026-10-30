@@ -663,7 +663,7 @@ fn cleanup_with_barrier(
         .map_err(|e| io_error("admit the cleanup source name", e))?;
     let quarantine = PathBuf::from(format!(
         ".import-cleanup-{}",
-        digest(receipt.operation.as_bytes())
+        digest(receipt.name.as_bytes())
     ));
     if intent.removing && absent(&source.namespace, &quarantine)? {
         if !absent(&source.namespace, original)? {
