@@ -17,6 +17,8 @@ const STALE_AFTER: Duration = Duration::from_secs(10);
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_POLL: Duration = Duration::from_millis(50);
 const REMOVE_RETRIES: usize = 5;
+/// A lock file holds one short `pid=` line; anything larger is not ours.
+const MAX_LOCK_BYTES: u64 = 4096;
 
 /// A lock file backed by local PID ownership.
 #[derive(Debug, Clone)]
@@ -72,7 +74,16 @@ impl LocalLeases {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
+        #[cfg(test)]
+        let created =
+            tests::injected_create_dir_error().map_or_else(|| fs::create_dir_all(parent), Err);
+        #[cfg(not(test))]
+        let created = fs::create_dir_all(parent);
+        match created {
+            Ok(()) => {}
+            Err(error) if read_fallback && is_unwritable_filesystem(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        }
         let in_process = in_process_lock(&self.lock_path);
         let started = Instant::now();
         let in_process_guard = loop {
@@ -108,7 +119,15 @@ impl LocalLeases {
                         let _ = retry_remove(|| fs::remove_file(&self.lock_path));
                         return Err(error);
                     }
-                    file.sync_all()?;
+                    #[cfg(test)]
+                    let sync_result =
+                        tests::injected_sync_error().map_or_else(|| file.sync_all(), Err);
+                    #[cfg(not(test))]
+                    let sync_result = file.sync_all();
+                    if let Err(error) = sync_result {
+                        let _ = retry_remove(|| fs::remove_file(&self.lock_path));
+                        return Err(error);
+                    }
                     return Ok(Some(LocalLeaseGuard {
                         lock_path: self.lock_path.clone(),
                         _in_process: in_process_guard,
@@ -140,6 +159,12 @@ impl LocalLeases {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
             Err(error) => return Err(error),
         };
+        // A FIFO or device at the lock path would block the read below past
+        // the acquisition timeout, and an oversized file is not a lock this
+        // crate wrote; neither is reclaimed, so the caller times out instead.
+        if metadata.len() > MAX_LOCK_BYTES || !(metadata.is_file() || metadata.is_dir()) {
+            return Ok(false);
+        }
         let age = metadata
             .modified()
             .ok()
@@ -155,9 +180,13 @@ impl LocalLeases {
             .strip_prefix("pid=")
             .and_then(|value| value.parse::<u32>().ok());
         let self_owned_leak = pid == Some(std::process::id());
-        let dead_stale_owner =
-            age.is_some_and(|age| age >= STALE_AFTER) && pid.is_some_and(|pid| !is_pid_alive(pid));
-        if !self_owned_leak && !dead_stale_owner {
+        let stale = age.is_some_and(|age| age >= STALE_AFTER);
+        // An owner that died between creating the file and writing its pid
+        // leaves it empty; after the stale window no live owner is still
+        // about to write it.
+        let abandoned_before_write = stale && contents.trim().is_empty();
+        let dead_stale_owner = stale && pid.is_some_and(|pid| !is_pid_alive(pid));
+        if !self_owned_leak && !dead_stale_owner && !abandoned_before_write {
             return Ok(false);
         }
         let current = match fs::metadata(&self.lock_path) {
@@ -217,7 +246,16 @@ pub fn is_pid_alive(pid: u32) -> bool {
         true,
         ProcessRefreshKind::nothing(),
     );
-    system.process(target).is_some()
+    if system.process(target).is_some() {
+        return true;
+    }
+    // sysinfo also drops a process whose `/proc/<pid>/stat` it cannot read,
+    // which is not proof of death; a surviving `/proc/<pid>` entry is.
+    #[cfg(target_os = "linux")]
+    if Path::new(&format!("/proc/{pid}")).exists() {
+        return true;
+    }
+    false
 }
 
 fn is_unwritable_filesystem(error: &io::Error) -> bool {

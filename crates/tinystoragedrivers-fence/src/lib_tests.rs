@@ -96,7 +96,19 @@ fn in_process_contention_waits_before_the_timeout_expires() {
 }
 
 #[test]
-fn a_fresh_lock_with_an_unparseable_dead_pid_is_not_stolen() {
+fn a_fresh_lock_with_an_unparseable_pid_is_not_stolen() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("profiles.lock");
+    fs::write(&path, "pid=not-a-number\n").unwrap();
+    let error = LocalLeases::new(&path)
+        .acquire_with_options(false, Duration::ZERO, Duration::ZERO)
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(fs::read_to_string(path).unwrap(), "pid=not-a-number\n");
+}
+
+#[test]
+fn a_fresh_lock_with_a_dead_pid_is_not_stolen_before_the_stale_window() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("profiles.lock");
     fs::write(&path, "pid=4294967295\n").unwrap();
@@ -105,6 +117,87 @@ fn a_fresh_lock_with_an_unparseable_dead_pid_is_not_stolen() {
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert_eq!(fs::read_to_string(path).unwrap(), "pid=4294967295\n");
+}
+
+fn age_lock(path: &Path) {
+    let file = OpenOptions::new().write(true).open(path).unwrap();
+    let old = std::time::SystemTime::now() - STALE_AFTER - Duration::from_secs(1);
+    file.set_times(fs::FileTimes::new().set_modified(old))
+        .unwrap();
+}
+
+#[test]
+fn an_empty_lock_left_by_a_dead_owner_is_reclaimed_after_the_stale_window() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("profiles.lock");
+    fs::write(&path, "").unwrap();
+    let fresh = LocalLeases::new(&path)
+        .acquire_with_options(false, Duration::ZERO, Duration::ZERO)
+        .unwrap_err();
+    assert_eq!(fresh.kind(), io::ErrorKind::TimedOut);
+
+    age_lock(&path);
+    let lease = LocalLeases::new(&path).acquire().unwrap();
+    drop(lease);
+    assert!(!path.exists());
+}
+
+#[test]
+fn an_oversized_lock_file_is_never_read_or_reclaimed() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("profiles.lock");
+    fs::write(
+        &path,
+        vec![b'x'; usize::try_from(MAX_LOCK_BYTES).unwrap() + 1],
+    )
+    .unwrap();
+    age_lock(&path);
+    let error = LocalLeases::new(&path)
+        .acquire_with_options(false, Duration::ZERO, Duration::ZERO)
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_the_lock_path_times_out_instead_of_blocking_the_read() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("profiles.lock");
+    let made = std::process::Command::new("mkfifo").arg(&path).status();
+    if !made.is_ok_and(|status| status.success()) {
+        return;
+    }
+    let error = LocalLeases::new(&path)
+        .acquire_with_options(false, Duration::ZERO, Duration::ZERO)
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn a_lock_directory_that_cannot_be_created_on_a_read_only_filesystem_falls_back_for_readers() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("missing").join("profiles.lock");
+    force_unwritable_dir();
+    assert!(
+        LocalLeases::new(&path)
+            .acquire_for_read()
+            .unwrap()
+            .is_none()
+    );
+    force_unwritable_dir();
+    let error = LocalLeases::new(&path).acquire().unwrap_err();
+    assert!(is_unwritable_filesystem(&error));
+}
+
+#[test]
+fn a_lock_sync_failure_removes_the_lock_file() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("profiles.lock");
+    force_sync_error();
+    let error = LocalLeases::new(&path).acquire().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert!(!path.exists());
 }
 
 #[test]
@@ -151,6 +244,8 @@ fn pid_liveness_is_conservative_for_the_current_process() {
 thread_local! {
     static CREATE_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static WRITE_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DIR_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SYNC_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(super) fn injected_create_error() -> Option<io::Error> {
@@ -175,4 +270,28 @@ pub(super) fn injected_write_error() -> Option<io::Error> {
 
 fn force_write_error() {
     WRITE_ERROR.with(|value| value.set(true));
+}
+
+pub(super) fn injected_sync_error() -> Option<io::Error> {
+    SYNC_ERROR.with(|value| {
+        value
+            .replace(false)
+            .then(|| io::Error::from(io::ErrorKind::Other))
+    })
+}
+
+fn force_sync_error() {
+    SYNC_ERROR.with(|value| value.set(true));
+}
+
+pub(super) fn injected_create_dir_error() -> Option<io::Error> {
+    DIR_ERROR.with(|value| {
+        value
+            .replace(false)
+            .then(|| io::Error::from(io::ErrorKind::ReadOnlyFilesystem))
+    })
+}
+
+fn force_unwritable_dir() {
+    DIR_ERROR.with(|value| value.set(true));
 }
