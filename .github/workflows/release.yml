@@ -221,9 +221,17 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The workflow's own commit carries the asset helper; a `current`
+      # dispatch selects an older tag that may predate it.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
+          path: tagged-source
           persist-credentials: false
 
       # Consumers pin the git revision; the source archive and its checksum
@@ -235,20 +243,24 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+          # Created as a draft so a failed asset step never leaves a published
+          # release without its archive and checksum; it is published last.
+          # `gh release list` includes drafts, which `gh release view` may not.
+          if gh release list --repo "$REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' | grep -Fxq "$RELEASE_TAG"; then
             echo "Release ${RELEASE_TAG} already exists."
           else
             gh release create "$RELEASE_TAG" \
               --repo "$REPOSITORY" \
               --verify-tag \
               --title "$RELEASE_TAG" \
+              --draft \
               --generate-notes
           fi
 
       - name: Build source archive and checksum manifest
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-        run: python3 .github/scripts/create-release-assets.py --tag "$RELEASE_TAG" --output-dir target/release-assets
+        run: python3 .github/scripts/create-release-assets.py --repository tagged-source --tag "$RELEASE_TAG" --output-dir target/release-assets
 
       - name: Upload source archive and checksum manifest
         env:
@@ -262,3 +274,10 @@ jobs:
             target/release-assets/checksum.toml \
             --repo "$REPOSITORY" \
             --clobber
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh release edit "$RELEASE_TAG" --repo "$REPOSITORY" --draft=false
