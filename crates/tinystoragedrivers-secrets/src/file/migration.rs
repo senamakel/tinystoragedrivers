@@ -306,6 +306,16 @@ impl EncryptedFileSecrets {
     }
 }
 
+/// The cleanup quarantine for one import: scoped by its name and by the exact
+/// source object, so imports that share a source directory never share one.
+fn quarantine_name(intent: &Intent) -> PathBuf {
+    let scope = format!(
+        "{}:{}:{}",
+        intent.name, intent.source_identity[0], intent.source_identity[1]
+    );
+    PathBuf::from(format!(".import-cleanup-{}", digest(scope.as_bytes())))
+}
+
 fn digest(bytes: &[u8]) -> String {
     crypto::hex_encode(&Sha256::digest(bytes))
 }
@@ -661,10 +671,7 @@ fn cleanup_with_barrier(
     }
     let original = secure::file_name(&source.path)
         .map_err(|e| io_error("admit the cleanup source name", e))?;
-    let quarantine = PathBuf::from(format!(
-        ".import-cleanup-{}",
-        digest(receipt.name.as_bytes())
-    ));
+    let quarantine = quarantine_name(receipt);
     if intent.removing && absent(&source.namespace, &quarantine)? {
         if !absent(&source.namespace, original)? {
             return Err(StorageError::conflict(

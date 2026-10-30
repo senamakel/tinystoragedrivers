@@ -471,10 +471,7 @@ async fn conflicting_quarantines_preserve_every_unverified_object() {
         .prepare_file_import("quarantine-conflict", "fixture", b"value", &source)
         .await
         .unwrap();
-    let quarantine = PathBuf::from(format!(
-        ".import-cleanup-{}",
-        digest(receipt.intent.name.as_bytes())
-    ));
+    let quarantine = quarantine_name(&receipt.intent);
     let mut file = source.0.namespace.create_file(&quarantine).unwrap();
     file.write_all(b"another object").unwrap();
     file.sync_all().unwrap();
@@ -894,10 +891,7 @@ async fn absent_cleanup_names_do_not_acknowledge_a_still_linked_captured_object(
         .prepare_file_import("moved-capture", "fixture", b"value", &source)
         .await
         .unwrap();
-    let quarantine = PathBuf::from(format!(
-        ".import-cleanup-{}",
-        digest(receipt.intent.name.as_bytes())
-    ));
+    let quarantine = quarantine_name(&receipt.intent);
     // Reproduce the persisted pre-unlink state, without claiming unlink occurred.
     capture_source(&receipt.source, Path::new("legacy"), &quarantine).unwrap();
     let lock = store.inner.lock().unwrap();

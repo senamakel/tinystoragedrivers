@@ -170,8 +170,17 @@ impl LocalLeases {
             .ok()
             .and_then(|modified| modified.elapsed().ok());
         let mut contents = String::new();
-        match File::open(&self.lock_path).and_then(|mut file| file.read_to_string(&mut contents)) {
-            Ok(_) => {}
+        match open_lock_for_read(&self.lock_path).and_then(|mut file| {
+            // The path can change type between the metadata check and the
+            // open, so the handle itself is checked before it is read.
+            if file.metadata()?.is_file() {
+                file.read_to_string(&mut contents).map(|_| ())
+            } else {
+                Err(io::Error::from(io::ErrorKind::InvalidInput))
+            }
+        }) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => return Ok(false),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
             Err(error) => return Err(error),
         }
@@ -263,6 +272,18 @@ fn is_unwritable_filesystem(error: &io::Error) -> bool {
         error.kind(),
         io::ErrorKind::StorageFull | io::ErrorKind::ReadOnlyFilesystem
     )
+}
+
+/// Open for reading without blocking on a FIFO swapped in at the lock path.
+fn open_lock_for_read(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    options.open(path)
 }
 
 fn create_lock_file(path: &Path) -> io::Result<File> {

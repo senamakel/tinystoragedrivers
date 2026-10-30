@@ -3858,6 +3858,7 @@ dependencies = [
 name = "tinystoragedrivers-fence"
 version = "2.1.2"
 dependencies = [
+ "libc",
  "sysinfo",
  "tempfile",
 ]
