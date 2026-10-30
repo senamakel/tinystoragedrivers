@@ -86,16 +86,24 @@ impl FileImportSource {
         let namespace_identity = namespace
             .identity()
             .map_err(|e| io_error("inspect the import namespace identity", e))?;
-        let mut bytes = Zeroizing::new(Vec::new());
-        (&mut file)
-            .take(1_048_577)
-            .read_to_end(&mut bytes)
-            .map_err(|e| io_error("read the import source", e))?;
-        if bytes.len() > 1_048_576 {
+        // Allocate the whole bounded buffer before any plaintext arrives:
+        // a growing Vec would free earlier copies of it without zeroizing.
+        let mut bytes = Zeroizing::new(vec![0_u8; 1_048_577]);
+        let mut used = 0;
+        while used < bytes.len() {
+            match file.read(&mut bytes[used..]) {
+                Ok(0) => break,
+                Ok(count) => used += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(io_error("read the import source", error)),
+            }
+        }
+        if used > 1_048_576 {
             return Err(StorageError::invalid_input(
                 "import source exceeds the bounded file size",
             ));
         }
+        bytes.truncate(used);
         namespace
             .verify()
             .map_err(|e| io_error("verify the import namespace", e))?;
@@ -220,7 +228,7 @@ impl EncryptedFileSecrets {
 
     /// Conditionally remove the exact source of a verified acknowledged import.
     ///
-    /// Unix captures the source under an operation-specific quarantine before
+    /// Unix captures the source under a quarantine named for the import intent before
     /// verifying identity again. Unsupported Windows persistence retains source.
     /// Source backup remains encrypted in the ledger after every outcome.
     ///
@@ -655,7 +663,7 @@ fn cleanup_with_barrier(
         .map_err(|e| io_error("admit the cleanup source name", e))?;
     let quarantine = PathBuf::from(format!(
         ".import-cleanup-{}",
-        digest(receipt.operation.as_bytes())
+        digest(receipt.name.as_bytes())
     ));
     if intent.removing && absent(&source.namespace, &quarantine)? {
         if !absent(&source.namespace, original)? {
@@ -718,14 +726,27 @@ fn cleanup_with_barrier(
 fn capture_source(source: &Source, original: &Path, quarantine: &Path) -> Result<()> {
     match source.namespace.create_file(quarantine) {
         Ok(file) => {
-            drop(file);
             if let Err(error) = verify_source(source, original) {
-                source
+                // Unlink only the reservation this call created: a name that
+                // now resolves to another object is left for its owner.
+                let reserved = secure::identity(&file)
+                    .map_err(|e| io_error("identify the cleanup reservation", e))?;
+                drop(file);
+                let still_reserved = source
                     .namespace
-                    .remove(quarantine)
-                    .map_err(|e| io_error("remove unused cleanup reservation", e))?;
+                    .open_file(quarantine, false)
+                    .ok()
+                    .and_then(|named| secure::identity(&named).ok())
+                    == Some(reserved);
+                if still_reserved {
+                    source
+                        .namespace
+                        .remove(quarantine)
+                        .map_err(|e| io_error("remove unused cleanup reservation", e))?;
+                }
                 return Err(error);
             }
+            drop(file);
             source
                 .namespace
                 .replace(original, quarantine)

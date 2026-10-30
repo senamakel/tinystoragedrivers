@@ -405,7 +405,10 @@ impl Inner {
         if blob.is_empty() {
             return Ok(SecretMap::default());
         }
-        let json = match crypto::decrypt(&self.key, &blob) {
+        let decrypted = crypto::decrypt(&self.key, &blob);
+        // The quarantine probe re-reads the file; keep one ciphertext copy live.
+        drop(blob);
+        let json = match decrypted {
             Ok(json) => json,
             Err(_error) if self.corrupt_file_policy == CorruptFilePolicy::QuarantineAndContinue => {
                 return Ok(self

@@ -473,7 +473,7 @@ async fn conflicting_quarantines_preserve_every_unverified_object() {
         .unwrap();
     let quarantine = PathBuf::from(format!(
         ".import-cleanup-{}",
-        digest(receipt.intent.operation.as_bytes())
+        digest(receipt.intent.name.as_bytes())
     ));
     let mut file = source.0.namespace.create_file(&quarantine).unwrap();
     file.write_all(b"another object").unwrap();
@@ -896,7 +896,7 @@ async fn absent_cleanup_names_do_not_acknowledge_a_still_linked_captured_object(
         .unwrap();
     let quarantine = PathBuf::from(format!(
         ".import-cleanup-{}",
-        digest(receipt.intent.operation.as_bytes())
+        digest(receipt.intent.name.as_bytes())
     ));
     // Reproduce the persisted pre-unlink state, without claiming unlink occurred.
     capture_source(&receipt.source, Path::new("legacy"), &quarantine).unwrap();
@@ -1052,7 +1052,7 @@ async fn writable_source_mutation_at_the_ledger_boundary_retains_changed_materia
         .unwrap();
     let quarantine = path.with_file_name(format!(
         ".import-cleanup-{}",
-        digest(receipt.intent.operation.as_bytes())
+        digest(receipt.intent.name.as_bytes())
     ));
     let _pause = LedgerPause::install(move || {
         writer.set_len(0).unwrap();
@@ -1095,7 +1095,7 @@ async fn quarantine_replacement_at_the_ledger_boundary_retains_both_objects() {
         .unwrap();
     let quarantine = path.with_file_name(format!(
         ".import-cleanup-{}",
-        digest(receipt.intent.operation.as_bytes())
+        digest(receipt.intent.name.as_bytes())
     ));
     let retained = path.with_file_name("retained-captured-original");
     let q = quarantine.clone();
