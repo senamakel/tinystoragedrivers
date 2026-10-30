@@ -1044,10 +1044,7 @@ async fn writable_source_mutation_at_the_ledger_boundary_retains_changed_materia
         .prepare_file_import("ledger-writer", "fixture", b"value", &source)
         .await
         .unwrap();
-    let quarantine = path.with_file_name(format!(
-        ".import-cleanup-{}",
-        digest(receipt.intent.name.as_bytes())
-    ));
+    let quarantine = path.with_file_name(quarantine_name(&receipt.intent));
     let _pause = LedgerPause::install(move || {
         writer.set_len(0).unwrap();
         writer.write_all(b"producer changed after capture").unwrap();
@@ -1087,10 +1084,7 @@ async fn quarantine_replacement_at_the_ledger_boundary_retains_both_objects() {
         .prepare_file_import("ledger-replacement", "fixture", b"value", &source)
         .await
         .unwrap();
-    let quarantine = path.with_file_name(format!(
-        ".import-cleanup-{}",
-        digest(receipt.intent.name.as_bytes())
-    ));
+    let quarantine = path.with_file_name(quarantine_name(&receipt.intent));
     let retained = path.with_file_name("retained-captured-original");
     let q = quarantine.clone();
     let original = retained.clone();
@@ -1180,4 +1174,29 @@ async fn cleanup_quarantine_is_keyed_by_the_import_name_not_its_operation() {
         std::fs::read(path.parent().unwrap().join(&operation_named)).unwrap(),
         b"another import's capture"
     );
+}
+
+#[test]
+fn quarantine_names_differ_per_import_name_and_source_object() {
+    let (_root, _path, _store, source) = setup();
+    let base = Intent {
+        operation: "operation".to_string(),
+        name: "fixture".to_string(),
+        live_instance: String::new(),
+        source_identity: [1, 2],
+        namespace_identity: [3, 4],
+        source_hash: String::new(),
+        value_hash: String::new(),
+        source_backup: String::new(),
+        cleaned: false,
+        removing: false,
+    };
+    let _ = source;
+    let mut other_name = base.clone();
+    other_name.name = "other".to_string();
+    let mut other_source = base.clone();
+    other_source.source_identity = [1, 9];
+    assert_ne!(quarantine_name(&base), quarantine_name(&other_name));
+    assert_ne!(quarantine_name(&base), quarantine_name(&other_source));
+    assert_eq!(quarantine_name(&base), quarantine_name(&base.clone()));
 }
