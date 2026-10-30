@@ -1178,7 +1178,6 @@ async fn cleanup_quarantine_is_keyed_by_the_import_name_not_its_operation() {
 
 #[test]
 fn quarantine_names_differ_per_import_name_and_source_object() {
-    let (_root, _path, _store, source) = setup();
     let base = Intent {
         operation: "operation".to_string(),
         name: "fixture".to_string(),
@@ -1191,7 +1190,6 @@ fn quarantine_names_differ_per_import_name_and_source_object() {
         cleaned: false,
         removing: false,
     };
-    let _ = source;
     let mut other_name = base.clone();
     other_name.name = "other".to_string();
     let mut other_source = base.clone();
