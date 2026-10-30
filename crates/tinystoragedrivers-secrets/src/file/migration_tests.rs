@@ -1157,3 +1157,47 @@ async fn cleanup_refuses_a_source_held_by_a_cooperating_writer() {
         CleanupAcknowledgment::RemovedAndDirectorySynced
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_cleanup_does_not_block_another_import_sharing_its_operation() {
+    let (_root, path, store, first) = setup();
+    let directory = path.parent().unwrap();
+    let second_path = directory.join("legacy-two");
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&second_path)
+            .unwrap();
+        file.write_all(b"second legacy fixture").unwrap();
+        file.sync_all().unwrap();
+    }
+    let second = FileImportSource::open(&second_path).unwrap();
+    let first_receipt = store
+        .prepare_file_import("shared-operation", "first", b"one", &first)
+        .await
+        .unwrap();
+    let second_receipt = store
+        .prepare_file_import("shared-operation", "second", b"two", &second)
+        .await
+        .unwrap();
+
+    // Occupy the first import's quarantine so its cleanup stops there.
+    let first_quarantine = PathBuf::from(format!(
+        ".import-cleanup-{}",
+        digest(first_receipt.intent.name.as_bytes())
+    ));
+    let mut occupied = first.0.namespace.create_file(&first_quarantine).unwrap();
+    occupied.write_all(b"another object").unwrap();
+    drop(occupied);
+    assert!(store.cleanup_file_import(&first_receipt).await.is_err());
+
+    assert_eq!(
+        store.cleanup_file_import(&second_receipt).await.unwrap(),
+        CleanupAcknowledgment::RemovedAndDirectorySynced
+    );
+    assert!(!second_path.exists());
+    assert!(path.exists());
+}
