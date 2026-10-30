@@ -1192,7 +1192,7 @@ async fn a_stalled_cleanup_does_not_block_another_import_sharing_its_operation()
     let mut occupied = first.0.namespace.create_file(&first_quarantine).unwrap();
     occupied.write_all(b"another object").unwrap();
     drop(occupied);
-    assert!(store.cleanup_file_import(&first_receipt).await.is_err());
+    let e = store.cleanup_file_import(&first_receipt).await; eprintln!("FIRST {e:?}"); assert!(e.is_err());
 
     assert_eq!(
         store.cleanup_file_import(&second_receipt).await.unwrap(),
